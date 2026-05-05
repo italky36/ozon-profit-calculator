@@ -1,0 +1,1 @@
+ALTER TABLE `products` ADD `ozon_sku` integer;

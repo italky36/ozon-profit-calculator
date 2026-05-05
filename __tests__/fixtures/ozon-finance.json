@@ -1,0 +1,70 @@
+{
+  "result": {
+    "operations": [
+      {
+        "operation_id": 1001,
+        "operation_type": "OperationAgentDeliveredToCustomer",
+        "operation_type_name": "Доставка покупателю",
+        "operation_date": "2026-04-15T10:00:00.000Z",
+        "posting": { "posting_number": "0001-0001-1" },
+        "items": [{ "name": "Кофемашина-1", "sku": 11, "offer_id": "OFFER-1" }],
+        "amount": 337000,
+        "type": "orders",
+        "accruals_for_sale": 337000,
+        "sale_commission": -16850
+      },
+      {
+        "operation_id": 1002,
+        "operation_type": "MarketplaceServiceItemDelivToCustomer",
+        "operation_date": "2026-04-15T10:01:00.000Z",
+        "posting": { "posting_number": "0001-0001-1" },
+        "items": [{ "offer_id": "OFFER-1" }],
+        "amount": -3400,
+        "type": "services"
+      },
+      {
+        "operation_id": 1003,
+        "operation_type": "MarketplaceServiceItemDirectFlowTrans",
+        "operation_date": "2026-04-15T10:02:00.000Z",
+        "items": [{ "offer_id": "OFFER-1" }],
+        "amount": -1200,
+        "type": "services"
+      },
+      {
+        "operation_id": 1004,
+        "operation_type": "OperationMarketplaceServiceStorage",
+        "operation_date": "2026-04-16T08:00:00.000Z",
+        "items": [{ "offer_id": "OFFER-1" }],
+        "amount": -150,
+        "type": "services"
+      },
+      {
+        "operation_id": 1005,
+        "operation_type": "ClientReturnAgentOperation",
+        "operation_date": "2026-04-20T11:30:00.000Z",
+        "posting": { "posting_number": "0001-0002-1" },
+        "items": [{ "offer_id": "OFFER-2" }],
+        "amount": -5000,
+        "type": "returns"
+      },
+      {
+        "operation_id": 1006,
+        "operation_type": "MarketplaceRedistributionOfAcquiringOperation",
+        "operation_date": "2026-04-21T09:00:00.000Z",
+        "items": [],
+        "amount": -250,
+        "type": "services"
+      },
+      {
+        "operation_id": 1007,
+        "operation_type": "MarketplaceMarketingActionCostOperation",
+        "operation_date": "2026-04-22T09:00:00.000Z",
+        "items": [{ "offer_id": "OFFER-1" }],
+        "amount": -100,
+        "type": "services"
+      }
+    ],
+    "page_count": 1,
+    "row_count": 7
+  }
+}

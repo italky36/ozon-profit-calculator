@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Калькулятор прибыли продавца Ozon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Golos Text', system-ui, sans-serif;
+    background: #F3F5FA;
+    color: #0D1929;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-track { background: #F3F5FA; }
+  ::-webkit-scrollbar-thumb { background: #C8D0E0; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #A0AABB; }
+
+  /* Mobile tweaks */
+  @media (max-width: 640px) {
+    .app-header { padding: 12px 16px !important; }
+    .app-title { font-size: 16px !important; }
+    .app-subtitle { font-size: 12px !important; }
+    .tab-bar { padding: 0 16px !important; }
+    .main-content { padding: 12px 16px 80px !important; }
+    .kpi-cards { gap: 8px !important; }
+  }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script type="text/babel" src="components/data.jsx"></script>
+<script type="text/babel" src="components/ui.jsx"></script>
+<script type="text/babel" src="components/tabs.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "showChart": true,
+  "density": "normal",
+  "accentColor": "#005BFF",
+  "darkHeader": false
+}/*EDITMODE-END*/;
+
+const App = () => {
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  const [activeTab, setActiveTab] = React.useState('calculator');
+  const [products, setProducts] = React.useState(INITIAL_PRODUCTS);
+  const [globalSettings, setGlobalSettings] = React.useState(INITIAL_GLOBAL);
+
+  const accent = tweaks.accentColor || '#005BFF';
+  const headerBg = tweaks.darkHeader ? '#001A4D' : '#fff';
+  const headerColor = tweaks.darkHeader ? '#fff' : '#0D1929';
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+
+      {/* ─── Header ─── */}
+      <header className="app-header" style={{
+        background: headerBg,
+        borderBottom: tweaks.darkHeader ? 'none' : '1px solid #E2E8F0',
+        padding: '16px 24px',
+        boxShadow: '0 1px 8px rgba(0,0,0,0.06)',
+        position: 'sticky', top: 0, zIndex: 100,
+      }}>
+        <div style={{ maxWidth: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Ozon logo mark */}
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+              <rect width="32" height="32" rx="8" fill={accent} />
+              <text x="16" y="22" textAnchor="middle" fill="white"
+                fontFamily="Golos Text, sans-serif" fontWeight="800" fontSize="14">Oz</text>
+            </svg>
+            <div>
+              <div className="app-title" style={{ fontSize: 18, fontWeight: 800, color: headerColor, lineHeight: 1.2 }}>
+                Калькулятор прибыли продавца Ozon
+              </div>
+              <div className="app-subtitle" style={{ fontSize: 13, color: tweaks.darkHeader ? '#A0B4D6' : '#8B95A8', marginTop: 2 }}>
+                Сравнение{' '}
+                {['FBO', 'FBS', 'realFBS'].map((ch, i) => (
+                  <React.Fragment key={ch}>
+                    <span style={{ color: Object.values(CHANNEL_COLORS)[i].text, fontWeight: 600 }}>{ch}</span>
+                    {i < 2 && ' / '}
+                  </React.Fragment>
+                ))}
+                {' '}по марже и налогам — несколько товаров
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* ─── Tab Bar ─── */}
+      <div className="tab-bar" style={{
+        background: '#fff',
+        borderBottom: '1px solid #E2E8F0',
+        padding: '0 24px',
+      }}>
+        <div style={{ maxWidth: '100%', display: 'flex', gap: 0 }}>
+          {[
+            { id: 'calculator', label: '📦 Калькулятор' },
+            { id: 'finance', label: '💰 Финансы' },
+          ].map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              style={{
+                padding: '14px 20px',
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: 'inherit', fontSize: 14, fontWeight: activeTab === tab.id ? 700 : 500,
+                color: activeTab === tab.id ? accent : '#5A6778',
+                borderBottom: activeTab === tab.id ? `2.5px solid ${accent}` : '2.5px solid transparent',
+                transition: 'all .15s',
+                marginBottom: -1,
+              }}
+              onMouseEnter={e => { if (activeTab !== tab.id) e.currentTarget.style.color = accent; }}
+              onMouseLeave={e => { if (activeTab !== tab.id) e.currentTarget.style.color = '#5A6778'; }}
+            >{tab.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* ─── Content ─── */}
+      <main className="main-content" style={{
+        flex: 1, padding: tweaks.density === 'compact' ? '12px 24px' : '20px 24px 60px',
+        maxWidth: '100%', width: '100%',
+        display: 'flex', flexDirection: 'column',
+        gap: tweaks.density === 'compact' ? 10 : 16,
+      }}>
+        {activeTab === 'calculator'
+          ? <ProductsTab
+              products={products}
+              setProducts={setProducts}
+              globalSettings={globalSettings}
+              setGlobalSettings={setGlobalSettings}
+              tweaks={tweaks}
+            />
+          : <FinanceTab />
+        }
+      </main>
+
+      {/* ─── Tweaks Panel ─── */}
+      <TweaksPanel>
+        <TweakSection label="Внешний вид" />
+        <TweakColor label="Акцентный цвет" value={tweaks.accentColor} onChange={v => setTweak('accentColor', v)} />
+        <TweakToggle label="Тёмная шапка" value={tweaks.darkHeader} onChange={v => setTweak('darkHeader', v)} />
+        <TweakSection label="Таблица" />
+        <TweakToggle label="Мини-график маржи" value={tweaks.showChart} onChange={v => setTweak('showChart', v)} />
+        <TweakRadio label="Плотность" value={tweaks.density} onChange={v => setTweak('density', v)} options={[
+          { value: 'normal', label: 'Обычно' },
+          { value: 'compact', label: 'Компакт' },
+        ]} />
+      </TweaksPanel>
+    </div>
+  );
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+
+</body>
+</html>

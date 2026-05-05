@@ -1,0 +1,12 @@
+{
+  "damageRate": 0.01,
+  "taxSystem": "УСН Доходы минус расходы",
+  "usnIncomeRate": 0.06,
+  "usnIncomeMinusRate": 0.07,
+  "ausnIncomeRate": 0.08,
+  "ausnIncomeMinusRate": 0.2,
+  "osnoOooRate": 0.25,
+  "osnoIpAnnualIncome": 2400000,
+  "npdRate": 0.04,
+  "partyExtraExpenses": 100
+}

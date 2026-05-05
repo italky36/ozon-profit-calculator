@@ -1,0 +1,689 @@
+:root {
+  --bg: #F3F5FA;
+  --panel: #ffffff;
+  --text: #0D1929;
+  --muted: #8B95A8;
+  --muted-2: #5A6778;
+  --border: #E2E8F0;
+  --border-soft: #E9EDF5;
+
+  --accent: #005BFF;
+  --accent-hover: #0050E6;
+  --accent-bg: #EBF2FF;
+
+  --ch-fbo-bg: #EBF2FF;
+  --ch-fbo-text: #005BFF;
+  --ch-fbo-border: #B8D0FF;
+  --ch-fbs-bg: #E6F9EF;
+  --ch-fbs-text: #00A859;
+  --ch-fbs-border: #A3E6C3;
+  --ch-real-bg: #FFF3E6;
+  --ch-real-text: #FF6A00;
+  --ch-real-border: #FFD0A3;
+
+  --ok: #00A859;
+  --warn: #F59E0B;
+  --err: #CC3B3B;
+  --info: #8B5CF6;
+
+  --header-bg: #ffffff;
+  --header-text: #0D1929;
+  --header-subtitle: #8B95A8;
+
+  --gap: 16px;
+  --pad-content: 20px 24px 60px;
+}
+
+:root.dark-header {
+  --header-bg: #001A4D;
+  --header-text: #ffffff;
+  --header-subtitle: #A0B4D6;
+}
+
+:root.density-compact {
+  --gap: 10px;
+  --pad-content: 12px 24px;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar { height: 6px; width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #C8D0E0; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #A0AABB; }
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.muted { color: var(--muted); }
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.app-header {
+  background: var(--header-bg);
+  color: var(--header-text);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.06);
+}
+:root.dark-header .app-header { border-bottom: none; }
+
+.app-header-inner { display: flex; align-items: center; gap: 10px; }
+.app-title { font-size: 18px; font-weight: 800; line-height: 1.2; color: var(--header-text); }
+.app-subtitle { font-size: 13px; color: var(--header-subtitle); margin-top: 2px; }
+
+/* ── Tab bar ─────────────────────────────────────────────────────────────── */
+.tab-bar {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 64px;
+  z-index: 90;
+}
+.tab-list { display: flex; gap: 0; }
+.tab {
+  padding: 14px 20px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted-2);
+  border-bottom: 2.5px solid transparent;
+  margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.tab:hover { color: var(--accent); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+.tab-bar-actions { display: flex; align-items: center; gap: 8px; }
+
+/* ── Main content ────────────────────────────────────────────────────────── */
+.main-content {
+  flex: 1;
+  padding: var(--pad-content);
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+  padding: 16px 20px;
+}
+
+.section-title {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, opacity .15s;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-secondary {
+  background: #fff;
+  color: var(--accent);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.btn-secondary:hover { background: var(--accent-bg); border-color: var(--accent); }
+
+.btn-icon {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background .15s;
+  font-family: inherit;
+}
+.btn-icon:hover { background: var(--accent-bg); border-color: var(--accent); }
+.btn-icon.danger { color: var(--err); }
+.btn-icon.danger:hover { background: #FEEFEF; border-color: #FFB3B3; }
+
+.icon-button {
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--muted-2);
+  transition: all .15s;
+}
+.icon-button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ── Inputs ──────────────────────────────────────────────────────────────── */
+input[type="text"], input[type="number"], input[type="date"], input[type="password"],
+select, textarea, input:not([type]) {
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  background: #FAFBFD;
+  color: var(--text);
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  background: #fff;
+}
+input[disabled], input[readonly], select[disabled] {
+  background: #F3F5FA;
+  color: var(--muted-2);
+  cursor: not-allowed;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+label.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+label.checkbox input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* ── Field grid (для GlobalSettings, etc) ───────────────────────────────── */
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+.grid > label { min-width: 120px; flex: 0 0 auto; }
+.grid > label.span2 { min-width: 200px; }
+
+/* ── Fieldset (для ProductForm) ──────────────────────────────────────────── */
+fieldset {
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 12px 14px 16px;
+  margin: 0 0 12px;
+}
+fieldset legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── KPI strip ───────────────────────────────────────────────────────────── */
+.kpi-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kpi-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.kpi-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.kpi-card {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+  flex: 1 1 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 3px solid var(--accent);
+}
+.kpi-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.kpi-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+.kpi-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ── Channel pills / badges ─────────────────────────────────────────────── */
+.ch-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+.ch-pill {
+  padding: 5px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border: 2px solid var(--border);
+  background: #fff;
+  color: var(--muted-2);
+  transition: all .15s;
+}
+.ch-pill:hover { color: var(--accent); border-color: var(--accent-bg); }
+.ch-pill.active.all { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+.ch-pill.active.fbo { border-color: var(--ch-fbo-text); background: var(--ch-fbo-bg); color: var(--ch-fbo-text); }
+.ch-pill.active.fbs { border-color: var(--ch-fbs-text); background: var(--ch-fbs-bg); color: var(--ch-fbs-text); }
+.ch-pill.active.real { border-color: var(--ch-real-text); background: var(--ch-real-bg); color: var(--ch-real-text); }
+
+.ch-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.ch-badge.fbo { background: var(--ch-fbo-bg); color: var(--ch-fbo-text); border: 1px solid var(--ch-fbo-border); }
+.ch-badge.fbs { background: var(--ch-fbs-bg); color: var(--ch-fbs-text); border: 1px solid var(--ch-fbs-border); }
+.ch-badge.real { background: var(--ch-real-bg); color: var(--ch-real-text); border: 1px solid var(--ch-real-border); }
+
+/* ── EditableCell ────────────────────────────────────────────────────────── */
+.editable {
+  cursor: text;
+  padding: 2px 4px;
+  border-radius: 4px;
+  display: inline-block;
+  min-width: 50px;
+  border-bottom: 1.5px dashed var(--ch-fbo-border);
+  transition: background .1s;
+}
+.editable:hover { background: var(--accent-bg); }
+.editable.locked {
+  cursor: default;
+  border-bottom: none;
+  display: inline-block;
+}
+.editable.locked:hover { background: transparent; }
+.editable-input {
+  width: 100px;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  outline: none;
+  padding: 2px 6px;
+  font-size: 13px;
+  font-family: inherit;
+  background: #F0F5FF;
+}
+
+/* ── Oz badge (для импортированных строк) ───────────────────────────────── */
+.oz-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+  font-size: 12px;
+  color: var(--muted);
+}
+.oz-icon { flex-shrink: 0; }
+
+/* ── Collapsible ─────────────────────────────────────────────────────────── */
+.collapsible {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+}
+.collapsible-header {
+  width: 100%;
+  background: none;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.collapsible-chevron { transition: transform .2s; flex-shrink: 0; }
+.collapsible-chevron.open { transform: rotate(90deg); }
+.collapsible-title { font-weight: 700; font-size: 14px; color: var(--text); }
+.collapsible-badge {
+  margin-left: 4px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-radius: 20px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.collapsible-body { padding: 0 20px 20px; }
+
+/* ── Products table ─────────────────────────────────────────────────────── */
+.products-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.products-toolbar-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.products-toolbar-actions { display: flex; gap: 8px; }
+.toolbar-legend {
+  font-size: 11px;
+  color: #A0AABB;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.products-scroll {
+  /* Constrain height so the horizontal scrollbar is always reachable inside
+     the viewport — without this, on narrow screens the user has to scroll
+     to the very bottom of the page (past every row) just to find it.
+     The 220px subtracts approx (app header + tab bar + KPI strip + filters). */
+  max-height: calc(100vh - 220px);
+  min-height: 320px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Allow finger panning in both axes inside this container — without this
+     some mobile browsers default to vertical-only and ignore horizontal
+     drags, or pass them up to the page. */
+  touch-action: pan-x pan-y;
+  /* Don't let momentum scroll chain to the document when we hit the edge. */
+  overscroll-behavior: contain;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+}
+.products-table tbody tr {
+  /* Make sure a horizontal swipe on a row scrolls the table instead of
+     being captured by the row's onClick (Safari/iOS especially). */
+  touch-action: pan-x pan-y;
+}
+.products-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 1100px;
+}
+.products-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.products-table th {
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-align: left;
+  border-bottom: 2px solid var(--border-soft);
+  white-space: nowrap;
+  background: #FAFBFD;
+}
+.products-table th.num { text-align: right; }
+.products-table th.center { text-align: center; }
+.products-table th.fbo { color: var(--ch-fbo-text); }
+.products-table th.fbs { color: var(--ch-fbs-text); }
+.products-table th.real { color: var(--ch-real-text); }
+.products-table th.price { color: var(--accent); }
+
+.products-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text);
+  vertical-align: middle;
+  white-space: nowrap;
+  border-bottom: 1px solid #F0F3F8;
+}
+.products-table td.num { text-align: right; }
+.products-table td.center { text-align: center; }
+.products-table td.fbo { color: var(--ch-fbo-text); font-weight: 600; }
+.products-table td.fbs { color: var(--ch-fbs-text); font-weight: 600; }
+.products-table td.real { color: var(--ch-real-text); font-weight: 600; }
+.products-table td.price { color: var(--accent); font-weight: 600; }
+.products-table td.ellipsis { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.products-table td.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 32px;
+}
+
+.products-table tbody tr { cursor: pointer; transition: background .1s; }
+.products-table tbody tr:hover { background: #F8FAFF; }
+.products-table tbody tr.selected { background: var(--accent-bg); }
+
+.products-table tfoot tr.totals { background: #F8FAFF; border-top: 2px solid var(--border-soft); }
+.products-table tfoot tr.totals td { font-weight: 700; }
+.products-table tfoot tr.totals-sub { background: #FAFBFD; }
+.products-table tfoot tr.totals-sub td { font-size: 12px; color: var(--muted); }
+
+.warn { color: var(--err); font-size: 16px; }
+.del-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--err);
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+}
+.del-btn:hover { background: #FEEFEF; }
+
+/* ── Drawer ──────────────────────────────────────────────────────────────── */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 150;
+}
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: 640px;
+  max-width: 100vw;
+  background: var(--bg);
+  border-left: 1px solid var(--border-soft);
+  z-index: 151;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.12);
+}
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel);
+}
+.drawer-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.drawer-body {
+  overflow-y: auto;
+  padding: 16px 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Diagnostics card — header on top, buttons below as a wrapping flex row.
+   No horizontal flex between text and buttons (that overflowed on narrow
+   widths because the buttons group held its content width). */
+.diagnostics-card .diagnostics-head {
+  margin-bottom: 12px;
+}
+.diagnostics-card .diagnostics-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.diagnostics-card .diagnostics-actions > button,
+.diagnostics-card .diagnostics-actions > a {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .diagnostics-card .diagnostics-actions > button,
+  .diagnostics-card .diagnostics-actions > a {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+}
+
+/* ── Modal ───────────────────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.modal {
+  background: var(--panel);
+  border-radius: 16px;
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  padding: 24px;
+  width: min(520px, 90vw);
+  max-height: 80vh;
+  overflow: auto;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-header h3 { margin: 0; font-size: 16px; font-weight: 700; }
+
+/* ── Finance tags ────────────────────────────────────────────────────────── */
+.fin-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.fin-tag.sale { background: rgba(0, 168, 89, 0.13); color: var(--ok); }
+.fin-tag.refund { background: rgba(139, 92, 246, 0.13); color: var(--info); }
+.fin-tag.commission { background: rgba(204, 59, 59, 0.13); color: var(--err); }
+.fin-tag.logistics { background: rgba(255, 106, 0, 0.13); color: var(--ch-real-text); }
+.fin-tag.last_mile { background: rgba(255, 106, 0, 0.13); color: var(--ch-real-text); }
+.fin-tag.storage { background: rgba(245, 158, 11, 0.13); color: var(--warn); }
+.fin-tag.other { background: rgba(139, 149, 168, 0.13); color: var(--muted-2); }
+
+.amount-pos { color: var(--ok); font-weight: 700; }
+.amount-neg { color: var(--err); font-weight: 700; }
+
+/* ── Action panels (errors, etc) ────────────────────────────────────────── */
+.error-panel {
+  background: #FEEFEF;
+  border: 1px solid #FFB3B3;
+  color: var(--err);
+  border-radius: 12px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .app-header { padding: 12px 16px; }
+  .app-title { font-size: 16px; }
+  .app-subtitle { font-size: 12px; }
+  .tab-bar { padding: 0 16px; top: 56px; }
+  .main-content { padding: 12px 16px 80px; }
+  .kpi-cards { gap: 8px; }
+  .btn-primary, .btn-secondary { min-height: 44px; }
+  .icon-button { min-width: 44px; min-height: 44px; }
+  .drawer { width: 100vw; }
+}

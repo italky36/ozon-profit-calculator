@@ -1,0 +1,346 @@
+[
+  {
+    "volumeFrom": 0,
+    "volumeTo": 0.2,
+    "localUpTo300": 17.28,
+    "nonLocalUpTo300": 17.2800000000002,
+    "localOver300": 60.6923076923077,
+    "nonLocalOver300": 66.7348586810229
+  },
+  {
+    "volumeFrom": 0.201,
+    "volumeTo": 0.4,
+    "localUpTo300": 19.32,
+    "nonLocalUpTo300": 19.3199999999998,
+    "localOver300": 67.9230769230769,
+    "nonLocalOver300": 77.414535666218
+  },
+  {
+    "volumeFrom": 0.401,
+    "volumeTo": 0.6,
+    "localUpTo300": 21.35,
+    "nonLocalUpTo300": 21.3500000000003,
+    "localOver300": 72.1153846153846,
+    "nonLocalOver300": 85.1736204576043
+  },
+  {
+    "volumeFrom": 0.601,
+    "volumeTo": 0.8,
+    "localUpTo300": 22.37,
+    "nonLocalUpTo300": 22.3700000000003,
+    "localOver300": 72.1153846153846,
+    "nonLocalOver300": 85.2543741588156
+  },
+  {
+    "volumeFrom": 0.801,
+    "volumeTo": 1,
+    "localUpTo300": 23.38,
+    "nonLocalUpTo300": 23.3799999999997,
+    "localOver300": 72.1153846153846,
+    "nonLocalOver300": 87.6123822341857
+  },
+  {
+    "volumeFrom": 1.001,
+    "volumeTo": 1.25,
+    "localUpTo300": 25.42,
+    "nonLocalUpTo300": 25.4199999999998,
+    "localOver300": 76.3076923076923,
+    "nonLocalOver300": 97.0767160161507
+  },
+  {
+    "volumeFrom": 1.251,
+    "volumeTo": 1.5,
+    "localUpTo300": 26.43,
+    "nonLocalUpTo300": 26.4300000000002,
+    "localOver300": 80.0769230769231,
+    "nonLocalOver300": 104.566621803499
+  },
+  {
+    "volumeFrom": 1.501,
+    "volumeTo": 1.75,
+    "localUpTo300": 27.45,
+    "nonLocalUpTo300": 27.4500000000004,
+    "localOver300": 80.0769230769231,
+    "nonLocalOver300": 104.566621803499
+  },
+  {
+    "volumeFrom": 1.751,
+    "volumeTo": 2,
+    "localUpTo300": 29.48,
+    "nonLocalUpTo300": 29.4799999999997,
+    "localOver300": 80.0769230769231,
+    "nonLocalOver300": 104.566621803499
+  },
+  {
+    "volumeFrom": 2.001,
+    "volumeTo": 3,
+    "localUpTo300": 31.52,
+    "nonLocalUpTo300": 31.5200000000004,
+    "localOver300": 80.0769230769231,
+    "nonLocalOver300": 108.8600269179
+  },
+  {
+    "volumeFrom": 3.001,
+    "volumeTo": 4,
+    "localUpTo300": 35.58,
+    "nonLocalUpTo300": 35.5800000000006,
+    "localOver300": 85.0384615384615,
+    "nonLocalOver300": 130.93135935397
+  },
+  {
+    "volumeFrom": 4.001,
+    "volumeTo": 5,
+    "localUpTo300": 38.63,
+    "nonLocalUpTo300": 38.6300000000002,
+    "localOver300": 96.6538461538462,
+    "nonLocalOver300": 158.052489905787
+  },
+  {
+    "volumeFrom": 5.001,
+    "volumeTo": 6,
+    "localUpTo300": 42.7,
+    "nonLocalUpTo300": 42.7000000000005,
+    "localOver300": 96.6538461538462,
+    "nonLocalOver300": 158.231493943472
+  },
+  {
+    "volumeFrom": 6.001,
+    "volumeTo": 7,
+    "localUpTo300": 57.95,
+    "nonLocalUpTo300": 57.9499999999997,
+    "localOver300": 108.692307692308,
+    "nonLocalOver300": 179.434724091521
+  },
+  {
+    "volumeFrom": 7.001,
+    "volumeTo": 8,
+    "localUpTo300": 62.02,
+    "nonLocalUpTo300": 62.0199999999993,
+    "localOver300": 108.846153846154,
+    "nonLocalOver300": 183.515477792732
+  },
+  {
+    "volumeFrom": 8.001,
+    "volumeTo": 9,
+    "localUpTo300": 65.07,
+    "nonLocalUpTo300": 65.0699999999997,
+    "localOver300": 109.461538461538,
+    "nonLocalOver300": 189.440107671602
+  },
+  {
+    "volumeFrom": 9.001,
+    "volumeTo": 10,
+    "localUpTo300": 69.13,
+    "nonLocalUpTo300": 69.1299999999993,
+    "localOver300": 109.461538461538,
+    "nonLocalOver300": 191.563930013459
+  },
+  {
+    "volumeFrom": 10.001,
+    "volumeTo": 11,
+    "localUpTo300": 79.3,
+    "nonLocalUpTo300": 79.300000000001,
+    "localOver300": 111.923076923077,
+    "nonLocalOver300": 199.948855989233
+  },
+  {
+    "volumeFrom": 11.001,
+    "volumeTo": 12,
+    "localUpTo300": 83.3699999999999,
+    "nonLocalUpTo300": 83.3700000000011,
+    "localOver300": 111.923076923077,
+    "nonLocalOver300": 199.954239569314
+  },
+  {
+    "volumeFrom": 12.001,
+    "volumeTo": 13,
+    "localUpTo300": 87.43,
+    "nonLocalUpTo300": 87.4300000000003,
+    "localOver300": 111.923076923077,
+    "nonLocalOver300": 202.274562584118
+  },
+  {
+    "volumeFrom": 13.001,
+    "volumeTo": 14,
+    "localUpTo300": 92.52,
+    "nonLocalUpTo300": 92.5199999999988,
+    "localOver300": 115.923076923077,
+    "nonLocalOver300": 214.942126514132
+  },
+  {
+    "volumeFrom": 14.001,
+    "volumeTo": 15,
+    "localUpTo300": 96.58,
+    "nonLocalUpTo300": 96.5800000000013,
+    "localOver300": 123.038461538462,
+    "nonLocalOver300": 232.337819650067
+  },
+  {
+    "volumeFrom": 15.001,
+    "volumeTo": 17,
+    "localUpTo300": 96.58,
+    "nonLocalUpTo300": 96.5800000000013,
+    "localOver300": 131.538461538462,
+    "nonLocalOver300": 253.850605652759
+  },
+  {
+    "volumeFrom": 17.001,
+    "volumeTo": 20,
+    "localUpTo300": 110.82,
+    "nonLocalUpTo300": 110.820000000001,
+    "localOver300": 143.846153846154,
+    "nonLocalOver300": 280.963660834455
+  },
+  {
+    "volumeFrom": 20.001,
+    "volumeTo": 25,
+    "localUpTo300": 118.95,
+    "nonLocalUpTo300": 118.949999999998,
+    "localOver300": 159.038461538462,
+    "nonLocalOver300": 327.551816958277
+  },
+  {
+    "volumeFrom": 25.001,
+    "volumeTo": 30,
+    "localUpTo300": 131.15,
+    "nonLocalUpTo300": 131.149999999999,
+    "localOver300": 180.307692307692,
+    "nonLocalOver300": 380.947510094213
+  },
+  {
+    "volumeFrom": 30.001,
+    "volumeTo": 35,
+    "localUpTo300": 146.4,
+    "nonLocalUpTo300": 146.399999999998,
+    "localOver300": 197.730769230769,
+    "nonLocalOver300": 434.508748317631
+  },
+  {
+    "volumeFrom": 35.001,
+    "volumeTo": 40,
+    "localUpTo300": 156.57,
+    "nonLocalUpTo300": 156.570000000003,
+    "localOver300": 219.884615384615,
+    "nonLocalOver300": 491.368775235532
+  },
+  {
+    "volumeFrom": 40.001,
+    "volumeTo": 45,
+    "localUpTo300": 175.88,
+    "nonLocalUpTo300": 175.880000000002,
+    "localOver300": 235.692307692308,
+    "nonLocalOver300": 545.419919246299
+  },
+  {
+    "volumeFrom": 45.001,
+    "volumeTo": 50,
+    "localUpTo300": 189.1,
+    "nonLocalUpTo300": 189.100000000003,
+    "localOver300": 259.730769230769,
+    "nonLocalOver300": 602.382234185734
+  },
+  {
+    "volumeFrom": 50.001,
+    "volumeTo": 60,
+    "localUpTo300": 207.4,
+    "nonLocalUpTo300": 207.399999999997,
+    "localOver300": 276.269230769231,
+    "nonLocalOver300": 658.060565275909
+  },
+  {
+    "volumeFrom": 60.001,
+    "volumeTo": 70,
+    "localUpTo300": 230.78,
+    "nonLocalUpTo300": 230.779999999999,
+    "localOver300": 316.846153846154,
+    "nonLocalOver300": 768.679676985195
+  },
+  {
+    "volumeFrom": 70.001,
+    "volumeTo": 80,
+    "localUpTo300": 249.08,
+    "nonLocalUpTo300": 249.079999999997,
+    "localOver300": 349.576923076923,
+    "nonLocalOver300": 881.989232839838
+  },
+  {
+    "volumeFrom": 80.001,
+    "volumeTo": 90,
+    "localUpTo300": 274.5,
+    "nonLocalUpTo300": 274.5,
+    "localOver300": 398.153846153846,
+    "nonLocalOver300": 1019.0134589502
+  },
+  {
+    "volumeFrom": 90.001,
+    "volumeTo": 100,
+    "localUpTo300": 284.67,
+    "nonLocalUpTo300": 284.670000000004,
+    "localOver300": 446.076923076923,
+    "nonLocalOver300": 1128.79676985195
+  },
+  {
+    "volumeFrom": 100.001,
+    "volumeTo": 125,
+    "localUpTo300": 331.43,
+    "nonLocalUpTo300": 331.429999999995,
+    "localOver300": 513.769230769231,
+    "nonLocalOver300": 1312.99057873486
+  },
+  {
+    "volumeFrom": 125.001,
+    "volumeTo": 150,
+    "localUpTo300": 381.25,
+    "nonLocalUpTo300": 381.25,
+    "localOver300": 602.269230769231,
+    "nonLocalOver300": 1581.41049798116
+  },
+  {
+    "volumeFrom": 150.001,
+    "volumeTo": 175,
+    "localUpTo300": 436.15,
+    "nonLocalUpTo300": 436.150000000001,
+    "localOver300": 690.423076923077,
+    "nonLocalOver300": 1812.74158815612
+  },
+  {
+    "volumeFrom": 175.001,
+    "volumeTo": 200,
+    "localUpTo300": 483.93,
+    "nonLocalUpTo300": 483.929999999994,
+    "localOver300": 791.615384615385,
+    "nonLocalOver300": 2103.35531628533
+  },
+  {
+    "volumeFrom": 200.001,
+    "volumeTo": 400,
+    "localUpTo300": 805.2,
+    "nonLocalUpTo300": 805.200000000002,
+    "localOver300": 1243.15384615385,
+    "nonLocalOver300": 3222.01749663526
+  },
+  {
+    "volumeFrom": 400.001,
+    "volumeTo": 600,
+    "localUpTo300": 805.2,
+    "nonLocalUpTo300": 805.200000000002,
+    "localOver300": 1812.34615384615,
+    "nonLocalOver300": 4820.89502018843
+  },
+  {
+    "volumeFrom": 600.001,
+    "volumeTo": 800,
+    "localUpTo300": 805.2,
+    "nonLocalUpTo300": 805.200000000002,
+    "localOver300": 2382.57692307692,
+    "nonLocalOver300": 6309.78061911171
+  },
+  {
+    "volumeFrom": 800.001,
+    "volumeTo": 1000000,
+    "localUpTo300": 805.2,
+    "nonLocalUpTo300": 805.200000000002,
+    "localOver300": 2942.65384615385,
+    "nonLocalOver300": 7524.76581426649
+  }
+]

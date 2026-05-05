@@ -1,0 +1,1 @@
+ALTER TABLE `products` ADD `regular_price` real;
