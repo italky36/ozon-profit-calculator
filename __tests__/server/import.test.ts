@@ -114,6 +114,11 @@ const PRICES_RESPONSE = {
   cursor: "",
 };
 
+const ATTRS_RESPONSE = {
+  result: [],
+  total: 0,
+} as const;
+
 const makeMockClient = (): OzonClient => ({
   async post<T>(endpoint: string): Promise<T> {
     if (endpoint === "/v1/description-category/tree")
@@ -121,6 +126,8 @@ const makeMockClient = (): OzonClient => ({
     if (endpoint === "/v3/product/list") return PRODUCT_LIST_RESPONSE as T;
     if (endpoint === "/v3/product/info/list") return INFO_RESPONSE as T;
     if (endpoint === "/v5/product/info/prices") return PRICES_RESPONSE as T;
+    if (endpoint === "/v4/product/info/attributes")
+      return ATTRS_RESPONSE as T;
     throw new Error(`unmocked endpoint: ${endpoint}`);
   },
 });

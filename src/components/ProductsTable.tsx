@@ -1,11 +1,28 @@
-import { AlertTriangle, Download, X } from "lucide-react";
-import type { ProductRow, ProductInput, CalcResult } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  FileSpreadsheet,
+  Search,
+  X,
+} from "lucide-react";
+import type {
+  ProductRow,
+  ProductInput,
+  CalcResult,
+  TaxSettings,
+} from "../types";
+import { exportShortExcel, exportFullExcel } from "../lib/exportExcel";
 import type { RealizedMarginRow } from "../api";
 import { fmtRub, fmtPct } from "../format";
 import EditableCell from "./EditableCell";
 import MarginBar from "./MarginBar";
 import ChannelBadge, { type ChannelKey } from "./ChannelBadge";
 import ChannelFilter, { type FilterValue } from "./ChannelFilter";
+import InactivityBadge from "./InactivityBadge";
+import { inactivityOf, isActiveOzon } from "../lib/ozonStatus";
 
 export type RowResult = CalcResult | { error: string };
 
@@ -23,9 +40,57 @@ interface Props {
   showChart: boolean;
   /** When provided, renders Продано / Факт. маржа with actual numbers + tfoot Δ. */
   actuals?: Map<string, RealizedMarginRow>;
-  /** Unit-mode: hide qty column and the entire tfoot (portfolio aggregates). */
-  unitMode?: boolean;
+  /** Hide products that Ozon marks as archived/inactive. */
+  activeOnly?: boolean;
+  onActiveOnlyChange?: (v: boolean) => void;
+  /** Which numbers the schema columns show:
+   *  - "margin"  → marginRub only (header "Маржа FBO");
+   *  - "payout"  → ozonNetPayout only (header "К начислению FBO");
+   *  - "both"    → ozonNetPayout primary + marginRub secondary in gray. */
+  breakdownMode?: "both" | "margin" | "payout";
+  /** Live search query — filtering happens upstream in App.tsx; the value is
+   * passed back here only so the input can render its own controlled state. */
+  searchQuery?: string;
+  onSearchChange?: (v: string) => void;
+  /** Total rows in the underlying dataset (before search). Used to render
+   * the "Найдено X из Y" counter. */
+  totalRowsCount?: number;
+  /** Tax settings — required for the full Excel export (header line shows
+   * the active tax system). When omitted, only short export is offered. */
+  taxSettings?: TaxSettings;
 }
+
+type SortKey =
+  | "articleId"
+  | "sku"
+  | "productName"
+  | "category"
+  | "currentPrice"
+  | "costPrice"
+  | "salesPlan"
+  | "fbo"
+  | "fbs"
+  | "realFbs"
+  | "salesCount"
+  | "avgRevenue"
+  | "totalAmount";
+type SortDir = "asc" | "desc";
+
+/** Wraps the substring of `text` matching `query` in <mark>. Case-insensitive,
+ * highlights only the first occurrence (the cells are short). */
+const Highlight = ({ text, query }: { text: string; query: string | undefined }) => {
+  const q = (query ?? "").trim();
+  if (!q || !text) return <>{text}</>;
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="search-highlight">{text.slice(idx, idx + q.length)}</mark>
+      {text.slice(idx + q.length)}
+    </>
+  );
+};
 
 type SchemaKey = "fbo" | "fbs" | "realFbs";
 
@@ -52,64 +117,6 @@ const bestKey = (r: CalcResult): SchemaKey => {
   return (Object.entries(m).sort((a, b) => b[1] - a[1])[0][0]) as SchemaKey;
 };
 
-interface Totals {
-  fbo: number;
-  fbs: number;
-  realFbs: number;
-  weightedMarginPct: { fbo: number; fbs: number; realFbs: number };
-  weightedProfitabilityPct: { fbo: number; fbs: number; realFbs: number };
-  hasAny: boolean;
-  totalQty: number;
-}
-
-const computeTotals = (
-  rows: ProductRow[],
-  results: Map<string, RowResult>,
-  filter: FilterValue,
-): Totals => {
-  let fbo = 0, fbs = 0, realFbs = 0;
-  let revenue = 0;
-  let costSum = 0;
-  let mFbo = 0, mFbs = 0, mRealFbs = 0;
-  let hasAny = false;
-  let totalQty = 0;
-
-  for (const row of rows) {
-    const r = results.get(row.id);
-    if (!isCalc(r)) continue;
-    const winner = bestKey(r);
-    if (filter !== "Все" && SCHEMA_TO_CHANNEL[winner] !== filter) continue;
-    hasAny = true;
-    const plan = row.input.salesPlan;
-    totalQty += plan;
-    fbo += r.fbo.totalProfit;
-    fbs += r.fbs.totalProfit;
-    realFbs += r.realFbs.totalProfit;
-    const rev = r.promoPrice * plan;
-    revenue += rev;
-    costSum += row.input.costPrice * plan;
-    mFbo += r.fbo.marginRub * plan;
-    mFbs += r.fbs.marginRub * plan;
-    mRealFbs += r.realFbs.marginRub * plan;
-  }
-
-  const wm = (m: number) => (revenue > 0 ? m / revenue : 0);
-  const wp = (m: number) => (costSum > 0 ? m / costSum : 0);
-
-  return {
-    fbo, fbs, realFbs,
-    weightedMarginPct: { fbo: wm(mFbo), fbs: wm(mFbs), realFbs: wm(mRealFbs) },
-    weightedProfitabilityPct: { fbo: wp(mFbo), fbs: wp(mFbs), realFbs: wp(mRealFbs) },
-    hasAny,
-    totalQty,
-  };
-};
-
-const totalsBest = (t: Totals): SchemaKey => {
-  const m: Record<SchemaKey, number> = { fbo: t.fbo, fbs: t.fbs, realFbs: t.realFbs };
-  return (Object.entries(m).sort((a, b) => b[1] - a[1])[0][0]) as SchemaKey;
-};
-
 export default function ProductsTable({
   rows,
   results,
@@ -123,54 +130,245 @@ export default function ProductsTable({
   onChannelFilterChange,
   showChart,
   actuals,
+  activeOnly,
+  onActiveOnlyChange,
+  breakdownMode = "both",
+  searchQuery,
+  onSearchChange,
+  totalRowsCount,
+  taxSettings,
 }: Props) {
-  const totals = computeTotals(rows, results, channelFilter);
-  const winnerTotal = totals.hasAny ? totalsBest(totals) : null;
+  // Excel-export dropdown state
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!exportRef.current?.contains(e.target as Node)) setExportOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [exportOpen]);
+  // Debounced search: keep input value local for instant typing, propagate
+  // upstream after a small delay so heavy re-renders (filter + KPI recompute)
+  // don't run on every keystroke when there are many products.
+  const [localQuery, setLocalQuery] = useState(searchQuery ?? "");
+  useEffect(() => {
+    if ((searchQuery ?? "") === localQuery) return;
+    const t = setTimeout(() => onSearchChange?.(localQuery), 150);
+    return () => clearTimeout(t);
+  }, [localQuery, onSearchChange, searchQuery]);
+
+  // ── Sort by column ──────────────────────────────────────────────────────
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
+  const handleSortClick = (key: SortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: "desc" };
+      if (prev.dir === "desc") return { key, dir: "asc" };
+      return null;
+    });
+  };
+  const sortIcon = (key: SortKey) => {
+    if (sort?.key !== key) return null;
+    return sort.dir === "desc" ? (
+      <ChevronDown size={12} />
+    ) : (
+      <ChevronUp size={12} />
+    );
+  };
+  const sortableThClass = (key: SortKey, base: string = "") => {
+    const isActive = sort?.key === key;
+    return [base, "sortable", isActive ? "sort-active" : ""]
+      .filter(Boolean)
+      .join(" ");
+  };
   const showActuals = !!actuals;
 
-  // Per-channel totals for actuals tfoot (predicted = schema.marginRub × salesCount).
-  let actualsAgg: {
-    actualSum: number;
-    predicted: Record<SchemaKey, number>;
-    totalUnits: number;
-  } | null = null;
-  if (showActuals) {
-    let actualSum = 0;
-    let totalUnits = 0;
-    const predicted: Record<SchemaKey, number> = { fbo: 0, fbs: 0, realFbs: 0 };
-    for (const row of rows) {
-      const a = actuals.get(row.input.articleId);
-      const calc = results.get(row.id);
-      if (!a) continue;
-      if (isCalc(calc)) {
-        const winner = bestKey(calc);
-        if (channelFilter !== "Все" && SCHEMA_TO_CHANNEL[winner] !== channelFilter) continue;
-      }
-      actualSum += a.actualMargin;
-      totalUnits += a.salesCount;
-      if (isCalc(calc)) {
-        predicted.fbo += calc.fbo.marginRub * a.salesCount;
-        predicted.fbs += calc.fbs.marginRub * a.salesCount;
-        predicted.realFbs += calc.realFbs.marginRub * a.salesCount;
-      }
-    }
-    actualsAgg = { actualSum, predicted, totalUnits };
-  }
+  // Column count for colSpan math:
+  //  - 11 always-rendered: Артикул, SKU, Название, Категория, Цена, Себест.,
+  //    FBO, FBS, realFBS, Лучшая, delete.
+  //  - + График when showChart
+  //  - + 3 actuals (Продано / Ср. за продажу / Поступления) when actuals
+  const colCount = 11 + (showChart ? 1 : 0) + (showActuals ? 3 : 0);
 
-  // Column count for colSpan math: base 13 + 1 chart.
-  const colCount = 13 + (showChart ? 1 : 0);
+  // Precompute visible rows after channel + active filters so we can both
+  // render the counter accurately and skip an extra IIFE in tbody.
+  // (Search filter is applied upstream in App.tsx before rows reach us.)
+  const visibleAfterFilters = rows.filter((row) => {
+    const r = results.get(row.id);
+    const calc = isCalc(r) ? r : null;
+    const winner = calc ? bestKey(calc) : null;
+    if (
+      calc &&
+      winner &&
+      channelFilter !== "Все" &&
+      SCHEMA_TO_CHANNEL[winner] !== channelFilter
+    ) {
+      return false;
+    }
+    if (activeOnly && !isActiveOzon(row)) return false;
+    return true;
+  });
+
+  const sortedRows = useMemo(() => {
+    if (!sort) return visibleAfterFilters;
+    const getValue = (row: ProductRow): string | number | null => {
+      const r = results.get(row.id);
+      const calc = isCalc(r) ? r : null;
+      const a = actuals?.get(row.input.articleId);
+      switch (sort.key) {
+        case "articleId":
+          return row.input.articleId;
+        case "sku":
+          return row.ozonSku ?? null;
+        case "productName":
+          return row.input.productName;
+        case "category":
+          return row.input.category;
+        case "currentPrice":
+          return row.input.currentPrice;
+        case "costPrice":
+          return row.input.costPrice;
+        case "salesPlan":
+          return row.input.salesPlan;
+        case "fbo":
+          return calc?.fbo.marginRub ?? null;
+        case "fbs":
+          return calc?.fbs.marginRub ?? null;
+        case "realFbs":
+          return calc?.realFbs.marginRub ?? null;
+        case "salesCount":
+          return a?.salesCount ?? null;
+        case "avgRevenue":
+          return a && a.salesCount > 0
+            ? a.actualRevenue / a.salesCount
+            : null;
+        case "totalAmount":
+          return a?.actualMargin ?? null;
+      }
+    };
+    const out = [...visibleAfterFilters].sort((a, b) => {
+      const va = getValue(a);
+      const vb = getValue(b);
+      // Nulls always last regardless of direction.
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      const cmp =
+        typeof va === "string" && typeof vb === "string"
+          ? va.localeCompare(vb, "ru")
+          : (va as number) - (vb as number);
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+    return out;
+  }, [visibleAfterFilters, sort, results, actuals]);
 
   return (
     <section>
       <div className="products-toolbar">
         <div className="products-toolbar-left">
           <ChannelFilter active={channelFilter} onChange={onChannelFilterChange} />
+          {onActiveOnlyChange && (
+            <label
+              className="active-only-toggle"
+              title="Скрыть товары в архиве и снятые с витрины Ozon"
+            >
+              <input
+                type="checkbox"
+                checked={!!activeOnly}
+                onChange={(e) => onActiveOnlyChange(e.target.checked)}
+              />
+              <span>Только активные</span>
+            </label>
+          )}
+          {onSearchChange && (
+            <label className="products-search">
+              <Search size={14} className="products-search-icon" />
+              <input
+                type="text"
+                value={localQuery}
+                onChange={(e) => setLocalQuery(e.target.value)}
+                placeholder="Артикул, SKU или название"
+                title="Поиск по артикулу, SKU или названию"
+                aria-label="Поиск по таблице"
+              />
+              {localQuery && (
+                <button
+                  type="button"
+                  className="products-search-clear"
+                  onClick={() => {
+                    setLocalQuery("");
+                    onSearchChange("");
+                  }}
+                  aria-label="Очистить поиск"
+                  title="Очистить"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </label>
+          )}
+          {searchQuery && totalRowsCount !== undefined && (
+            <span className="search-count" aria-live="polite">
+              Найдено {sortedRows.length}{" "}
+              <span className="search-count-of">из</span> {totalRowsCount}
+            </span>
+          )}
           <span className="toolbar-legend">
             <OzIcon />
             — данные из Ozon, только чтение
           </span>
         </div>
         <div className="products-toolbar-actions">
+          <div className="excel-export" ref={exportRef}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setExportOpen((v) => !v)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+              title="Экспорт в Excel"
+            >
+              <FileSpreadsheet size={14} /> Excel{" "}
+              <ChevronDown size={12} />
+            </button>
+            {exportOpen && (
+              <div className="excel-export-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="excel-export-item"
+                  onClick={() => {
+                    setExportOpen(false);
+                    void exportShortExcel(sortedRows, results);
+                  }}
+                >
+                  <strong>Краткий</strong>
+                  <span className="muted">Как в таблице</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="excel-export-item"
+                  disabled={!taxSettings}
+                  onClick={() => {
+                    if (!taxSettings) return;
+                    setExportOpen(false);
+                    void exportFullExcel(sortedRows, results, taxSettings);
+                  }}
+                  title={
+                    !taxSettings
+                      ? "Загружаем настройки налогов…"
+                      : "Все статьи расходов и налоги по схемам"
+                  }
+                >
+                  <strong>Полный</strong>
+                  <span className="muted">
+                    Комиссии, налоги, маржа по схемам
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className="btn-secondary"
             onClick={onImport}
@@ -188,19 +386,112 @@ export default function ProductsTable({
         <table className="products-table">
           <thead>
             <tr>
-              <th>Артикул</th>
-              <th>Название</th>
-              <th>Категория</th>
-              <th className="num price">Цена</th>
-              <th className="num">Себест.</th>
-              <th className="num center">Кол-во</th>
-              {SCHEMAS.map((s) => (
-                <th key={s.key} className={`num ${s.cls}`}>Маржа {s.label}</th>
-              ))}
+              <th
+                className={sortableThClass("articleId")}
+                onClick={() => handleSortClick("articleId")}
+              >
+                <span className="sort-th-inner">
+                  Артикул {sortIcon("articleId")}
+                </span>
+              </th>
+              <th
+                className={sortableThClass("sku", "sku")}
+                onClick={() => handleSortClick("sku")}
+                title="Публичный SKU Ozon (ozon.ru/product/{sku})"
+              >
+                <span className="sort-th-inner">SKU {sortIcon("sku")}</span>
+              </th>
+              <th
+                className={sortableThClass("productName")}
+                onClick={() => handleSortClick("productName")}
+              >
+                <span className="sort-th-inner">
+                  Название {sortIcon("productName")}
+                </span>
+              </th>
+              <th
+                className={sortableThClass("category")}
+                onClick={() => handleSortClick("category")}
+              >
+                <span className="sort-th-inner">
+                  Категория {sortIcon("category")}
+                </span>
+              </th>
+              <th
+                className={sortableThClass("currentPrice", "num price")}
+                onClick={() => handleSortClick("currentPrice")}
+              >
+                <span className="sort-th-inner">
+                  Цена {sortIcon("currentPrice")}
+                </span>
+              </th>
+              <th
+                className={sortableThClass("costPrice", "num")}
+                onClick={() => handleSortClick("costPrice")}
+              >
+                <span className="sort-th-inner">
+                  Себест. {sortIcon("costPrice")}
+                </span>
+              </th>
+              {SCHEMAS.map((s) => {
+                const headerLabel =
+                  breakdownMode === "both"
+                    ? s.label
+                    : breakdownMode === "payout"
+                      ? `Начисл. ${s.label}`
+                      : `Маржа ${s.label}`;
+                const headerTitle =
+                  breakdownMode === "both"
+                    ? "Сверху — К начислению от Ozon (как в Ozon-калькуляторе). Снизу серым — маржа после налогов и себестоимости."
+                    : breakdownMode === "payout"
+                      ? "Сумма, которую Ozon переведёт продавцу за товар (без вычета налогов и себестоимости)."
+                      : "Реальная прибыль продавца после Ozon-удержаний, налогов и себестоимости.";
+                return (
+                  <th
+                    key={s.key}
+                    className={sortableThClass(s.key, `num ${s.cls}`)}
+                    title={headerTitle}
+                    onClick={() => handleSortClick(s.key)}
+                  >
+                    <span className="sort-th-inner">
+                      {headerLabel} {sortIcon(s.key)}
+                    </span>
+                  </th>
+                );
+              })}
               {showChart && <th className="center">График</th>}
               <th className="center">Лучшая</th>
-              <th className="num">Продано</th>
-              <th className="num">Факт. маржа</th>
+              {showActuals && (
+                <>
+                  <th
+                    className={sortableThClass("salesCount", "num")}
+                    onClick={() => handleSortClick("salesCount")}
+                    title="Сколько раз товар продавался за период (sale-операций по выписке)"
+                  >
+                    <span className="sort-th-inner">
+                      Продано {sortIcon("salesCount")}
+                    </span>
+                  </th>
+                  <th
+                    className={sortableThClass("avgRevenue", "num")}
+                    onClick={() => handleSortClick("avgRevenue")}
+                    title="Среднее поступление за одну sale-операцию: actualRevenue / salesCount. Это та сумма (net, после удержаний Ozon), что вы реально получаете на счёт за единицу товара в среднем."
+                  >
+                    <span className="sort-th-inner">
+                      Ср. за продажу {sortIcon("avgRevenue")}
+                    </span>
+                  </th>
+                  <th
+                    className={sortableThClass("totalAmount", "num")}
+                    onClick={() => handleSortClick("totalAmount")}
+                    title="Сумма всех amount-ов за период (sales + refunds + commissions + …) — итоговое движение по счёту по этому артикулу."
+                  >
+                    <span className="sort-th-inner">
+                      Поступления {sortIcon("totalAmount")}
+                    </span>
+                  </th>
+                </>
+              )}
               <th></th>
             </tr>
           </thead>
@@ -212,48 +503,80 @@ export default function ProductsTable({
                 </td>
               </tr>
             )}
-            {rows.map((row) => {
+            {sortedRows.map((row) => {
               const r = results.get(row.id);
               const calc = isCalc(r) ? r : null;
               const winner = calc ? bestKey(calc) : null;
-              if (calc && winner && channelFilter !== "Все" && SCHEMA_TO_CHANNEL[winner] !== channelFilter) {
-                return null;
-              }
               const isSelected = row.id === selectedId;
               const fromOzon = row.ozonProductId != null;
               const a = actuals?.get(row.input.articleId);
+              const inactivity = inactivityOf(row);
 
               const updateField = <K extends keyof ProductInput>(key: K, val: ProductInput[K]) =>
                 onUpdate(row.id, { ...row.input, [key]: val });
 
+              const rowClasses = [
+                isSelected ? "selected" : "",
+                inactivity.kind ? "row-inactive" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+
               return (
                 <tr
                   key={row.id}
-                  className={isSelected ? "selected" : ""}
+                  className={rowClasses}
                   onClick={() => onSelect(row.id)}
+                  title={inactivity.kind ? inactivity.reason : undefined}
                 >
                   <td>
-                    {fromOzon ? (
-                      <span
-                        className="oz-badge"
-                        title="Артикул из каталога Ozon — только чтение"
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <InactivityBadge inactivity={inactivity} />
+                      {fromOzon ? (
+                        <span
+                          className="oz-badge"
+                          title="Артикул из каталога Ozon — только чтение"
+                        >
+                          <OzIcon />
+                          {row.input.articleId ? (
+                            <Highlight text={row.input.articleId} query={searchQuery} />
+                          ) : (
+                            "—"
+                          )}
+                        </span>
+                      ) : (
+                        <EditableCell
+                          type="text"
+                          value={row.input.articleId}
+                          onChange={(v) => updateField("articleId", v)}
+                          align="left"
+                        />
+                      )}
+                    </span>
+                  </td>
+                  <td className="num sku">
+                    {row.ozonSku != null ? (
+                      <a
+                        href={`https://www.ozon.ru/product/${row.ozonSku}/`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        title="Открыть товар на ozon.ru"
                       >
-                        <OzIcon />
-                        {row.input.articleId || "—"}
-                      </span>
+                        <Highlight text={String(row.ozonSku)} query={searchQuery} />
+                      </a>
                     ) : (
-                      <EditableCell
-                        type="text"
-                        value={row.input.articleId}
-                        onChange={(v) => updateField("articleId", v)}
-                        align="left"
-                      />
+                      "—"
                     )}
                   </td>
                   <td className="ellipsis" title={row.input.productName}>
                     {fromOzon ? (
                       <span title="Название из каталога Ozon — только чтение" style={{ fontWeight: 600 }}>
-                        {row.input.productName || "—"}
+                        {row.input.productName ? (
+                          <Highlight text={row.input.productName} query={searchQuery} />
+                        ) : (
+                          "—"
+                        )}
                       </span>
                     ) : (
                       <EditableCell
@@ -309,18 +632,41 @@ export default function ProductsTable({
                       suffix=" ₽"
                     />
                   </td>
-                  <td className="num center">
-                    <EditableCell
-                      type="number"
-                      value={row.input.salesPlan}
-                      onChange={(v) => updateField("salesPlan", v)}
-                      align="center"
-                      inputWidth={70}
-                    />
-                  </td>
                   {SCHEMAS.map((s) => (
                     <td key={s.key} className={`num ${s.cls}`}>
-                      {calc ? fmtRub(calc[s.key].marginRub) : "—"}
+                      {calc ? (
+                        breakdownMode === "both" ? (
+                          <>
+                            <div>{fmtRub(calc[s.key].ozonNetPayout)}</div>
+                            <div
+                              className="margin-secondary"
+                              title="Маржа — реальная прибыль после налогов и себестоимости"
+                            >
+                              {fmtRub(calc[s.key].marginRub)}
+                            </div>
+                            <div
+                              className="margin-roi"
+                              title="Рентабельность к себестоимости: маржа / costPrice"
+                            >
+                              {fmtPct(calc[s.key].profitability)}
+                            </div>
+                          </>
+                        ) : breakdownMode === "payout" ? (
+                          fmtRub(calc[s.key].ozonNetPayout)
+                        ) : (
+                          <>
+                            <div>{fmtRub(calc[s.key].marginRub)}</div>
+                            <div
+                              className="margin-roi"
+                              title="Рентабельность к себестоимости: маржа / costPrice"
+                            >
+                              {fmtPct(calc[s.key].profitability)}
+                            </div>
+                          </>
+                        )
+                      ) : (
+                        "—"
+                      )}
                     </td>
                   ))}
                   {showChart && (
@@ -351,12 +697,21 @@ export default function ProductsTable({
                       </AlertTriangle>
                     )}
                   </td>
-                  <td className="num" style={{ color: "var(--muted-2)" }}>
-                    {a ? a.salesCount : "—"}
-                  </td>
-                  <td className="num" style={{ color: "var(--muted-2)" }}>
-                    {a ? fmtRub(a.actualMargin) : "—"}
-                  </td>
+                  {showActuals && (
+                    <>
+                      <td className="num" style={{ color: "var(--muted-2)" }}>
+                        {a ? a.salesCount : "—"}
+                      </td>
+                      <td className="num" style={{ color: "var(--muted-2)" }}>
+                        {a && a.salesCount > 0
+                          ? fmtRub(a.actualRevenue / a.salesCount)
+                          : "—"}
+                      </td>
+                      <td className="num" style={{ color: "var(--muted-2)" }}>
+                        {a ? fmtRub(a.actualMargin) : "—"}
+                      </td>
+                    </>
+                  )}
                   <td onClick={(e) => e.stopPropagation()}>
                     <button
                       className="del-btn"
@@ -370,80 +725,15 @@ export default function ProductsTable({
                 </tr>
               );
             })}
-          </tbody>
-          {totals.hasAny && (
-            <tfoot>
-              <tr className="totals">
-                <td colSpan={5}>Итого по плану</td>
-                <td className="num center">{totals.totalQty}</td>
-                {SCHEMAS.map((s) => (
-                  <td key={s.key} className={`num ${s.cls}`} style={{ fontWeight: 800 }}>
-                    {fmtRub(totals[s.key])}
-                  </td>
-                ))}
-                {showChart && <td />}
-                <td className="center">
-                  {winnerTotal && <ChannelBadge channel={SCHEMA_TO_CHANNEL[winnerTotal]} />}
+            {rows.length > 0 && sortedRows.length === 0 && (
+              <tr>
+                <td colSpan={colCount} className="empty">
+                  Ничего не нашлось — попробуйте другой запрос или сбросьте
+                  фильтры
                 </td>
-                <td colSpan={3} />
               </tr>
-              <tr className="totals-sub">
-                <td colSpan={6}>Средневзвешенная маржа, %</td>
-                {SCHEMAS.map((s) => (
-                  <td key={s.key} className={`num ${s.cls}`}>
-                    {fmtPct(totals.weightedMarginPct[s.key])}
-                  </td>
-                ))}
-                {showChart && <td />}
-                <td colSpan={4} />
-              </tr>
-              <tr className="totals-sub">
-                <td colSpan={6}>Рентабельность к с/с, %</td>
-                {SCHEMAS.map((s) => (
-                  <td key={s.key} className={`num ${s.cls}`}>
-                    {fmtPct(totals.weightedProfitabilityPct[s.key])}
-                  </td>
-                ))}
-                {showChart && <td />}
-                <td colSpan={4} />
-              </tr>
-              {actualsAgg && (
-                <>
-                  <tr className="totals-sub">
-                    <td colSpan={6}>
-                      Прогноз × факт.продажи ({actualsAgg.totalUnits} шт)
-                    </td>
-                    {SCHEMAS.map((s) => (
-                      <td key={s.key} className={`num ${s.cls}`}>
-                        {fmtRub(actualsAgg.predicted[s.key])}
-                      </td>
-                    ))}
-                    {showChart && <td />}
-                    <td colSpan={4} />
-                  </tr>
-                  <tr className="totals-sub">
-                    <td colSpan={6}>Δ факт − прогноз, %</td>
-                    {SCHEMAS.map((s) => {
-                      const p = actualsAgg.predicted[s.key];
-                      const diff =
-                        p === 0 ? null : (actualsAgg.actualSum - p) / Math.abs(p);
-                      return (
-                        <td key={s.key} className={`num ${s.cls}`}>
-                          {diff === null ? "—" : fmtPct(diff)}
-                        </td>
-                      );
-                    })}
-                    {showChart && <td />}
-                    <td className="center">Факт</td>
-                    <td colSpan={2} className="num">
-                      {fmtRub(actualsAgg.actualSum)}
-                    </td>
-                    <td />
-                  </tr>
-                </>
-              )}
-            </tfoot>
-          )}
+            )}
+          </tbody>
         </table>
       </div>
     </section>

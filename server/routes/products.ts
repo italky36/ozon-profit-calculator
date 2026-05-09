@@ -40,6 +40,10 @@ const dbToRow = (r: DbProduct): ProductRow => ({
     : null,
   regularPrice: r.regularPrice ?? null,
   ozonSku: r.ozonSku ?? null,
+  ozonArchived: r.ozonArchived ?? null,
+  ozonVisible: r.ozonVisible ?? null,
+  ozonStatusName: r.ozonStatusName ?? null,
+  ozonStatusDescription: r.ozonStatusDescription ?? null,
   input: {
     articleId: r.articleId,
     productName: r.productName,
@@ -50,12 +54,18 @@ const dbToRow = (r: DbProduct): ProductRow => ({
     isFireHazard: r.isFireHazard,
     plannedStorageDays: r.plannedStorageDays,
     volumeL: r.volumeL,
+    depthMm: r.depthMm ?? null,
+    widthMm: r.widthMm ?? null,
+    heightMm: r.heightMm ?? null,
+    weightG: r.weightG ?? null,
     vatRate: parseVatRate(r.vatRate),
     redemptionPercent: r.redemptionPercent,
     salesPlan: r.salesPlan,
     logisticsMode: r.logisticsMode as ProductInput["logisticsMode"],
     localShare: r.localShare,
     clustersCount: parseClustersCount(r.clustersCount),
+    dispatchCluster: r.dispatchCluster,
+    destinationCluster: r.destinationCluster,
     currentPrice: r.currentPrice,
     discountPercent: r.discountPercent,
     marketingPercent: r.marketingPercent,
@@ -80,12 +90,18 @@ const inputToColumns = (i: ProductInput) => ({
   isFireHazard: i.isFireHazard,
   plannedStorageDays: i.plannedStorageDays,
   volumeL: i.volumeL,
+  depthMm: i.depthMm,
+  widthMm: i.widthMm,
+  heightMm: i.heightMm,
+  weightG: i.weightG,
   vatRate: String(i.vatRate),
   redemptionPercent: i.redemptionPercent,
   salesPlan: i.salesPlan,
   logisticsMode: i.logisticsMode,
   localShare: i.localShare,
   clustersCount: String(i.clustersCount),
+  dispatchCluster: i.dispatchCluster,
+  destinationCluster: i.destinationCluster,
   currentPrice: i.currentPrice,
   discountPercent: i.discountPercent,
   marketingPercent: i.marketingPercent,
@@ -115,6 +131,8 @@ const validateInput = (raw: unknown): ProductInput => {
     "logisticsMode",
     "localShare",
     "clustersCount",
+    "dispatchCluster",
+    "destinationCluster",
     "currentPrice",
     "discountPercent",
     "marketingPercent",
@@ -215,6 +233,16 @@ export function productsRoutes(db: DB): Hono {
     const result = await db.delete(products).where(eq(products.id, id));
     if (result.changes === 0) return c.json({ error: "not found" }, 404);
     return c.body(null, 204);
+  });
+
+  // Bulk reset whitePurchase for all products to NULL ("По умолчанию").
+  // Useful right after enabling the global default — existing rows have
+  // explicit `false` from the old schema and won't inherit otherwise.
+  app.post("/bulk/white-purchase-reset", async (c) => {
+    const result = await db
+      .update(products)
+      .set({ whitePurchase: null });
+    return c.json({ updated: result.changes });
   });
 
   return app;

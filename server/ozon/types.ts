@@ -36,21 +36,85 @@ export interface OzonProductInfo {
   vat: string | number; // "0", "0.05", "0.07", "0.1", "0.22" — sometimes returned as a number
   weight: number;
   weight_unit: "kg" | "g" | "lb";
+  /** В реальном `/v3/product/info/list` габариты приходят на верхнем
+   * уровне item-а, не вложенно. Старые версии API клали их внутрь
+   * `dimensions` — поддерживаем оба формата. */
+  depth?: number;
+  width?: number;
+  height?: number;
+  dimension_unit?: "mm" | "cm" | "in";
   dimensions?: OzonDimensions;
   is_kgt?: boolean;
   is_super_economy?: boolean;
   /** Per-scheme SKUs (FBO/FBS). Public marketplace URL uses one of these,
    * not `id` (which is the seller's internal product_id). */
   sources?: OzonProductSource[];
+  /** True when the product is archived in seller LK. Snake-case mirrors the
+   * API; some response versions use `archived`. */
+  archived?: boolean;
+  is_archived?: boolean;
+  /** Visibility flags structured by Ozon: `active_product` is the headline
+   * "is the card on sale right now", `has_price` / `has_stock` explain why
+   * `active_product` is false when it is. */
+  visibility_details?: {
+    active_product?: boolean;
+    has_price?: boolean;
+    has_stock?: boolean;
+    /** Sometimes Ozon returns a free-text reason here. */
+    reason?: string;
+  };
+  /** Lifecycle/moderation status. Field shape varies between API versions. */
+  status?: {
+    state?: string;
+    state_name?: string;
+    state_description?: string;
+    state_failed?: string;
+    moderate_status?: string;
+    validation_state?: string;
+    item_errors?: Array<{ code?: string; message?: string }>;
+    state_failed_moderation_reasons?: string[];
+  };
 }
 
 export interface OzonProductInfoListResp {
   items: OzonProductInfo[];
 }
 
+/** Item ответа `/v4/product/info/attributes`. Содержит точные габариты
+ * (depth/width/height/dimension_unit) на верхнем уровне — это самый
+ * надёжный источник объёма. */
+export interface OzonProductAttributesItem {
+  id: number;
+  offer_id: string;
+  type_id?: number;
+  description_category_id?: number;
+  name?: string;
+  sku?: number;
+  height?: number;
+  depth?: number;
+  width?: number;
+  dimension_unit?: "mm" | "cm" | "in";
+  weight?: number;
+  weight_unit?: "kg" | "g" | "lb";
+  attributes?: Array<{
+    id: number;
+    complex_id: number;
+    values: Array<{ value: string; dictionary_value_id?: number }>;
+  }>;
+}
+
+export interface OzonProductAttributesResp {
+  result: OzonProductAttributesItem[];
+  total: number;
+  last_id?: string;
+}
+
 export interface OzonPriceItem {
   product_id: number;
   offer_id: string;
+  /** Объёмный вес в кг = (L × W × H в см) / 5000. Удобный источник
+   * объёма, когда габариты не приходят отдельно: `volume_L = volume_weight × 5`. */
+  volume_weight?: number;
   price: {
     // Ozon /v5 sometimes returns these as numbers, sometimes as decimal strings ("1234.56").
     price: string | number;

@@ -20,11 +20,17 @@ const TYPE_LABEL: Record<FinanceType, string> = {
   other: "Прочее",
 };
 
-const todayIso = (): string => new Date().toISOString().slice(0, 10);
+const formatLocalIso = (d: Date): string => {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+};
+const todayIso = (): string => formatLocalIso(new Date());
 const monthAgoIso = (): string => {
   const d = new Date();
   d.setMonth(d.getMonth() - 1);
-  return d.toISOString().slice(0, 10);
+  return formatLocalIso(d);
 };
 
 const fmtDate = (ms: number): string => {
@@ -64,16 +70,51 @@ interface Props {
   onOpenArticle?: (articleId: string) => void;
 }
 
+const FINANCE_PERIOD_KEY = "ozon-calc.finance-period";
+const loadStoredPeriod = (): { from: string; to: string } | null => {
+  try {
+    const raw = localStorage.getItem(FINANCE_PERIOD_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { from?: string; to?: string };
+    if (parsed?.from && parsed?.to) return { from: parsed.from, to: parsed.to };
+  } catch {
+    /* ignore */
+  }
+  return null;
+};
+
 export default function FinanceTab({ onOpenArticle }: Props = {}) {
-  const [from, setFrom] = useState(monthAgoIso());
-  const [to, setTo] = useState(todayIso());
+  const stored = loadStoredPeriod();
+  const [from, setFrom] = useState(stored?.from ?? monthAgoIso());
+  const [to, setTo] = useState(stored?.to ?? todayIso());
+
+  // Persist last-used period across page reloads. Hides the surprise of
+  // returning to the default monthly window after a long-period import.
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        FINANCE_PERIOD_KEY,
+        JSON.stringify({ from, to }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [from, to]);
+
   const [importing, setImporting] = useState(false);
   const [run, setRun] = useState<ImportRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<FinanceTransactionRow[]>([]);
   const [summary, setSummary] = useState<FinanceSummaryRow[]>([]);
   const [filterType, setFilterType] = useState<FinanceType | "">("");
+  const PAGE_SIZE = 100;
+  const [page, setPage] = useState(1);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Reset to first page when filters change.
+  useEffect(() => {
+    setPage(1);
+  }, [from, to, filterType]);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,7 +125,8 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
             from,
             to,
             type: filterType || undefined,
-            limit: 500,
+            limit: PAGE_SIZE,
+            offset: (page - 1) * PAGE_SIZE,
           }),
           api.finance.summary({ from, to }),
         ]);
@@ -98,7 +140,7 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
     return () => {
       cancelled = true;
     };
-  }, [from, to, filterType]);
+  }, [from, to, filterType, page]);
 
   const refresh = async () => {
     try {
@@ -107,7 +149,8 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
           from,
           to,
           type: filterType || undefined,
-          limit: 500,
+          limit: PAGE_SIZE,
+          offset: (page - 1) * PAGE_SIZE,
         }),
         api.finance.summary({ from, to }),
       ]);
@@ -126,6 +169,30 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
 
   const [relinking, setRelinking] = useState(false);
   const [relinkResult, setRelinkResult] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [clearResult, setClearResult] = useState<string | null>(null);
+
+  const clearAll = async () => {
+    if (
+      !window.confirm(
+        "Удалить ВСЕ импортированные финансовые транзакции из локальной БД? " +
+          "После этого можно импортировать с нуля. Действие необратимо.",
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    setClearResult(null);
+    try {
+      const { deleted } = await api.finance.clearAll();
+      setClearResult(`Удалено ${deleted} операций.`);
+      void refresh();
+    } catch (e) {
+      setClearResult(`Ошибка: ${(e as Error).message}`);
+    } finally {
+      setClearing(false);
+    }
+  };
 
   const relink = async () => {
     setRelinking(true);
@@ -179,40 +246,53 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
     }
   };
 
-  // Aggregate KPI values over rows (current filter respected via summary).
-  const totalIncome = rows.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0);
-  const totalExpense = rows.filter((r) => r.amount < 0).reduce((s, r) => s + r.amount, 0);
-  const netTotal = rows.reduce((s, r) => s + r.amount, 0);
-  const totalAmount = summary.reduce((acc, s) => acc + s.total, 0);
+  // KPI считаем из summary (агрегат сервера по всему периоду), а не из
+  // rows — последние ограничены пагинацией (100 на страницу).
+  // «Поступления» = sale-операции (positive total), «Удержания» = всё
+  // остальное со знаком минус (комиссии, логистика, возвраты, хранение).
+  // Себестоимость в БД не лежит, поэтому это не «Доходы/Расходы» в налоговом
+  // смысле — это движение по счёту от Ozon.
+  const totalIncome = summary
+    .filter((s) => s.total > 0)
+    .reduce((acc, s) => acc + s.total, 0);
+  const totalExpense = summary
+    .filter((s) => s.total < 0)
+    .reduce((acc, s) => acc + s.total, 0);
+  const netTotal = summary.reduce((acc, s) => acc + s.total, 0);
+  const totalAmount = netTotal; // alias, used by сводка-tfoot ниже
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* KPI cards */}
       <div className="kpi-cards">
         <KpiCard
-          label="Доходы"
+          label="Поступления"
           value={fmtRub(totalIncome)}
-          sub="За выбранный период"
+          sub="Выручка от продаж (до удержаний Ozon)"
           accent="var(--ok)"
           icon={<ArrowUpRight size={14} />}
         />
         <KpiCard
-          label="Расходы"
+          label="Удержания Ozon"
           value={fmtRub(Math.abs(totalExpense))}
-          sub="Комиссии + логистика"
+          sub="Комиссии, логистика, возвраты, хранение"
           accent="var(--err)"
           icon={<ArrowDownRight size={14} />}
         />
         <KpiCard
-          label="Чистый доход"
+          label="К получению"
           value={fmtRub(netTotal)}
-          sub={netTotal >= 0 ? "Прибыль" : "Убыток"}
+          sub={
+            netTotal >= 0
+              ? "Поступит на счёт (без учёта налогов и себестоимости)"
+              : "Ушло со счёта"
+          }
           accent={netTotal >= 0 ? "var(--accent)" : "var(--err)"}
           icon={<Equal size={14} />}
         />
         <KpiCard
           label="Операций"
-          value={String(rows.length)}
+          value={String(summary.reduce((a, s) => a + s.count, 0))}
           sub="Всего записей"
           accent="var(--info)"
           icon={<Receipt size={14} />}
@@ -231,17 +311,70 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
             marginBottom: 20,
           }}
         >
-          <label>
-            <span>С даты</span>
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-          </label>
-          <label>
-            <span>По дату</span>
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-          </label>
-          <button className="btn-primary" onClick={startImport} disabled={importing}>
-            Импортировать за период
-          </button>
+          {(() => {
+            const localToday = (() => {
+              const d = new Date();
+              const yyyy = d.getFullYear();
+              const mm = String(d.getMonth() + 1).padStart(2, "0");
+              const dd = String(d.getDate()).padStart(2, "0");
+              return `${yyyy}-${mm}-${dd}`;
+            })();
+            // Произвольный период разрешён — сервер сам разобьёт на 30-дневные
+            // чанки и прогонит последовательно. Ограничиваем только «не в
+            // будущее» и «to ≥ from».
+            return (
+              <>
+                <label>
+                  <span>С даты</span>
+                  <input
+                    type="date"
+                    value={from}
+                    max={localToday}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setFrom(v);
+                      if (to < v) setTo(v);
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>По дату</span>
+                  <input
+                    type="date"
+                    value={to}
+                    min={from}
+                    max={localToday}
+                    onChange={(e) => setTo(e.target.value)}
+                  />
+                </label>
+              </>
+            );
+          })()}
+          {(() => {
+            const days =
+              Math.round(
+                (new Date(to).getTime() - new Date(from).getTime()) /
+                  (24 * 60 * 60 * 1000),
+              ) + 1;
+            const chunkCount = Math.max(1, Math.ceil(days / 30));
+            const invalid = days <= 0;
+            return (
+              <button
+                className="btn-primary"
+                onClick={startImport}
+                disabled={importing || invalid}
+                title={
+                  invalid
+                    ? "«По дату» должна быть позже «С даты»"
+                    : chunkCount === 1
+                      ? `Период ${days} дн. — один запрос к Ozon API.`
+                      : `Период ${days} дн. Будет разбит на ${chunkCount} запросов по 30 дней (Ozon API ограничен 30 днями за раз).`
+                }
+              >
+                Импортировать за период
+              </button>
+            );
+          })()}
           <button
             className="btn-secondary"
             onClick={relink}
@@ -253,6 +386,20 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
           {relinkResult && (
             <span className="muted" style={{ fontSize: 12 }}>
               {relinkResult}
+            </span>
+          )}
+          <button
+            className="btn-secondary"
+            onClick={clearAll}
+            disabled={clearing}
+            title="Удалить все импортированные транзакции из локальной БД."
+            style={{ color: "var(--err)", borderColor: "var(--err)" }}
+          >
+            {clearing ? "Очищаем…" : "Очистить финансы"}
+          </button>
+          {clearResult && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              {clearResult}
             </span>
           )}
           <label>
@@ -315,10 +462,32 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
         )}
 
         <div style={{ marginTop: 16 }}>
-          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>
-            Операции ({rows.length}
-            {rows.length === 500 ? "+" : ""})
-          </div>
+          {(() => {
+            const totalOps = summary.reduce((a, s) => a + s.count, 0);
+            const fromIdx = totalOps === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+            const toIdx = Math.min(page * PAGE_SIZE, totalOps);
+            return (
+              <div
+                style={{
+                  fontWeight: 700,
+                  fontSize: 14,
+                  marginBottom: 12,
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 8,
+                }}
+              >
+                <span>Операции ({totalOps})</span>
+                {totalOps > 0 && (
+                  <span
+                    style={{ fontWeight: 400, color: "var(--muted)", fontSize: 12 }}
+                  >
+                    {fromIdx}–{toIdx} из {totalOps}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           <div className="products-scroll">
             <table className="products-table">
               <thead>
@@ -404,6 +573,50 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
               )}
             </table>
           </div>
+          {(() => {
+            const totalOps = summary.reduce((a, s) => a + s.count, 0);
+            const pageCount = Math.max(1, Math.ceil(totalOps / PAGE_SIZE));
+            if (pageCount <= 1) return null;
+            const goto = (p: number) =>
+              setPage(Math.min(Math.max(1, p), pageCount));
+            return (
+              <div className="finance-pagination">
+                <button
+                  type="button"
+                  onClick={() => goto(1)}
+                  disabled={page === 1}
+                  title="К первой странице"
+                >
+                  «
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goto(page - 1)}
+                  disabled={page === 1}
+                >
+                  ‹ Назад
+                </button>
+                <span className="finance-pagination-info">
+                  стр. {page} из {pageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => goto(page + 1)}
+                  disabled={page === pageCount}
+                >
+                  Далее ›
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goto(pageCount)}
+                  disabled={page === pageCount}
+                  title="К последней странице"
+                >
+                  »
+                </button>
+              </div>
+            );
+          })()}
         </div>
       </section>
     </div>

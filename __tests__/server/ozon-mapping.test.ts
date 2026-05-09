@@ -152,7 +152,7 @@ describe("mapCatalogEntry", () => {
   };
 
   it("maps full record", () => {
-    const m = mapCatalogEntry(info, price, lookup);
+    const m = mapCatalogEntry(info, price, undefined, lookup);
     expect(m.articleId).toBe("COFFEE-1");
     expect(m.ozonProductId).toBe(12345);
     expect(m.patch.category).toBe("Кофеварки и кофемашины");
@@ -172,6 +172,7 @@ describe("mapCatalogEntry", () => {
         ...price,
         price: { ...price.price, net_price: 200000 },
       } as OzonPriceItem,
+      undefined,
       lookup,
     );
     expect(m.costPrice).toBe(200000);
@@ -184,20 +185,26 @@ describe("mapCatalogEntry", () => {
         ...price,
         price: { ...price.price, net_price: 0 },
       } as OzonPriceItem,
+      undefined,
       lookup,
     );
     expect(m.costPrice).toBeNull();
   });
 
   it("handles missing price gracefully", () => {
-    const m = mapCatalogEntry(info, undefined, lookup);
+    const m = mapCatalogEntry(info, undefined, undefined, lookup);
     expect(m.patch.currentPrice).toBe(0);
     expect(m.patch.discountPercent).toBe(0);
     expect(m.costPrice).toBeNull();
   });
 
   it("emits empty category names when lookup fails", () => {
-    const m = mapCatalogEntry({ ...info, type_id: 99999 }, price, lookup);
+    const m = mapCatalogEntry(
+      { ...info, type_id: 99999 },
+      price,
+      undefined,
+      lookup,
+    );
     expect(m.patch.category).toBe("");
     expect(m.patch.productType).toBe("");
   });

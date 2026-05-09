@@ -7,6 +7,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
+      // HOST=0.0.0.0 to expose on all interfaces (LAN). Default localhost.
+      host: env.HOST || undefined,
       proxy: {
         "/api": { target, changeOrigin: false },
       },

@@ -116,5 +116,12 @@ export function financeRoutes(db: DB): Hono {
     return c.json(rows);
   });
 
+  // Удалить ВСЕ накопленные транзакции. Используется кнопкой «Очистить
+  // импортированные финансы» в UI. После этого можно импортировать с нуля.
+  app.delete("/transactions/all", async (c) => {
+    const result = await db.delete(financeTransactions);
+    return c.json({ deleted: result.changes });
+  });
+
   return app;
 }

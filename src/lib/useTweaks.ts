@@ -5,7 +5,12 @@ export interface Tweaks {
   darkHeader: boolean;
   showChart: boolean;
   density: "normal" | "compact";
-  unitMode: boolean;
+  /** Which numbers to show in the products-table margin column and as the
+   * "full picture" secondary in OzonBreakdown.
+   *  - "margin": only `marginRub` (real take-home profit).
+   *  - "payout": only `ozonNetPayout` (what Ozon transfers).
+   *  - "both": payout primary + margin secondary (default). */
+  breakdownMode: "both" | "margin" | "payout";
 }
 
 export const TWEAK_DEFAULTS: Tweaks = {
@@ -13,7 +18,7 @@ export const TWEAK_DEFAULTS: Tweaks = {
   darkHeader: false,
   showChart: true,
   density: "normal",
-  unitMode: false,
+  breakdownMode: "both",
 };
 
 const STORAGE_KEY = "ozon-calc.tweaks";

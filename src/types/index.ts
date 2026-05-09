@@ -19,6 +19,17 @@ export type AcceptanceTariff =
 export type LogisticsMode = "Авто" | "По доле локальных";
 export type ClustersCount = number | "Считать без наценки";
 
+/**
+ * Mode for the per-SKU API calculation branch:
+ *   - "ozon" — match the official Ozon online calculator: use
+ *     `*_return_flow_amount` for return cost (no `+15` constant).
+ *   - "tz" — keep legacy formulas from the original tech spec
+ *     (`(baseDelivery + 15) × returnPercentInt / 100` for return).
+ * Affects only items that have `ozonCommissions` (API path); the table-based
+ * path is independent of this setting.
+ */
+export type CalcMode = "ozon" | "tz";
+
 export interface TaxSettings {
   damageRate: number;
   taxSystem: TaxSystem;
@@ -30,6 +41,21 @@ export interface TaxSettings {
   osnoIpAnnualIncome: number;
   npdRate: number;
   partyExtraExpenses: number;
+  /** Optional in stored data for backwards-compatibility — defaults to "tz". */
+  calcMode?: CalcMode;
+  /** Default for `ProductInput.whitePurchase` when товар не выставил явно
+   * (whitePurchase = null). false по умолчанию. */
+  defaultWhitePurchase?: boolean;
+  /** VAT rate that applies to the seller on USN. Determined by previous-year
+   * revenue (since 2025): <60M → "Не облагается", 60-250M → 5%, 250-450M → 7%,
+   * >450M → 22%. Used in place of per-product `vatRate` whenever `taxSystem`
+   * is "УСН Доходы" or "УСН Доходы минус расходы". On OSNO this field is
+   * ignored and the per-product `vatRate` applies (mixed-rate categories). */
+  usnVatRate?: VatRate;
+  /** Использовать точную per-cluster-pair матрицу логистики из загруженной
+   * Excel-таблицы Ozon (`ref_logistics_cluster_tariffs`) вместо API min/max
+   * или базового табличного лукапа. По умолчанию false. */
+  useClusterLogistics?: boolean;
 }
 
 export interface LogisticsSettings {
@@ -75,6 +101,18 @@ export interface LogisticsTariffRow {
   nonLocalOver300: number;
 }
 
+export interface LogisticsClusterTariffRow {
+  /** Нижняя граница диапазона объёма (литры). Применяем к товарам с
+   * `volumeL >= volumeFrom`, выбирая максимальный подходящий. */
+  volumeFrom: number;
+  fromCluster: string;
+  toCluster: string;
+  /** Тариф для товаров с ценой < 300 ₽. */
+  tariffLte300: number;
+  /** Тариф для товаров с ценой ≥ 300 ₽. */
+  tariffGt300: number;
+}
+
 export interface ProductInput {
   articleId: string;
   productName: string;
@@ -85,12 +123,24 @@ export interface ProductInput {
   isFireHazard: boolean;
   plannedStorageDays: number;
   volumeL: number;
+  /** Габариты упаковки в мм. Заполняются Ozon-импортом или вручную; при
+   * заполнении используются для пересчёта `volumeL`. null = не задано. */
+  depthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  /** Вес упаковки в граммах. null = не задано. */
+  weightG: number | null;
   vatRate: VatRate;
   redemptionPercent: number;
   salesPlan: number;
   logisticsMode: LogisticsMode;
   localShare: number;
   clustersCount: ClustersCount;
+  /** Ozon dispatch cluster (warehouse origin). Used in the API path to pick
+   * the min/max logistics bracket: same cluster = local = min, different = max. */
+  dispatchCluster: string;
+  /** Ozon destination cluster (buyer region). */
+  destinationCluster: string;
   currentPrice: number;
   discountPercent: number;
   marketingPercent: number;
@@ -99,7 +149,9 @@ export interface ProductInput {
   acceptanceTariff: AcceptanceTariff;
   costPrice: number;
   extraExpensesPerUnit: number;
-  whitePurchase: boolean;
+  /** true = белая закупка (с документами), false = серая, null = брать из
+   * глобальной настройки `taxSettings.defaultWhitePurchase`. */
+  whitePurchase: boolean | null;
   incomingVatPurchase: boolean;
   incomingVatRate: IncomingVatRate;
 }
@@ -114,6 +166,12 @@ export interface OzonCommissions {
   // Sale commission percentages as returned by Ozon API (e.g. 18 = 18%)
   sales_percent_fbo?: number;
   sales_percent_fbs?: number;
+  /** realFBS commission. Older versions of the project substituted
+   * `sales_percent_fbs` here — use this field when present. */
+  sales_percent_rfbs?: number;
+  /** Fulfilled-by-Partner commission. Stored for completeness; the calculator
+   * does not currently model the FBP scheme. */
+  sales_percent_fbp?: number;
 
   // FBO logistics
   fbo_fulfillment_amount?: number;
@@ -146,6 +204,14 @@ export interface ProductRow {
   regularPrice?: number | null;
   /** Public SKU for marketplace URL (different from `ozonProductId`). */
   ozonSku?: number | null;
+  /** Card archive flag from Ozon. null when product wasn't imported. */
+  ozonArchived?: boolean | null;
+  /** Whether Ozon currently shows the card on sale. */
+  ozonVisible?: boolean | null;
+  /** Short machine state name from Ozon (e.g. "processed"). */
+  ozonStatusName?: string | null;
+  /** Free-text reason for inactivity (failed moderation, no price, etc.). */
+  ozonStatusDescription?: string | null;
 }
 
 export interface SchemaResult {
@@ -157,9 +223,14 @@ export interface SchemaResult {
   storageRub: number;
   acceptanceRub: number;
   damageRub: number;
+  /** Ozon return-services cost (separately from the headline "Логистика"). */
+  ozonReturnServicesRub: number;
   vatPayable: number;
   totalTax: number;
   totalExpenses: number;
+  /** Mirror of the Ozon online calculator's "К начислению за товар": price
+   * minus all Ozon-side fees, before taxes / cost of goods / marketing. */
+  ozonNetPayout: number;
   marginRub: number;
   marginPercent: number;
   profitability: number;
@@ -181,4 +252,7 @@ export interface References {
   storage: StorageRow[];
   logisticsTariffs: LogisticsTariffRow[];
   logisticsSettings: LogisticsSettings;
+  /** Точные тарифы per-cluster-pair, опциональные. Заполняются загрузкой
+   * `Тарифы_с_6_апреля`-листа из Excel-эталона Ozon. */
+  logisticsClusterTariffs?: LogisticsClusterTariffRow[];
 }

@@ -7,6 +7,7 @@ import { createOzonClient, resolveCredentials, type OzonClient } from "../ozon/c
 import {
   getCategoryLookup,
   getProductsInfo,
+  getProductsAttributes,
   getPrices,
   iterateProductList,
 } from "../ozon/catalog";
@@ -50,13 +51,14 @@ export async function runCatalogImport(
   const categories = await getCategoryLookup(client);
 
   for await (const page of iterateProductList(client)) {
-    const [infos, priceMap] = await Promise.all([
+    const [infos, priceMap, attrsMap] = await Promise.all([
       getProductsInfo(client, page.productIds),
       getPrices(client, page.productIds),
+      getProductsAttributes(client, page.productIds),
     ]);
 
     const mapped = infos.map((info) =>
-      mapCatalogEntry(info, priceMap.get(info.id), categories),
+      mapCatalogEntry(info, priceMap.get(info.id), attrsMap.get(info.id), categories),
     );
 
     db.transaction((tx) => {
@@ -86,12 +88,22 @@ export async function runCatalogImport(
             entry.costPrice != null ? { costPrice: entry.costPrice } : {};
           const skuUpdate =
             entry.ozonSku != null ? { ozonSku: entry.ozonSku } : {};
+          const statusUpdate = {
+            ozonArchived: entry.status.archived,
+            ozonVisible: entry.status.visible,
+            ozonStatusName: entry.status.statusName,
+            ozonStatusDescription: entry.status.statusDescription,
+          };
           tx.update(products)
             .set({
               productName: patch.productName,
               category: patch.category,
               productType: patch.productType,
               volumeL: patch.volumeL,
+              depthMm: patch.depthMm,
+              widthMm: patch.widthMm,
+              heightMm: patch.heightMm,
+              weightG: patch.weightG,
               vatRate: String(patch.vatRate),
               isKgt: patch.isKgt,
               currentPrice: patch.currentPrice,
@@ -102,6 +114,7 @@ export async function runCatalogImport(
               ...costPriceUpdate,
               ...skuUpdate,
               ...commissionsUpdate,
+              ...statusUpdate,
             })
             .where(eq(products.articleId, entry.articleId))
             .run();
@@ -127,6 +140,10 @@ export async function runCatalogImport(
               category: entry.patch.category,
               productType: entry.patch.productType,
               volumeL: entry.patch.volumeL,
+              depthMm: entry.patch.depthMm,
+              widthMm: entry.patch.widthMm,
+              heightMm: entry.patch.heightMm,
+              weightG: entry.patch.weightG,
               vatRate: String(entry.patch.vatRate),
               isKgt: entry.patch.isKgt,
               currentPrice: entry.patch.currentPrice,
@@ -139,6 +156,10 @@ export async function runCatalogImport(
               updatedAt: now,
               ozonCommissions: entry.ozonCommissions,
               ozonCommissionsUpdatedAt: entry.ozonCommissions ? now : null,
+              ozonArchived: entry.status.archived,
+              ozonVisible: entry.status.visible,
+              ozonStatusName: entry.status.statusName,
+              ozonStatusDescription: entry.status.statusDescription,
             })
             .run();
           counters.added++;
@@ -165,6 +186,30 @@ const toIsoStartOfDay = (s: string): string =>
   s.includes("T") ? s : `${s}T00:00:00.000Z`;
 const toIsoEndOfDay = (s: string): string =>
   s.includes("T") ? s : `${s}T23:59:59.999Z`;
+
+/** Разбить ISO-период на чанки ≤ 30 дней inclusive (предел Ozon API).
+ * Каждый чанк начинается со start-of-day, заканчивается end-of-day и не
+ * пересекается со следующим. */
+function splitFinanceRange(
+  fromIso: string,
+  toIso: string,
+): Array<{ from: string; to: string }> {
+  const out: Array<{ from: string; to: string }> = [];
+  const final = new Date(toIso);
+  let chunkStart = new Date(fromIso);
+  while (chunkStart <= final) {
+    const chunkEnd = new Date(chunkStart);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 29);
+    chunkEnd.setUTCHours(23, 59, 59, 999);
+    const actualEnd = chunkEnd > final ? final : chunkEnd;
+    out.push({ from: chunkStart.toISOString(), to: actualEnd.toISOString() });
+    if (actualEnd >= final) break;
+    chunkStart = new Date(chunkEnd);
+    chunkStart.setUTCDate(chunkStart.getUTCDate() + 1);
+    chunkStart.setUTCHours(0, 0, 0, 0);
+  }
+  return out;
+}
 
 /** Build sku → articleId map from products. Used as a fallback when finance
  * operations have items[].sku but not items[].offer_id (older Ozon ops). */
@@ -319,11 +364,22 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
     ) {
       return c.json({ error: "from/to must be ISO date strings" }, 400);
     }
+    const fromIso = toIsoStartOfDay(from);
+    const toIso = toIsoEndOfDay(to);
+    // Ozon API ограничивает один запрос к /v3/finance/transaction/list 30
+    // днями. Период длиннее автоматически разбиваем на 30-дневные чанки и
+    // прогоняем последовательно. Дедуп — через PK operation_id с
+    // onConflictDoNothing, поэтому стыки чанков идемпотентны.
+    if (new Date(toIso).getTime() <= new Date(fromIso).getTime()) {
+      return c.json({ error: "to должно быть позже from" }, 400);
+    }
+    const transactionTypeStr =
+      typeof transactionType === "string" ? transactionType : undefined;
+    const chunks = splitFinanceRange(fromIso, toIso);
     const filter: TransactionFilter = {
-      from: toIsoStartOfDay(from),
-      to: toIsoEndOfDay(to),
-      transactionType:
-        typeof transactionType === "string" ? transactionType : undefined,
+      from: fromIso,
+      to: toIso,
+      transactionType: transactionTypeStr,
     };
 
     let client = ctx.ozonClient;
@@ -349,19 +405,50 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
 
     void (async () => {
       try {
-        const counters = await runFinanceImport(db, client, filter, (c2) => {
-          db.update(importRuns)
-            .set({ itemsProcessed: c2.itemsProcessed })
-            .where(eq(importRuns.id, run.id))
-            .run();
-        });
+        const total = {
+          itemsProcessed: 0,
+          inserted: 0,
+          skipped: 0,
+        };
+        for (let i = 0; i < chunks.length; i++) {
+          const ch = chunks[i];
+          const chunkFilter: TransactionFilter = {
+            from: ch.from,
+            to: ch.to,
+            transactionType: transactionTypeStr,
+          };
+          const counters = await runFinanceImport(db, client, chunkFilter, (c2) => {
+            db.update(importRuns)
+              .set({
+                itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
+                params: {
+                  from: filter.from,
+                  to: filter.to,
+                  chunks: { total: chunks.length, current: i + 1 },
+                  inserted: total.inserted + c2.inserted,
+                  skipped: total.skipped + c2.skipped,
+                  itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
+                },
+              })
+              .where(eq(importRuns.id, run.id))
+              .run();
+          });
+          total.itemsProcessed += counters.itemsProcessed;
+          total.inserted += counters.inserted;
+          total.skipped += counters.skipped;
+        }
         await db
           .update(importRuns)
           .set({
             status: "ok",
             finishedAt: new Date(),
-            itemsProcessed: counters.itemsProcessed,
-            params: { from: filter.from, to: filter.to, ...counters },
+            itemsProcessed: total.itemsProcessed,
+            params: {
+              from: filter.from,
+              to: filter.to,
+              chunks: { total: chunks.length, current: chunks.length },
+              ...total,
+            },
           })
           .where(eq(importRuns.id, run.id));
       } catch (e) {
@@ -459,7 +546,11 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
           return m.get(info.id);
         })());
 
-      const entry = mapCatalogEntry(info, priceItem, categories);
+      // Подтягиваем точные габариты из /v4/product/info/attributes.
+      const attrsMap = await getProductsAttributes(client, [info.id]);
+      const attrsItem = attrsMap.get(info.id);
+
+      const entry = mapCatalogEntry(info, priceItem, attrsItem, categories);
 
       const now = new Date();
       const commissionsUpdate: {
@@ -475,12 +566,22 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
         entry.costPrice != null ? { costPrice: entry.costPrice } : {};
       const skuUpdate =
         entry.ozonSku != null ? { ozonSku: entry.ozonSku } : {};
+      const statusUpdate = {
+        ozonArchived: entry.status.archived,
+        ozonVisible: entry.status.visible,
+        ozonStatusName: entry.status.statusName,
+        ozonStatusDescription: entry.status.statusDescription,
+      };
       db.update(products)
         .set({
           productName: entry.patch.productName,
           category: entry.patch.category || existing.category,
           productType: entry.patch.productType || existing.productType,
           volumeL: entry.patch.volumeL,
+          depthMm: entry.patch.depthMm,
+          widthMm: entry.patch.widthMm,
+          heightMm: entry.patch.heightMm,
+          weightG: entry.patch.weightG,
           vatRate: String(entry.patch.vatRate),
           isKgt: entry.patch.isKgt,
           currentPrice: entry.patch.currentPrice,
@@ -491,6 +592,7 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
           ...costPriceUpdate,
           ...skuUpdate,
           ...commissionsUpdate,
+          ...statusUpdate,
         })
         .where(eq(products.articleId, articleId))
         .run();
@@ -504,6 +606,7 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
         costPrice: entry.costPrice,
         ozonSku: entry.ozonSku,
         ozonCommissions: entry.ozonCommissions,
+        status: entry.status,
       });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 502);
@@ -650,6 +753,45 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
       },
       recent,
     });
+  });
+
+  // Diagnostic: dump raw /v3/product/info/list for a single article. Used to
+  // verify that Ozon actually returns visibility_details / status fields for
+  // a given SKU when the inactivity badge is missing.
+  app.get("/debug/info/:articleId", async (c) => {
+    const articleId = c.req.param("articleId");
+    if (!articleId) return c.json({ error: "articleId required" }, 400);
+
+    let client = ctx.ozonClient;
+    if (!client) {
+      const creds = await resolveCredentials(db);
+      if (!creds) {
+        return c.json({ error: "ozon credentials not configured" }, 400);
+      }
+      client = createOzonClient({ creds });
+    }
+
+    const requestBody = { offer_id: [articleId] };
+    try {
+      const response = await client.post<unknown>(
+        "/v3/product/info/list",
+        requestBody,
+      );
+      return c.json({
+        endpoint: "/v3/product/info/list",
+        request: requestBody,
+        response,
+      });
+    } catch (e) {
+      return c.json(
+        {
+          endpoint: "/v3/product/info/list",
+          request: requestBody,
+          error: (e as Error).message,
+        },
+        502,
+      );
+    }
   });
 
   // Diagnostic: dump raw /v5/product/info/prices response for a single article.

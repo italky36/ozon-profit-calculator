@@ -38,6 +38,8 @@ const SAMPLE_INPUT: ProductInput = {
   logisticsMode: "Авто",
   localShare: 0.5,
   clustersCount: "Считать без наценки",
+  dispatchCluster: "Москва, МО и Дальние регионы",
+  destinationCluster: "Москва, МО и Дальние регионы",
   currentPrice: 337000,
   discountPercent: 0.345,
   marketingPercent: 0,

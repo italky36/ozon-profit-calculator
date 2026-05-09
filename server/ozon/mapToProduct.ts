@@ -1,5 +1,9 @@
 import type { CategoryLookup } from "./catalog";
-import type { OzonPriceItem, OzonProductInfo } from "./types";
+import type {
+  OzonPriceItem,
+  OzonProductAttributesItem,
+  OzonProductInfo,
+} from "./types";
 import type {
   OzonCommissions,
   ProductInput,
@@ -13,6 +17,10 @@ export type CatalogPatch = Pick<
   | "category"
   | "productType"
   | "volumeL"
+  | "depthMm"
+  | "widthMm"
+  | "heightMm"
+  | "weightG"
   | "vatRate"
   | "isKgt"
   | "currentPrice"
@@ -36,13 +44,15 @@ export const NEW_PRODUCT_DEFAULTS: Omit<
   logisticsMode: "Авто",
   localShare: 0.5,
   clustersCount: "Считать без наценки",
+  dispatchCluster: "Москва, МО и Дальние регионы",
+  destinationCluster: "Москва, МО и Дальние регионы",
   marketingPercent: 0,
   realFbsDeliveryCost: 0,
   realFbsReturnCost: 0,
   acceptanceTariff: "Доверительная приемка",
   costPrice: 0,
   extraExpensesPerUnit: 0,
-  whitePurchase: false,
+  whitePurchase: null,
   incomingVatPurchase: false,
   incomingVatRate: 0,
 };
@@ -80,17 +90,34 @@ const UNIT_TO_CM: Record<string, number> = {
   in: 2.54,
 };
 
-/** Compute volume in litres from Ozon dimensions (cm³ / 1000). */
-export function computeVolumeL(info: OzonProductInfo): number {
-  if (!info.dimensions) return 0;
-  const { depth, height, width, dimension_unit } = info.dimensions;
-  const factor = UNIT_TO_CM[dimension_unit] ?? 0.1; // default mm
+/** Compute volume in litres from any object with depth/width/height fields. */
+export function computeVolumeLFromDims(d: {
+  depth?: number;
+  width?: number;
+  height?: number;
+  dimension_unit?: "mm" | "cm" | "in";
+}): number {
+  const { depth, width, height } = d;
+  const unit = d.dimension_unit ?? "mm";
+  if (!depth || !width || !height) return 0;
+  const factor = UNIT_TO_CM[unit] ?? 0.1;
   const cmVolume =
-    Number(depth) * factor *
-    Number(height) * factor *
-    Number(width) * factor;
+    Number(depth) * factor * Number(width) * factor * Number(height) * factor;
   if (!Number.isFinite(cmVolume) || cmVolume <= 0) return 0;
   return cmVolume / 1000;
+}
+
+/** Compute volume in litres из `OzonProductInfo` (на случай если у новых
+ * версий API габариты придут прямо в info/list). Поддерживает оба формата:
+ * top-level и вложенный `dimensions`. */
+export function computeVolumeL(info: OzonProductInfo): number {
+  return computeVolumeLFromDims({
+    depth: info.depth ?? info.dimensions?.depth,
+    width: info.width ?? info.dimensions?.width,
+    height: info.height ?? info.dimensions?.height,
+    dimension_unit:
+      info.dimension_unit ?? info.dimensions?.dimension_unit ?? "mm",
+  });
 }
 
 const toMoney = (s: string | number | undefined | null): number => {
@@ -149,6 +176,18 @@ export function pickPublicSku(info: OzonProductInfo): number | null {
   return valid[0].sku ?? null;
 }
 
+export interface OzonStatus {
+  /** Card is in archive (will not show up on the marketplace). */
+  archived: boolean;
+  /** Visibility flag — `true` when Ozon considers the card on sale right now. */
+  visible: boolean;
+  /** Short machine-friendly state name (e.g. "processed", "moderating"). */
+  statusName: string | null;
+  /** Free-text description. Aggregated from `state_description`,
+   * `state_failed_moderation_reasons[0]`, `visibility_details.reason`, etc. */
+  statusDescription: string | null;
+}
+
 export interface MappedCatalogEntry {
   articleId: string;
   ozonProductId: number;
@@ -160,11 +199,51 @@ export interface MappedCatalogEntry {
   costPrice: number | null;
   /** Public SKU for marketplace URL. null when API didn't return any sources. */
   ozonSku: number | null;
+  /** Card lifecycle/visibility status from `/v3/product/info/list`. */
+  status: OzonStatus;
+}
+
+/** Pull a card-status snapshot from `OzonProductInfo`. Tolerant to missing
+ * fields — different API versions populate different subsets. */
+export function extractStatus(info: OzonProductInfo): OzonStatus {
+  const archived = !!(info.archived ?? info.is_archived);
+  const vd = info.visibility_details ?? {};
+  // "Visible" = published AND in stock — matches the buyer-facing state on
+  // the marketplace ("Этот товар закончился" → visible: false even when the
+  // card itself is still active in seller LK).
+  const onSale = vd.active_product ?? !archived;
+  const inStock = vd.has_stock !== false; // undefined treated as "in stock"
+  const visible = onSale && inStock;
+  const statusName =
+    info.status?.state_name?.trim() ||
+    info.status?.state?.trim() ||
+    null;
+  const reasons: string[] = [];
+  const sd = info.status?.state_description?.trim();
+  if (sd) reasons.push(sd);
+  const fail = info.status?.state_failed?.trim();
+  if (fail) reasons.push(fail);
+  const fmr = info.status?.state_failed_moderation_reasons ?? [];
+  for (const r of fmr) if (r) reasons.push(r);
+  const ie = info.status?.item_errors ?? [];
+  for (const e of ie) if (e?.message) reasons.push(e.message);
+  if (vd.reason) reasons.push(vd.reason);
+  if (!visible && !archived) {
+    if (vd.has_price === false) reasons.push("Нет цены");
+    if (vd.has_stock === false) reasons.push("Нет в наличии");
+  }
+  return {
+    archived,
+    visible,
+    statusName,
+    statusDescription: reasons.length ? reasons.join("; ") : null,
+  };
 }
 
 export function mapCatalogEntry(
   info: OzonProductInfo,
   price: OzonPriceItem | undefined,
+  attrs: OzonProductAttributesItem | undefined,
   categories: CategoryLookup,
 ): MappedCatalogEntry {
   const cat = categories.resolve(info.description_category_id, info.type_id);
@@ -173,6 +252,61 @@ export function mapCatalogEntry(
     : { currentPrice: 0, discountPercent: 0, regularPrice: null };
   const netPrice = price ? toMoney(price.price.net_price) : 0;
 
+  // Объём: 3-уровневый fallback от лучшего к худшему:
+  // 1) /v4/product/info/attributes — точные depth/width/height;
+  // 2) /v3/product/info/list — если в этой версии API габариты есть;
+  // 3) /v5/product/info/prices.volume_weight × 5 — расчёт из объёмного веса.
+  // Параллельно сохраняем сами габариты в отдельные поля для UI и пересчёта.
+  const dimsSrc =
+    attrs && (attrs.depth || attrs.width || attrs.height)
+      ? {
+          depth: attrs.depth,
+          width: attrs.width,
+          height: attrs.height,
+          unit: attrs.dimension_unit ?? "mm",
+          weight: attrs.weight,
+          weightUnit: attrs.weight_unit ?? "g",
+        }
+      : info.depth || info.width || info.height
+        ? {
+            depth: info.depth ?? info.dimensions?.depth,
+            width: info.width ?? info.dimensions?.width,
+            height: info.height ?? info.dimensions?.height,
+            unit: info.dimension_unit ?? info.dimensions?.dimension_unit ?? "mm",
+            weight: info.weight,
+            weightUnit: info.weight_unit ?? "g",
+          }
+        : null;
+
+  // Конвертация габаритов в мм (для хранения).
+  const toMm = (v: number | undefined, unit: string): number | null => {
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    const mult = unit === "cm" ? 10 : unit === "in" ? 25.4 : 1;
+    return Number(v) * mult;
+  };
+  const toG = (v: number | undefined, unit: string): number | null => {
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    const mult = unit === "kg" ? 1000 : unit === "lb" ? 453.592 : 1;
+    return Number(v) * mult;
+  };
+
+  const depthMm = dimsSrc ? toMm(dimsSrc.depth, dimsSrc.unit) : null;
+  const widthMm = dimsSrc ? toMm(dimsSrc.width, dimsSrc.unit) : null;
+  const heightMm = dimsSrc ? toMm(dimsSrc.height, dimsSrc.unit) : null;
+  const weightG = dimsSrc ? toG(dimsSrc.weight, dimsSrc.weightUnit) : null;
+
+  let volumeL = computeVolumeLFromDims({
+    depth: depthMm ?? undefined,
+    width: widthMm ?? undefined,
+    height: heightMm ?? undefined,
+    dimension_unit: "mm",
+  });
+  if (volumeL <= 0) volumeL = computeVolumeL(info);
+  if (volumeL <= 0 && price?.volume_weight) {
+    const vw = Number(price.volume_weight);
+    if (Number.isFinite(vw) && vw > 0) volumeL = vw * 5;
+  }
+
   return {
     articleId: info.offer_id,
     ozonProductId: info.id,
@@ -180,7 +314,11 @@ export function mapCatalogEntry(
       productName: info.name,
       category: cat?.categoryName ?? "",
       productType: cat?.typeName ?? "",
-      volumeL: computeVolumeL(info),
+      volumeL,
+      depthMm,
+      widthMm,
+      heightMm,
+      weightG,
       vatRate: parseOzonVat(info.vat),
       isKgt: !!info.is_kgt,
       currentPrice,
@@ -191,5 +329,6 @@ export function mapCatalogEntry(
     ozonCommissions: price?.commissions ?? null,
     costPrice: netPrice > 0 ? netPrice : null,
     ozonSku: pickPublicSku(info),
+    status: extractStatus(info),
   };
 }

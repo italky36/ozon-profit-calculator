@@ -19,7 +19,13 @@ const refs: References = {
   logisticsSettings: logisticsSettings as References["logisticsSettings"],
 };
 
-const settings: TaxSettings = defaultTaxSettings as TaxSettings;
+// Override usnVatRate to 5% for the acceptance fixture so the kofeavtomat's
+// per-product `vatRate: 0.05` keeps its meaning (the global setting now
+// drives VAT on USN; default is "Не облагается"=0).
+const settings: TaxSettings = {
+  ...(defaultTaxSettings as TaxSettings),
+  usnVatRate: 0.05,
+};
 
 const baseInput: ProductInput = {
   articleId: "TEST-001",
@@ -37,6 +43,8 @@ const baseInput: ProductInput = {
   logisticsMode: "Авто",
   clustersCount: "Считать без наценки",
   localShare: 0.5,
+  dispatchCluster: "Москва, МО и Дальние регионы",
+  destinationCluster: "Москва, МО и Дальние регионы",
   currentPrice: 337000,
   discountPercent: 0.345,
   marketingPercent: 0,
@@ -161,5 +169,142 @@ describe("Ozon API per-SKU override (Phase 5)", () => {
 
     expect(r.fbo.commissionRub).toBe(400);
     expect(r.fbs.commissionRub).toBe(460);
+  });
+
+  it("uses sales_percent_rfbs for realFBS when present (separate from FBS)", () => {
+    const ozonCommissions: OzonCommissions = {
+      sales_percent_fbo: 20,
+      sales_percent_fbs: 10,
+      sales_percent_rfbs: 25,
+      fbo_direct_flow_trans_max_amount: 0,
+      fbs_direct_flow_trans_max_amount: 0,
+      fbo_deliv_to_customer_amount: 0,
+      fbs_deliv_to_customer_amount: 0,
+    };
+    const r = calculateRow(baseInput, settings, refs, { ozonCommissions });
+    expect(r.fbs.commissionRub).toBeCloseTo(r.promoPrice * 0.1, 0);
+    expect(r.realFbs.commissionRub).toBeCloseTo(r.promoPrice * 0.25, 0);
+  });
+
+  it("uses fbs_first_mile_max_amount when API supplies it (FBS first-mile)", () => {
+    const ozonCommissions: OzonCommissions = {
+      sales_percent_fbo: 0,
+      sales_percent_fbs: 0,
+      fbo_direct_flow_trans_max_amount: 0,
+      fbs_direct_flow_trans_max_amount: 0,
+      fbo_deliv_to_customer_amount: 0,
+      fbs_deliv_to_customer_amount: 0,
+      fbs_first_mile_max_amount: 70,
+    };
+    const r = calculateRow(baseInput, settings, refs, { ozonCommissions });
+    // FBS acceptance line surfaces first-mile.
+    expect(r.fbs.acceptanceRub).toBe(70);
+  });
+
+  it("calcMode='ozon' uses fbs_return_flow_amount; calcMode='tz' uses (baseDelivery+15)×return%", () => {
+    const ozonCommissions: OzonCommissions = {
+      sales_percent_fbo: 5,
+      sales_percent_fbs: 5,
+      fbo_direct_flow_trans_max_amount: 100,
+      fbs_direct_flow_trans_max_amount: 100,
+      fbo_deliv_to_customer_amount: 0,
+      fbs_deliv_to_customer_amount: 0,
+      fbo_return_flow_amount: 200,
+      fbs_return_flow_amount: 300,
+    };
+
+    const tz = calculateRow(baseInput, { ...settings, calcMode: "tz" }, refs, {
+      ozonCommissions,
+    });
+    const ozon = calculateRow(
+      baseInput,
+      { ...settings, calcMode: "ozon" },
+      refs,
+      { ozonCommissions },
+    );
+
+    // returnPercentInt = 100 - 90 = 10. baseDelivery (FBS direct-flow) = 100.
+    // tz: (100 + 15) × 10 / 100 = 11.5 ₽
+    // ozon FBS: 300 × 10 / 100 = 30 ₽
+    expect(tz.fbs.ozonReturnServicesRub).toBeCloseTo(11.5, 5);
+    expect(ozon.fbs.ozonReturnServicesRub).toBeCloseTo(30, 5);
+    // FBO ozon: 200 × 10 / 100 = 20 ₽
+    expect(ozon.fbo.ozonReturnServicesRub).toBeCloseTo(20, 5);
+  });
+
+  it("ozonNetPayout matches Ozon online calculator iPhone reference (FBO/FBS)", () => {
+    // Reproduce the screenshot from seller.ozon.ru calculator: iPhone 17 256GB
+    // price 65292 ₽, FBO commission 27 % / FBS 34 %, logistics 80, last-mile 25,
+    // FBS first-mile 30, no returns. Note: Ozon online displays acquiring at 1 %
+    // (653 ₽) but the official Excel calc uses 1.5 % — we follow the Excel.
+    // Expected with 1.5 %: FBO net ≈ 65292 - (17629 + 979 + 80 + 25) = 46579,
+    // FBS net ≈ 65292 - (22199 + 979 + 30 + 80 + 25) = 41979.
+    const ozonCommissions: OzonCommissions = {
+      sales_percent_fbo: 27,
+      sales_percent_fbs: 34,
+      sales_percent_rfbs: 34,
+      fbo_direct_flow_trans_min_amount: 80,
+      fbo_direct_flow_trans_max_amount: 80,
+      fbs_direct_flow_trans_min_amount: 80,
+      fbs_direct_flow_trans_max_amount: 80,
+      fbo_deliv_to_customer_amount: 25,
+      fbs_deliv_to_customer_amount: 25,
+      fbs_first_mile_max_amount: 30,
+      fbo_return_flow_amount: 0,
+      fbs_return_flow_amount: 0,
+    };
+    const input: ProductInput = {
+      ...baseInput,
+      currentPrice: 65292,
+      discountPercent: 0,
+      isKgt: false,
+      // Storage off: planned ≤ free days for the coffee category, big enough.
+      plannedStorageDays: 0,
+      acceptanceTariff: "Доверительная приемка",
+    };
+    const r = calculateRow(input, { ...settings, calcMode: "ozon" }, refs, {
+      ozonCommissions,
+    });
+    // FBO: 65292 − (17628.84 + 979.38 + 80 + 25) = 46578.78
+    expect(r.fbo.ozonNetPayout).toBeCloseTo(46578.78, 1);
+    // FBS: 65292 − (22199.28 + 979.38 + 30 + 80 + 25) = 41978.34
+    expect(r.fbs.ozonNetPayout).toBeCloseTo(41978.34, 1);
+  });
+
+  it("dispatchCluster === destinationCluster picks min logistics bracket", () => {
+    const ozonCommissions: OzonCommissions = {
+      sales_percent_fbo: 0,
+      sales_percent_fbs: 0,
+      fbo_direct_flow_trans_min_amount: 50,
+      fbo_direct_flow_trans_max_amount: 200,
+      fbs_direct_flow_trans_min_amount: 60,
+      fbs_direct_flow_trans_max_amount: 250,
+      fbo_deliv_to_customer_amount: 0,
+      fbs_deliv_to_customer_amount: 0,
+    };
+    const local = calculateRow(
+      {
+        ...baseInput,
+        dispatchCluster: "Москва, МО и Дальние регионы",
+        destinationCluster: "Москва, МО и Дальние регионы",
+      },
+      settings,
+      refs,
+      { ozonCommissions },
+    );
+    const remote = calculateRow(
+      {
+        ...baseInput,
+        dispatchCluster: "Москва, МО и Дальние регионы",
+        destinationCluster: "Сибирь",
+      },
+      settings,
+      refs,
+      { ozonCommissions },
+    );
+    expect(local.fbo.logisticsRub).toBe(50);
+    expect(local.fbs.logisticsRub).toBe(60);
+    expect(remote.fbo.logisticsRub).toBe(200);
+    expect(remote.fbs.logisticsRub).toBe(250);
   });
 });

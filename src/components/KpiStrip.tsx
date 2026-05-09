@@ -11,7 +11,6 @@ interface Props {
   rows: ProductRow[];
   results: Map<string, RowResult>;
   channelFilter: FilterValue;
-  unitMode?: boolean;
 }
 
 const isCalc = (r: RowResult | undefined): r is CalcResult => !!r && !("error" in r);
@@ -25,7 +24,7 @@ const bestKey = (r: CalcResult): ChannelKey => {
   return (Object.entries(m).sort((a, b) => b[1] - a[1])[0][0]) as ChannelKey;
 };
 
-export default function KpiStrip({ rows, results, channelFilter, unitMode }: Props) {
+export default function KpiStrip({ rows, results, channelFilter }: Props) {
   const [open, setOpen] = useState(true);
 
   const totals = useMemo(() => {
@@ -56,8 +55,6 @@ export default function KpiStrip({ rows, results, channelFilter, unitMode }: Pro
     const bestCh = (Object.entries(channels).sort((a, b) => b[1] - a[1])[0]?.[0] as ChannelKey) ?? "FBO";
     return { totFbo, totFbs, totReal, totQty, marginPctFbo, roiFbo, bestCh, visible };
   }, [rows, results, channelFilter]);
-
-  if (unitMode) return null;
 
   return (
     <section className="kpi-strip">

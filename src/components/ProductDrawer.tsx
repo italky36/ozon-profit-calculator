@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
-import type { ProductInput } from "../types";
+import type { ProductInput, References, TaxSettings } from "../types";
 import type { RowResult } from "./ProductsTable";
 import ProductForm, { type LockedField } from "./ProductForm";
+import OzonBreakdown from "./OzonBreakdown";
 import ResultsPanel from "./ResultsPanel";
 import OzonPricesDebugModal from "./OzonPricesDebugModal";
+import OzonInfoDebugModal from "./OzonInfoDebugModal";
 import OzonFinanceDebugModal from "./OzonFinanceDebugModal";
 import { api } from "../api";
 
@@ -17,10 +19,13 @@ interface Props {
   ozonProductId?: number | null;
   ozonSku?: number | null;
   onRefreshed?: () => void;
+  taxSettings?: TaxSettings;
+  refs?: References | null;
 }
 
-export default function ProductDrawer({ input, result, onChange, onClose, fromOzon, ozonProductId, ozonSku, onRefreshed }: Props) {
+export default function ProductDrawer({ input, result, onChange, onClose, fromOzon, ozonProductId, ozonSku, onRefreshed, taxSettings, refs }: Props) {
   const [debugOpen, setDebugOpen] = useState(false);
+  const [infoDebugOpen, setInfoDebugOpen] = useState(false);
   const [financeOpen, setFinanceOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -45,13 +50,14 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (debugOpen) setDebugOpen(false);
+        else if (infoDebugOpen) setInfoDebugOpen(false);
         else if (financeOpen) setFinanceOpen(false);
         else onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, debugOpen, financeOpen]);
+  }, [onClose, debugOpen, infoDebugOpen, financeOpen]);
 
   const lockedFields: LockedField[] = fromOzon
     ? ["articleId", "productName", "category"]
@@ -124,6 +130,13 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
                 </button>
                 <button
                   className="btn-secondary"
+                  onClick={() => setInfoDebugOpen(true)}
+                  title="Сырой ответ /v3/product/info/list — поля статуса (archived, visibility_details, status)"
+                >
+                  Ozon /v3 info raw
+                </button>
+                <button
+                  className="btn-secondary"
                   onClick={() => setFinanceOpen(true)}
                   title="Среднее accruals_for_sale из локальной БД — фактическая цена продажи"
                 >
@@ -150,7 +163,15 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
               <p className="muted">Проверьте, что выбрана корректная пара «Категория / Тип товара».</p>
             </section>
           ) : (
-            <ResultsPanel result={result} />
+            <>
+              <OzonBreakdown result={result} />
+              <ResultsPanel
+                result={result}
+                input={input}
+                taxSettings={taxSettings}
+                refs={refs}
+              />
+            </>
           )}
         </div>
       </aside>
@@ -158,6 +179,12 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
         <OzonPricesDebugModal
           articleId={input.articleId}
           onClose={() => setDebugOpen(false)}
+        />
+      )}
+      {infoDebugOpen && input.articleId && (
+        <OzonInfoDebugModal
+          articleId={input.articleId}
+          onClose={() => setInfoDebugOpen(false)}
         />
       )}
       {financeOpen && input.articleId && (

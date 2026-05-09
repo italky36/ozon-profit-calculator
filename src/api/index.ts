@@ -104,9 +104,42 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+async function apiUpload<T>(path: string, file: File): Promise<T> {
+  const headers = new Headers();
+  const token = import.meta.env.VITE_AUTH_TOKEN as string | undefined;
+  if (token) headers.set("X-Auth-Token", token);
+  const fd = new FormData();
+  fd.append("file", file);
+  // Не задаём Content-Type вручную — браузер добавит multipart/form-data с
+  // правильным boundary.
+  const res = await fetch(`${BASE}${path}`, { method: "POST", headers, body: fd });
+  const text = await res.text();
+  const body = text ? (JSON.parse(text) as unknown) : null;
+  if (!res.ok) {
+    const msg =
+      body && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return body as T;
+}
+
 export const api = {
   refs: {
     get: () => apiFetch<RefsResponse>("/refs"),
+    clusterLogisticsStats: () =>
+      apiFetch<{
+        count: number;
+        fromClusters: string[];
+        toClusters: string[];
+      }>("/refs/cluster-logistics"),
+    uploadClusterLogistics: (file: File) =>
+      apiUpload<{
+        inserted: number;
+        fromClusters: string[];
+        toClusters: string[];
+      }>("/refs/cluster-logistics/upload", file),
   },
   products: {
     list: () => apiFetch<ProductRow[]>("/products"),
@@ -123,6 +156,10 @@ export const api = {
     remove: (id: string) =>
       apiFetch<void>(`/products/${encodeURIComponent(id)}`, {
         method: "DELETE",
+      }),
+    bulkResetWhitePurchase: () =>
+      apiFetch<{ updated: number }>("/products/bulk/white-purchase-reset", {
+        method: "POST",
       }),
   },
   settings: {
@@ -166,6 +203,12 @@ export const api = {
         request: unknown;
         response: unknown;
       }>(`/import/debug/prices/${encodeURIComponent(articleId)}`),
+    debugInfo: (articleId: string) =>
+      apiFetch<{
+        endpoint: string;
+        request: unknown;
+        response: unknown;
+      }>(`/import/debug/info/${encodeURIComponent(articleId)}`),
     refreshArticle: (articleId: string) =>
       apiFetch<{
         ok: true;
@@ -232,6 +275,10 @@ export const api = {
         `/finance/summary${qs ? `?${qs}` : ""}`,
       );
     },
+    clearAll: () =>
+      apiFetch<{ deleted: number }>("/finance/transactions/all", {
+        method: "DELETE",
+      }),
   },
   analytics: {
     realizedMargin: (q: { from?: string; to?: string } = {}) => {

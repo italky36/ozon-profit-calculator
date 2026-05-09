@@ -40,6 +40,19 @@ export const refLogisticsTariffs = sqliteTable("ref_logistics_tariffs", {
   nonLocalOver300: real("non_local_over_300").notNull(),
 });
 
+/** Точная per-cluster-pair матрица логистики из Excel-эталона Ozon. */
+export const refLogisticsClusterTariffs = sqliteTable(
+  "ref_logistics_cluster_tariffs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    volumeFrom: real("volume_from").notNull(),
+    fromCluster: text("from_cluster").notNull(),
+    toCluster: text("to_cluster").notNull(),
+    tariffLte300: real("tariff_lte_300").notNull(),
+    tariffGt300: real("tariff_gt_300").notNull(),
+  },
+);
+
 // key/value bag for lists.json + logisticsSettings.json
 export const refSettings = sqliteTable("ref_settings", {
   key: text("key").primaryKey(),
@@ -62,12 +75,25 @@ export const products = sqliteTable("products", {
     .default(false),
   plannedStorageDays: integer("planned_storage_days").notNull(),
   volumeL: real("volume_l").notNull(),
+  /** Габариты упаковки в мм (как в Ozon LK). Опциональны: для не-Ozon
+   * товаров пользователь может заполнить вручную → volumeL пересчитается. */
+  depthMm: real("depth_mm"),
+  widthMm: real("width_mm"),
+  heightMm: real("height_mm"),
+  /** Вес упаковки в граммах. */
+  weightG: real("weight_g"),
   vatRate: text("vat_rate").notNull(),
   redemptionPercent: integer("redemption_percent").notNull(),
   salesPlan: integer("sales_plan").notNull(),
   logisticsMode: text("logistics_mode").notNull(),
   localShare: real("local_share").notNull(),
   clustersCount: text("clusters_count").notNull(),
+  dispatchCluster: text("dispatch_cluster")
+    .notNull()
+    .default("Москва, МО и Дальние регионы"),
+  destinationCluster: text("destination_cluster")
+    .notNull()
+    .default("Москва, МО и Дальние регионы"),
   currentPrice: real("current_price").notNull(),
   /** Ozon sticker price (`price.price`) when a marketing promo brings the
    * actual selling price (`currentPrice`) below it. NULL otherwise. Purely
@@ -81,7 +107,7 @@ export const products = sqliteTable("products", {
   acceptanceTariff: text("acceptance_tariff").notNull(),
   costPrice: real("cost_price").notNull(),
   extraExpensesPerUnit: real("extra_expenses_per_unit").notNull(),
-  whitePurchase: integer("white_purchase", { mode: "boolean" }).notNull(),
+  whitePurchase: integer("white_purchase", { mode: "boolean" }),
   incomingVatPurchase: integer("incoming_vat_purchase", { mode: "boolean" })
     .notNull(),
   incomingVatRate: real("incoming_vat_rate").notNull(),
@@ -96,6 +122,14 @@ export const products = sqliteTable("products", {
   ozonCommissionsUpdatedAt: integer("ozon_commissions_updated_at", {
     mode: "timestamp_ms",
   }),
+  /** Card archive flag from Ozon. NULL when the product wasn't imported from Ozon. */
+  ozonArchived: integer("ozon_archived", { mode: "boolean" }),
+  /** True when the card is on sale (Ozon's `visibility_details.active_product`). */
+  ozonVisible: integer("ozon_visible", { mode: "boolean" }),
+  /** Short status code/name from `status.state_name` ("processed", "moderating", ...). */
+  ozonStatusName: text("ozon_status_name"),
+  /** Free-text reason / description (failed moderation, missing price, etc.). */
+  ozonStatusDescription: text("ozon_status_description"),
 });
 
 export const userSettings = sqliteTable("user_settings", {

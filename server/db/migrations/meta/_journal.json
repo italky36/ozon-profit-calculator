@@ -36,6 +36,41 @@
       "when": 1777971616580,
       "tag": "0004_purple_inhumans",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1778116022854,
+      "tag": "0005_public_sleepwalker",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1778118464265,
+      "tag": "0006_careless_leech",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1778170721663,
+      "tag": "0007_cloudy_vertigo",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1778247958126,
+      "tag": "0008_many_tomas",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1778297978987,
+      "tag": "0009_eminent_the_fallen",
+      "breakpoints": true
     }
   ]
 }

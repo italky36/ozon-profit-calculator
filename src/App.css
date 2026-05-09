@@ -216,6 +216,14 @@ select, textarea, input:not([type]) {
   font-family: inherit;
   outline: none;
   transition: border-color .15s, background .15s;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.grid > label > input,
+.grid > label > select,
+.grid > label > textarea {
+  width: 100%;
+  min-width: 0;
 }
 input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
@@ -411,6 +419,12 @@ fieldset legend {
   cursor: pointer;
   font-family: inherit;
   text-align: left;
+  outline: none;
+}
+.collapsible-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 16px;
 }
 .collapsible-chevron { transition: transform .2s; flex-shrink: 0; }
 .collapsible-chevron.open { transform: rotate(90deg); }
@@ -472,7 +486,7 @@ fieldset legend {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  min-width: 1100px;
+  min-width: 1280px;
 }
 .products-table thead th {
   position: sticky;
@@ -480,7 +494,7 @@ fieldset legend {
   z-index: 2;
 }
 .products-table th {
-  padding: 10px 12px;
+  padding: 8px 10px;
   font-size: 11px;
   font-weight: 700;
   color: var(--muted);
@@ -493,13 +507,41 @@ fieldset legend {
 }
 .products-table th.num { text-align: right; }
 .products-table th.center { text-align: center; }
+.products-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: background .12s, color .12s;
+}
+.products-table th.sortable:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.products-table th.sortable.sort-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.sort-th-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Default text-align for sortable num headers stays right; the inner span
+ * uses inline-flex with justify-content automatic via th's text-align. */
+.products-table th.num .sort-th-inner {
+  justify-content: flex-end;
+  width: 100%;
+}
 .products-table th.fbo { color: var(--ch-fbo-text); }
 .products-table th.fbs { color: var(--ch-fbs-text); }
 .products-table th.real { color: var(--ch-real-text); }
 .products-table th.price { color: var(--accent); }
+.products-table th.sku,
+.products-table td.sku {
+  max-width: 90px;
+}
 
 .products-table td {
-  padding: 10px 12px;
+  padding: 8px 10px;
   font-size: 13px;
   color: var(--text);
   vertical-align: middle;
@@ -512,7 +554,27 @@ fieldset legend {
 .products-table td.fbs { color: var(--ch-fbs-text); font-weight: 600; }
 .products-table td.real { color: var(--ch-real-text); font-weight: 600; }
 .products-table td.price { color: var(--accent); font-weight: 600; }
-.products-table td.ellipsis { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.products-table td.ellipsis { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+/* Article column: fixed-ish width with ellipsis so it doesn't hog space when
+   articles are short, and doesn't push the rightmost column off-screen when
+   they are long. Both <span.oz-badge> and <EditableCell> shrink correctly. */
+.products-table th:first-child,
+.products-table td:first-child {
+  max-width: 140px;
+  width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.products-table td:first-child .oz-badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .products-table td.empty {
   text-align: center;
   color: var(--muted);
@@ -686,4 +748,540 @@ fieldset legend {
   .btn-primary, .btn-secondary { min-height: 44px; }
   .icon-button { min-width: 44px; min-height: 44px; }
   .drawer { width: 100vw; }
+  /* Form fields: each field on its own row, full width — prevents inputs
+     overflowing fieldset on narrow viewports. */
+  .grid > label,
+  .grid > label.span2 {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .grid > label.checkbox {
+    flex: 0 0 auto;
+  }
+  fieldset { padding: 10px 12px 14px; }
 }
+
+/* ── Live search input in ProductsTable toolbar ──────────────────────────── */
+.products-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 280px;
+  flex-shrink: 0;
+  /* Override the global label{flex-direction:column} rule. */
+  flex-direction: row;
+  gap: 0;
+}
+.products-search > input[type="text"] {
+  width: 100%;
+  border: 2px solid var(--border);
+  border-radius: 20px;
+  padding: 5px 30px 5px 32px;
+  font-size: 13px;
+  background: #fff;
+  transition: border-color .15s, background .15s;
+}
+.products-search > input[type="text"]:focus {
+  border-color: var(--accent);
+  background: #fff;
+}
+.products-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.products-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+}
+.products-search-clear:hover { background: var(--accent-bg); color: var(--accent); }
+
+@media (max-width: 640px) {
+  .products-search { flex: 1 1 100%; width: 100%; }
+}
+
+/* Finance-tab pagination controls. */
+.finance-pagination {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.finance-pagination button {
+  padding: 5px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.finance-pagination button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.finance-pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.finance-pagination-info {
+  padding: 0 8px;
+  color: var(--muted-2);
+  font-weight: 600;
+}
+
+/* Excel export dropdown — anchored to its trigger button. */
+.excel-export {
+  position: relative;
+  display: inline-flex;
+}
+.excel-export-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  min-width: 240px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.excel-export-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  transition: background .12s;
+}
+.excel-export-item:hover:not(:disabled) {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.excel-export-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.excel-export-item .muted {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.excel-export-item:hover .muted { color: var(--accent); }
+
+/* Highlighted substring inside cells when search is active. */
+.search-highlight {
+  background: #FFF3B8;
+  color: inherit;
+  padding: 0 2px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* "Найдено X из Y" counter shown when a search is active. */
+.search-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-2);
+  background: var(--accent-bg);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.search-count-of {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ── "Только активные" toggle ───────────────────────────────────────────── */
+.active-only-toggle {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--muted-2);
+  cursor: pointer;
+  padding: 5px 14px;
+  border: 2px solid var(--border);
+  border-radius: 20px;
+  background: #fff;
+  user-select: none;
+  transition: all .15s;
+}
+.active-only-toggle input {
+  accent-color: var(--accent);
+  margin: 0;
+  width: 14px;
+  height: 14px;
+}
+.active-only-toggle:hover { border-color: var(--accent-bg); color: var(--accent); }
+.active-only-toggle:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* ── Inactivity badge in ProductsTable ───────────────────────────────────── */
+.inactive-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+.inactive-badge.inactive-archive {
+  background: #F5F0FF;
+  color: var(--info);
+  border-color: #DDD0FF;
+}
+.inactive-badge.inactive-hidden {
+  background: #F1F4F8;
+  color: var(--muted-2);
+  border-color: var(--border);
+}
+.inactive-badge.inactive-warn {
+  background: #FFF7E6;
+  color: var(--warn);
+  border-color: #FFD898;
+}
+.row-inactive td {
+  opacity: 0.55;
+}
+.row-inactive.selected td {
+  opacity: 1;
+}
+
+/* ── ResultsPanel — сравнение схем + детализация + tax debug ─────────────── */
+.rp-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.rp-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 4px;
+}
+.rp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rp-table th.rp-th {
+  text-align: right;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rp-table th.rp-th.fbo { color: var(--ch-fbo-text); }
+.rp-table th.rp-th.fbs { color: var(--ch-fbs-text); }
+.rp-table th.rp-th.real { color: var(--ch-real-text); }
+.rp-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+.rp-table tr:last-child td { border-bottom: none; }
+.rp-row-strong td {
+  font-weight: 600;
+}
+.rp-label {
+  color: var(--text);
+  white-space: nowrap;
+}
+.rp-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 110px;
+}
+.rp-cell-num {
+  color: var(--text);
+}
+.rp-cell-share {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.rp-cell.rp-winner {
+  color: var(--accent);
+  font-weight: 700;
+}
+.rp-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 8px 0;
+  margin-top: 4px;
+  cursor: pointer;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.rp-toggle:hover { text-decoration: underline; }
+.rp-toggle-debug {
+  color: var(--info);
+  margin-top: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+  width: 100%;
+  justify-content: flex-start;
+}
+.rp-debug {
+  background: #FAFBFD;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 8px;
+}
+.rp-debug-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--muted-2);
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border);
+}
+.rp-debug-toggle {
+  margin-left: auto;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 6px !important;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: var(--muted-2) !important;
+}
+.rp-debug-toggle input { accent-color: var(--accent); margin: 0; }
+.rp-debug-toggle:hover { color: var(--accent) !important; }
+.rp-debug-block {
+  margin-bottom: 14px;
+}
+.rp-debug-block:last-child { margin-bottom: 0; }
+.rp-debug-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--info);
+  margin-bottom: 6px;
+}
+.rp-debug-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rp-debug-step {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 12px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid #EEF2F7;
+}
+.rp-debug-step:last-child { border-bottom: none; }
+.rp-debug-step-label {
+  color: var(--muted-2);
+}
+.rp-debug-step-formula {
+  font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-word;
+}
+.rp-debug-step-strong {
+  background: #EEF7FF;
+  border-radius: 6px;
+  padding: 6px 8px;
+  border-bottom: none;
+}
+.rp-debug-step-strong .rp-debug-step-label,
+.rp-debug-step-strong .rp-debug-step-formula {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* ── OzonBreakdown — расчёт прибыли и затрат ─────────────────────────────── */
+.obz-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.obz-table-wrap {
+  overflow-x: auto;
+}
+.obz-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.obz-table th {
+  text-align: right;
+  padding: 6px 12px 8px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border-soft);
+}
+.obz-table th:first-child {
+  text-align: left;
+}
+.obz-row td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+.obz-row:last-child td {
+  border-bottom: none;
+}
+.obz-row-indent .obz-label {
+  padding-left: 36px;
+  color: var(--muted-2);
+}
+.obz-row-strong td {
+  font-weight: 600;
+}
+.obz-label {
+  color: var(--text);
+  white-space: nowrap;
+}
+.obz-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 6px 0 0;
+}
+.obz-toggle:hover { color: var(--accent); }
+.obz-cell {
+  min-width: 160px;
+}
+.obz-cell.obz-empty {
+  text-align: right;
+  color: var(--muted);
+}
+.obz-cell-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.obz-cell-amount {
+  text-align: right;
+  white-space: nowrap;
+}
+.obz-amount {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.obz-share {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.obz-secondary {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.obz-secondary-share {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+/* Secondary "К начислению Ozon" line under each margin in the products table. */
+.margin-secondary {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+  margin-top: 2px;
+  cursor: help;
+}
+/* Profitability (рентабельность к с/с) row under margin in the products table.
+ * Shown in modes "margin" and "both"; subtle accent color so it pops as KPI. */
+.margin-roi {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+  margin-top: 2px;
+  cursor: help;
+}
+.obz-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-soft);
+  min-width: 50px;
+  max-width: 110px;
+  overflow: hidden;
+}
+.obz-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+.obz-bar-expense .obz-bar-fill { background: var(--accent); }
+.obz-bar-payout .obz-bar-fill { background: var(--ok); }
+.obz-bar-neutral .obz-bar-fill { background: var(--ok); }
+

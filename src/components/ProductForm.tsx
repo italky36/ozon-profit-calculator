@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import categories from "../data/categories.json";
 import lists from "../data/lists.json";
+import { OZON_CLUSTERS } from "../lib/clusters";
 import PercentInput from "./PercentInput";
 
 export type LockedField = "articleId" | "productName" | "category";
@@ -107,10 +108,6 @@ export default function ProductForm({ value, onChange, lockedFields = [] }: Prop
             <input type="number" step="1" min="0" max="100" value={value.redemptionPercent}
               onChange={(e) => set("redemptionPercent", num(e.target.value))} />
           </label>
-          <label><span>План продаж, шт</span>
-            <input type="number" step="1" min="1" value={value.salesPlan}
-              onChange={(e) => set("salesPlan", num(e.target.value))} />
-          </label>
           <label><span>Ставка НДС</span>
             <select value={String(value.vatRate)} onChange={(e) => {
               const v = e.target.value;
@@ -152,6 +149,18 @@ export default function ProductForm({ value, onChange, lockedFields = [] }: Prop
               </select>
             </label>
           )}
+          <label><span>Кластер отправки</span>
+            <select value={value.dispatchCluster}
+              onChange={(e) => set("dispatchCluster", e.target.value)}>
+              {OZON_CLUSTERS.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </label>
+          <label><span>Кластер назначения</span>
+            <select value={value.destinationCluster}
+              onChange={(e) => set("destinationCluster", e.target.value)}>
+              {OZON_CLUSTERS.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </label>
         </div>
       </fieldset>
 
@@ -196,8 +205,31 @@ export default function ProductForm({ value, onChange, lockedFields = [] }: Prop
             <input type="number" step="1" min="0" value={value.extraExpensesPerUnit}
               onChange={(e) => set("extraExpensesPerUnit", num(e.target.value))} />
           </label>
-          <label className="checkbox"><input type="checkbox" checked={value.whitePurchase}
-            onChange={(e) => set("whitePurchase", e.target.checked)} /> Белая закупка</label>
+          <label>
+            <span title="«По умолчанию» — берёт значение из глобальной настройки. Можно явно выставить «Белая» или «Не белая» для конкретного товара.">
+              Белая закупка
+            </span>
+            <select
+              value={
+                value.whitePurchase === null || value.whitePurchase === undefined
+                  ? "default"
+                  : value.whitePurchase
+                    ? "true"
+                    : "false"
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                set(
+                  "whitePurchase",
+                  v === "default" ? null : v === "true",
+                );
+              }}
+            >
+              <option value="default">По умолчанию (из настроек)</option>
+              <option value="true">Белая (с документами)</option>
+              <option value="false">Не белая</option>
+            </select>
+          </label>
           <label className="checkbox"><input type="checkbox" checked={value.incomingVatPurchase}
             onChange={(e) => set("incomingVatPurchase", e.target.checked)} /> Закупка с НДС</label>
           <label><span>Ставка вход. НДС</span>

@@ -8,5 +8,8 @@
   "osnoOooRate": 0.25,
   "osnoIpAnnualIncome": 2400000,
   "npdRate": 0.04,
-  "partyExtraExpenses": 100
+  "partyExtraExpenses": 0,
+  "calcMode": "tz",
+  "usnVatRate": "Не облагается",
+  "defaultWhitePurchase": false
 }

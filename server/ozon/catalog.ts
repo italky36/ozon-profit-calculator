@@ -3,6 +3,8 @@ import type {
   OzonCategoryNode,
   OzonCategoryTreeResp,
   OzonPriceItem,
+  OzonProductAttributesItem,
+  OzonProductAttributesResp,
   OzonProductInfo,
   OzonProductInfoListResp,
   OzonProductListResp,
@@ -12,6 +14,7 @@ import type {
 const PRODUCT_LIST_BATCH = 1000;
 const INFO_BATCH = 1000;
 const PRICES_BATCH = 1000;
+const ATTRS_BATCH = 1000;
 
 export interface CatalogPage {
   productIds: number[];
@@ -84,6 +87,34 @@ export async function getPrices(
     cursor = resp.cursor;
     if (out.size >= want.size) return out;
   }
+}
+
+/** Batch /v4/product/info/attributes — точные габариты (depth/width/height)
+ * на верхнем уровне item-а. Используется как приоритетный источник объёма. */
+export async function getProductsAttributes(
+  client: OzonClient,
+  productIds: number[],
+): Promise<Map<number, OzonProductAttributesItem>> {
+  const out = new Map<number, OzonProductAttributesItem>();
+  for (let i = 0; i < productIds.length; i += ATTRS_BATCH) {
+    const chunk = productIds.slice(i, i + ATTRS_BATCH);
+    let lastId = "";
+    while (true) {
+      const resp = await client.post<OzonProductAttributesResp>(
+        "/v4/product/info/attributes",
+        {
+          filter: { product_id: chunk.map(String), visibility: "ALL" },
+          limit: ATTRS_BATCH,
+          last_id: lastId,
+        },
+      );
+      const items = resp.result ?? [];
+      for (const it of items) out.set(it.id, it);
+      if (!resp.last_id || items.length < ATTRS_BATCH) break;
+      lastId = resp.last_id;
+    }
+  }
+  return out;
 }
 
 export interface CategoryLookup {

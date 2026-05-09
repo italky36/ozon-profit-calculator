@@ -1,5 +1,44 @@
-import type { LogisticsSettings, LogisticsTariffRow, ClustersCount, LogisticsMode } from "../../types";
+import type {
+  LogisticsSettings,
+  LogisticsTariffRow,
+  LogisticsClusterTariffRow,
+  ClustersCount,
+  LogisticsMode,
+} from "../../types";
 import { clamp } from "./pricing";
+
+/** Точная per-cluster-pair логистика. Берёт строку с максимальным
+ * `volumeFrom ≤ volumeL` для пары (from, to). Если пара/объём не покрыты,
+ * возвращает null — caller должен fallback'нуть на другую формулу. */
+export const findClusterTariff = (
+  rows: LogisticsClusterTariffRow[] | undefined,
+  volumeL: number,
+  fromCluster: string,
+  toCluster: string,
+  promoPrice: number,
+): number | null => {
+  if (!rows || rows.length === 0) return null;
+  const from = (fromCluster ?? "").trim();
+  const to = (toCluster ?? "").trim();
+  const vol = Number(volumeL);
+  if (!Number.isFinite(vol)) return null;
+  let best: LogisticsClusterTariffRow | null = null;
+  let bestVol = -Infinity;
+  for (const r of rows) {
+    if ((r.fromCluster ?? "").trim() !== from) continue;
+    if ((r.toCluster ?? "").trim() !== to) continue;
+    const rv = Number(r.volumeFrom);
+    if (!Number.isFinite(rv) || rv > vol) continue;
+    if (rv > bestVol) {
+      best = r;
+      bestVol = rv;
+    }
+  }
+  if (!best) return null;
+  return promoPrice < 300
+    ? Number(best.tariffLte300)
+    : Number(best.tariffGt300);
+};
 
 export const findTariff = (
   rows: LogisticsTariffRow[],

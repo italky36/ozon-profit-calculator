@@ -51,7 +51,9 @@ if (isMain || process.env.START_SERVER === "1") {
   }
   const app = buildApp({ authToken });
   const port = Number(process.env.PORT ?? 3001);
-  serve({ fetch: app.fetch, port }, (info) => {
-    console.log(`server: http://localhost:${info.port}`);
+  // HOST=0.0.0.0 exposes on all interfaces (LAN). Default localhost.
+  const hostname = process.env.HOST || "localhost";
+  serve({ fetch: app.fetch, port, hostname }, (info) => {
+    console.log(`server: http://${hostname}:${info.port}`);
   });
 }

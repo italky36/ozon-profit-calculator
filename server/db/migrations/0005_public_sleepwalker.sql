@@ -1,0 +1,2 @@
+ALTER TABLE `products` ADD `dispatch_cluster` text DEFAULT 'Москва, МО и Дальние регионы' NOT NULL;--> statement-breakpoint
+ALTER TABLE `products` ADD `destination_cluster` text DEFAULT 'Москва, МО и Дальние регионы' NOT NULL;

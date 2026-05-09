@@ -36,6 +36,28 @@ const validate = (raw: unknown): TaxSettings => {
     if (typeof v !== "number" || !Number.isFinite(v))
       throw new Error(`invalid ${f}`);
   }
+  if (r.calcMode !== undefined && r.calcMode !== "ozon" && r.calcMode !== "tz")
+    throw new Error("invalid calcMode");
+  if (r.usnVatRate !== undefined) {
+    const v = r.usnVatRate;
+    const ok =
+      v === "Не облагается" ||
+      v === 0.05 ||
+      v === 0.07 ||
+      v === 0.1 ||
+      v === 0.22;
+    if (!ok) throw new Error("invalid usnVatRate");
+  }
+  if (
+    r.defaultWhitePurchase !== undefined &&
+    typeof r.defaultWhitePurchase !== "boolean"
+  )
+    throw new Error("invalid defaultWhitePurchase");
+  if (
+    r.useClusterLogistics !== undefined &&
+    typeof r.useClusterLogistics !== "boolean"
+  )
+    throw new Error("invalid useClusterLogistics");
   return r as TaxSettings;
 };
 

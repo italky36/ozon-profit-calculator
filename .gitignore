@@ -23,6 +23,9 @@ data/*.db-wal
 # Local agent settings
 .claude/settings.local.json
 
+# Local spreadsheet sources / exports
+*.xlsx
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

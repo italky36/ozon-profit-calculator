@@ -121,8 +121,6 @@ export default function TweaksPanel({ open, onClose, tweaks, setTweak }: PanelPr
         <Section label="Таблица" />
         <ToggleRow label="Мини-график маржи" value={tweaks.showChart}
           onChange={(v) => setTweak("showChart", v)} />
-        <ToggleRow label="Только unit-экономика" value={tweaks.unitMode}
-          onChange={(v) => setTweak("unitMode", v)} />
         <RadioRow<Tweaks["density"]>
           label="Плотность"
           value={tweaks.density}
@@ -131,6 +129,17 @@ export default function TweaksPanel({ open, onClose, tweaks, setTweak }: PanelPr
             { value: "compact", label: "Компакт" },
           ]}
           onChange={(v) => setTweak("density", v)}
+        />
+        <RadioRow<Tweaks["breakdownMode"]>
+          label="Прибыль в таблице"
+          value={tweaks.breakdownMode}
+          vertical
+          options={[
+            { value: "margin", label: "Маржа" },
+            { value: "payout", label: "К начислению" },
+            { value: "both", label: "Оба" },
+          ]}
+          onChange={(v) => setTweak("breakdownMode", v)}
         />
       </div>
     </div>
@@ -225,46 +234,68 @@ function RadioRow<T extends string>({
   value,
   options,
   onChange,
+  vertical,
 }: {
   label: string;
   value: T;
   options: RadioOption<T>[];
   onChange: (v: T) => void;
+  /** When true: label sits on its own line above; segmented control spans full
+   * row width with equal-flex buttons. Use when buttons or label are long. */
+  vertical?: boolean;
 }) {
-  return (
-    <Row label={label}>
-      <div
-        style={{
-          position: "relative",
-          display: "flex",
-          padding: 2,
-          borderRadius: 8,
-          background: "rgba(0, 0, 0, 0.06)",
-        }}
-      >
-        {options.map((o) => (
-          <button
-            key={o.value}
-            type="button"
-            onClick={() => onChange(o.value)}
-            style={{
-              border: 0,
-              background: o.value === value ? "rgba(255, 255, 255, 0.95)" : "transparent",
-              boxShadow: o.value === value ? "0 1px 2px rgba(0, 0, 0, 0.12)" : "none",
-              color: "inherit",
-              font: "inherit",
-              fontWeight: 500,
-              minHeight: 22,
-              borderRadius: 6,
-              cursor: "pointer",
-              padding: "4px 10px",
-              transition: "all .15s",
-            }}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
-    </Row>
+  const segmented = (
+    <div
+      style={{
+        position: "relative",
+        display: "flex",
+        padding: 2,
+        borderRadius: 8,
+        background: "rgba(0, 0, 0, 0.06)",
+        width: vertical ? "100%" : undefined,
+      }}
+    >
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          style={{
+            border: 0,
+            background:
+              o.value === value ? "rgba(255, 255, 255, 0.95)" : "transparent",
+            boxShadow:
+              o.value === value ? "0 1px 2px rgba(0, 0, 0, 0.12)" : "none",
+            color: "inherit",
+            font: "inherit",
+            fontWeight: 500,
+            fontSize: vertical ? 11 : undefined,
+            minHeight: 24,
+            borderRadius: 6,
+            cursor: "pointer",
+            padding: vertical ? "5px 6px" : "4px 10px",
+            transition: "all .15s",
+            flex: vertical ? "1 1 0" : undefined,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
+
+  if (vertical) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span
+          style={{ fontWeight: 500, color: "rgba(41, 38, 27, 0.72)" }}
+        >
+          {label}
+        </span>
+        {segmented}
+      </div>
+    );
+  }
+  return <Row label={label}>{segmented}</Row>;
 }

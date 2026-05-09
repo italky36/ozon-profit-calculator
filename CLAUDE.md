@@ -55,7 +55,11 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ### Поток данных (frontend)
 
-На монтаже `App.tsx` запрашивает три эндпоинта параллельно: `GET /api/refs`, `GET /api/products`, `GET /api/settings`. Полученные `References + ProductRow[] + TaxSettings` идут в `useMemo`, который для каждой строки прогоняет `calculateRow(row.input, taxSettings, refs, { ozonCommissions: row.ozonCommissions })`. Мутации (`addRow`/`duplicateRow`/`removeRow`/`updateRow`) делают optimistic update с откатом на ошибке через `api.products.*`. `setTaxSettings` дебаунсится 300мс перед `PUT /api/settings`. localStorage **не используется** — единственный source of truth это SQLite.
+На монтаже `App.tsx` запрашивает три эндпоинта параллельно: `GET /api/refs`, `GET /api/products`, `GET /api/settings`. Полученные `References + ProductRow[] + TaxSettings` идут в `useMemo`, который для каждой строки прогоняет `calculateRow(row.input, taxSettings, refs, { ozonCommissions: row.ozonCommissions })`. Мутации (`addRow`/`duplicateRow`/`removeRow`/`updateRow`) делают optimistic update с откатом на ошибке через `api.products.*`. `setTaxSettings` дебаунсится 300мс перед `PUT /api/settings`.
+
+**Хранилище**:
+- **Бизнес-данные** (товары, налоги, кредсы Ozon, финтранзакции, auto-refresh-конфиг) — единственный source of truth это SQLite (`data/app.db`).
+- **UI-preferences** — в `localStorage`, ключи `ozon-calc.tweaks` (TweaksPanel: цвет акцента, density, unitMode и т.п.) и `ozon-calc.actuals` (галка «Сравнить с фактом» + период). Их сброс не трогает данные. **Не клади бизнес-данные в localStorage** — для них всегда SQLite + миграция.
 
 ### Поток данных (backend)
 
@@ -107,16 +111,35 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 - `server/db/schema.ts` — Drizzle-схема (9 таблиц: ref_*, products, user_settings, api_credentials, finance_transactions, import_runs).
 - `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
-- `server/db/migrations/` — генерится через `drizzle-kit generate`. Текущие: `0000_init.sql`, `0001_ozon_commissions.sql`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
+- `server/db/migrations/` — генерится через `drizzle-kit generate`. Текущие: `0000_init.sql`, `0001_ozon_commissions.sql`, `0002_yellow_toro.sql` (auto-refresh в `user_settings`), `0003_overrated_sasquatch.sql` (`products.regular_price`), `0004_purple_inhumans.sql` (`products.ozon_sku`). Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
 - `server/middleware/auth.ts` — проверка `X-Auth-Token`.
 - `server/routes/{refs,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов.
 - `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`).
 
 ### Импорт из Ozon (Фазы 2–3)
 
-- **Каталог** (`POST /api/import/catalog`): пагинирует `/v3/product/list`, батчит `info/list` + `info/prices`, резолвит категории через `description-category/tree` (с наследованием `description_category_id` вниз по дереву). Merge: `articleId` UNIQUE → существующая строка обновляет только catalog-поля (`productName`, `category`, `productType`, `volumeL`, `vatRate`, `isKgt`, `currentPrice`, `discountPercent`, `ozonProductId`, `ozonCommissions`); локальные `costPrice/salesPlan/marketingPercent/…` сохраняются. Новые товары без `category` пропускаются (`unmatched++`), чтобы потом не падать в `calculateRow`.
-- **Финансы** (`POST /api/import/finance` с `{from, to}`): пагинирует `/v3/finance/transaction/list`, классифицирует `operation_type` через `classifyOperationType` в `sale | refund | commission | logistics | last_mile | storage | other`, пишет с `onConflictDoNothing` (PK = `operation_id` → идемпотентно).
+- **Каталог** (`POST /api/import/catalog`): пагинирует `/v3/product/list`, батчит `info/list` + `info/prices`, резолвит категории через `description-category/tree` (с наследованием `description_category_id` вниз по дереву). Merge: `articleId` UNIQUE → существующая строка обновляет только catalog-поля (`productName`, `category`, `productType`, `volumeL`, `vatRate`, `isKgt`, `currentPrice`, `regularPrice`, `discountPercent`, `ozonProductId`, `ozonSku`, `ozonCommissions`, опционально `costPrice`); локальные `salesPlan/marketingPercent/redemptionPercent/…` сохраняются. Новые товары без `category` пропускаются (`unmatched++`), чтобы потом не падать в `calculateRow`.
+- **Финансы** (`POST /api/import/finance` с `{from, to}`): пагинирует `/v3/finance/transaction/list`, классифицирует `operation_type` через `classifyOperationType` в `sale | refund | commission | logistics | last_mile | storage | other`, пишет с `onConflictDoNothing` (PK = `operation_id` → идемпотентно). `articleId` резолвится по `items[].offer_id`, при отсутствии — fallback на `items[].sku` через `products.ozon_sku` (in-memory map в начале импорта).
 - **Прогресс**: оба импорта fire-and-forget; статус читается через `GET /api/import/runs/:id`. UI поллит каждую секунду.
+
+### Маппинг цен / SKU из Ozon (важно — легко перепутать)
+
+Семантика полей `mapToProduct.ts:computeCurrentPriceAndDiscount` и `pickPublicSku`:
+
+- **`currentPrice`** — фактическая цена продажи продавцу. Если `price.marketing_seller_price > 0` (активна акция продавца — бустинг, Hot Sale и т.п.), берём её напрямую и `discountPercent = 0`. Иначе — `price.price` плюс `discountPercent` из `(old_price − price)/old_price`, если `old_price > price`. **По `currentPrice` калькулятор считает экономику**: `promoPrice = currentPrice × (1 − discountPercent)`.
+- **`regularPrice`** (миграция `0003`, nullable) — sticker-цена `price.price`, когда промо опустило `currentPrice` ниже неё. Только для UI (зачёркнутая подпись), **в расчётах не участвует**.
+- **`costPrice` из `price.net_price`** — себестоимость, которую продавец заполнил в ЛК Ozon. Импорт **перезаписывает локальную `costPrice` только если `net_price > 0`**; иначе локальное значение сохраняется (чтобы не затереть ручной ввод нулём).
+- **`ozonProductId`** ≠ **`ozonSku`** (миграция `0004`):
+  - `ozonProductId` = `info.id` (внутренний product_id продавца). Используется в URL ЛК `https://seller.ozon.ru/app/products/{id}`.
+  - `ozonSku` = `info.sources[].sku` (FBO → FBS → первый ненулевой). Это **публичный** SKU маркетплейса для URL `https://www.ozon.ru/product/{sku}/`. **Не путать с `ozonProductId`** — построение URL по `product_id` ведёт на чужой товар.
+
+### Диагностические / административные эндпоинты импорта
+
+- `POST /api/import/catalog/refresh/:articleId` — точечный refresh одного SKU (info+prices). Использует те же helpers, что и полный импорт; обновляет catalog-поля и `costPrice` (только при `net_price > 0`). 404, если артикул не найден локально или в Ozon.
+- `POST /api/import/finance/relink` — backfill `articleId` для строк `finance_transactions WHERE article_id IS NULL` через `raw.items[].sku → products.ozon_sku`. Возвращает `{ scanned, linked }`. Полезно после первого получения `ozon_sku` для исторических транзакций без `offer_id`.
+- `GET /api/import/debug/prices/:articleId` — сырой ответ `/v5/product/info/prices` (для UI кнопки «Ozon /v5 raw» в drawer'е). Возвращает `{ endpoint, request, response }`.
+- `GET /api/import/debug/finance/:articleId` — агрегаты по локальной `finance_transactions` для одного SKU (без обращения к Ozon). Считает `accruals_for_sale` и `amount` по типам, `period.from/to`, последние 10 операций.
+- `GET/PUT /api/settings/auto-refresh` — конфиг авто-импорта каталога (`{ enabled, intervalMin }`), хранится в `user_settings` (миграция `0002`). Клиент использует его в `src/lib/autoRefresh.ts` — module-scope таймер запускается из `App.tsx` при старте.
 
 ### Аналитика (Фаза 4)
 
@@ -133,3 +156,4 @@ npx vitest run __tests__/server/         # все backend-тесты
 - При генерации новой миграции обязательно проверь, что и `extract-data.mjs`, и `seed.mjs`, и тестовые сэтап-функции (`__tests__/server/*.test.ts:setupDb`) применяют **все** SQL-файлы из `server/db/migrations/`.
 - При расширении `OzonCommissions` (новые поля API) обнови оба места: `src/types/index.ts` и `server/ozon/types.ts:OzonPriceItem.commissions` (последний импортирует из первого).
 - При добавлении новой схемы поставки или поля в `ProductInput` — синхронно правь `products` в `server/db/schema.ts`, валидацию в `server/routes/products.ts:validateInput`, маппер `dbToRow`/`inputToColumns` и `seed.mjs`.
+- При работе с `MappedCatalogEntry` помни различие: **`patch` — поля, всегда обновляемые из Ozon**; **`costPrice` и `ozonSku` — отдельные опциональные поля рядом** (записываются только при `> 0` / `!= null` через условный спред). Не клади их в `patch`, иначе сломаешь логику «не затирать локальное значение, когда Ozon не отдал данных».

@@ -4,7 +4,6 @@ import ProductsTable, { type RowResult } from "./components/ProductsTable";
 import ProductDrawer from "./components/ProductDrawer";
 import OzonImportModal from "./components/OzonImportModal";
 import FinanceTab from "./components/FinanceTab";
-import KpiStrip from "./components/KpiStrip";
 import AppHeader from "./components/AppHeader";
 import TabBar from "./components/TabBar";
 import TweaksPanel from "./components/TweaksPanel";
@@ -40,12 +39,18 @@ const COFFEE_DEFAULT: ProductInput = {
   isFireHazard: false,
   plannedStorageDays: 30,
   volumeL: 209,
+  depthMm: null,
+  widthMm: null,
+  heightMm: null,
+  weightG: null,
   vatRate: 0.05,
   redemptionPercent: 90,
   salesPlan: 10,
   logisticsMode: "Авто",
   localShare: 0.5,
   clustersCount: "Считать без наценки",
+  dispatchCluster: "Москва, МО и Дальние регионы",
+  destinationCluster: "Москва, МО и Дальние регионы",
   currentPrice: 337000,
   discountPercent: 0.345,
   marketingPercent: 0,
@@ -111,23 +116,92 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"calc" | "finance">("calc");
+  const TAB_KEY = "ozon-calc.active-tab";
+  const [activeTab, setActiveTab] = useState<"calc" | "finance">(() => {
+    try {
+      const v = localStorage.getItem(TAB_KEY);
+      if (v === "calc" || v === "finance") return v;
+    } catch {
+      /* ignore */
+    }
+    return "calc";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(TAB_KEY, activeTab);
+    } catch {
+      /* ignore */
+    }
+  }, [activeTab]);
   const [channelFilter, setChannelFilter] = useState<FilterValue>("Все");
+  const ACTIVE_ONLY_KEY = "ozon-calc.active-only";
+  const [activeOnly, setActiveOnly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ACTIVE_ONLY_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_ONLY_KEY, activeOnly ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [activeOnly]);
+  const [searchQuery, setSearchQuery] = useState<string>("");
 
-  // Actuals comparison (Phase 4)
-  const [showActuals, setShowActuals] = useState(false);
+  // Actuals comparison (Phase 4) — UI-state, persisted in localStorage so the
+  // toggle and chosen period survive a page reload.
+  const ACTUALS_KEY = "ozon-calc.actuals";
   const monthAgo = (): string => {
     const d = new Date();
     d.setMonth(d.getMonth() - 1);
     return d.toISOString().slice(0, 10);
   };
   const today = (): string => new Date().toISOString().slice(0, 10);
-  const [actualsFrom, setActualsFrom] = useState(monthAgo());
-  const [actualsTo, setActualsTo] = useState(today());
+  const loadActuals = (): { showActuals: boolean; from: string; to: string } => {
+    try {
+      const raw = localStorage.getItem(ACTUALS_KEY);
+      if (raw) {
+        const p = JSON.parse(raw) as Partial<{
+          showActuals: boolean;
+          from: string;
+          to: string;
+        }>;
+        return {
+          showActuals: !!p.showActuals,
+          from: typeof p.from === "string" ? p.from : monthAgo(),
+          to: typeof p.to === "string" ? p.to : today(),
+        };
+      }
+    } catch {
+      // ignore — fall through to defaults
+    }
+    return { showActuals: false, from: monthAgo(), to: today() };
+  };
+  const [showActuals, setShowActuals] = useState(() => loadActuals().showActuals);
+  const [actualsFrom, setActualsFrom] = useState(() => loadActuals().from);
+  const [actualsTo, setActualsTo] = useState(() => loadActuals().to);
   const [actualsByArticle, setActualsByArticle] = useState<
     Map<string, RealizedMarginRow>
   >(new Map());
   const [actualsLoading, setActualsLoading] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        ACTUALS_KEY,
+        JSON.stringify({
+          showActuals,
+          from: actualsFrom,
+          to: actualsTo,
+        }),
+      );
+    } catch {
+      // ignore — Safari private mode etc.
+    }
+  }, [showActuals, actualsFrom, actualsTo]);
 
   // Apply tweaks to root element via CSS variables / classes.
   useEffect(() => {
@@ -188,6 +262,7 @@ export default function App() {
           storage: refsData.storage,
           logisticsTariffs: refsData.logisticsTariffs,
           logisticsSettings: (refsData as RefsResponse).logisticsSettings,
+          logisticsClusterTariffs: refsData.logisticsClusterTariffs,
         };
         setRefs(r);
         setCategories(refsData.categories);
@@ -255,6 +330,17 @@ export default function App() {
     return map;
   }, [rows, taxSettings, refs]);
 
+  const visibleRows = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => {
+      if (row.input.articleId.toLowerCase().includes(q)) return true;
+      if (row.input.productName.toLowerCase().includes(q)) return true;
+      if (row.ozonSku != null && String(row.ozonSku).includes(q)) return true;
+      return false;
+    });
+  }, [rows, searchQuery]);
+
   const addRow = async () => {
     const taken = new Set(rows.map((r) => r.input.articleId));
     const template = rows[rows.length - 1]?.input ?? COFFEE_DEFAULT;
@@ -310,6 +396,22 @@ export default function App() {
       setRows(list);
     } catch (e) {
       setActionError(`refresh: ${(e as Error).message}`);
+    }
+  };
+
+  const refreshRefs = async () => {
+    try {
+      const refsData = await api.refs.get();
+      setRefs({
+        commissions: refsData.commissions,
+        storage: refsData.storage,
+        logisticsTariffs: refsData.logisticsTariffs,
+        logisticsSettings: refsData.logisticsSettings,
+        logisticsClusterTariffs: refsData.logisticsClusterTariffs,
+      });
+      setCategories(refsData.categories);
+    } catch (e) {
+      setActionError(`refs: ${(e as Error).message}`);
     }
   };
 
@@ -375,9 +477,13 @@ export default function App() {
 
         {activeTab === "calc" && (
           <>
-            <KpiStrip rows={rows} results={results} channelFilter={channelFilter} />
 
-            <GlobalSettings value={taxSettings} onChange={setTaxSettings} />
+            <GlobalSettings
+              value={taxSettings}
+              onChange={setTaxSettings}
+              onProductsRefresh={refreshProducts}
+              onRefsRefresh={refreshRefs}
+            />
 
             <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
               <label className="checkbox">
@@ -426,7 +532,7 @@ export default function App() {
                 </span>
               </h3>
               <ProductsTable
-                rows={rows}
+                rows={visibleRows}
                 results={results}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
@@ -438,6 +544,13 @@ export default function App() {
                 onChannelFilterChange={setChannelFilter}
                 showChart={tweaks.showChart}
                 actuals={showActuals ? actualsByArticle : undefined}
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                totalRowsCount={rows.length}
+                taxSettings={taxSettings}
+                activeOnly={activeOnly}
+                onActiveOnlyChange={setActiveOnly}
+                breakdownMode={tweaks.breakdownMode}
               />
             </div>
 
@@ -451,6 +564,8 @@ export default function App() {
                 ozonProductId={selectedRow.ozonProductId ?? null}
                 ozonSku={selectedRow.ozonSku ?? null}
                 onRefreshed={refreshProducts}
+                taxSettings={taxSettings}
+                refs={refs}
               />
             )}
           </>

@@ -12,7 +12,7 @@ import {
   returnPercentIntOf,
 } from "./pricing";
 import { findCommission, commissionsRub } from "./commission";
-import { calcLogistics, lastMileOf } from "./logistics";
+import { calcLogistics, findClusterTariff, lastMileOf } from "./logistics";
 import {
   findStorage,
   freeStorageDaysOf,
@@ -52,21 +52,45 @@ export const calculateRow = (
   let baseDelivery: number;
   let lastMileFbo: number;
   let lastMileFbs: number;
+  let firstMileFbsRub = ACCEPTANCE_FBS_FEE; // FBS "Обработка отправления"
   let usedOzonCommissions = false;
 
   if (perSku.ozonCommissions) {
     const oc = perSku.ozonCommissions;
     cFboRub = promoPrice * ozonPercentOf(oc.sales_percent_fbo);
     cFbsRub = promoPrice * ozonPercentOf(oc.sales_percent_fbs);
-    // Ozon doesn't return a separate realFBS commission — realFBS uses FBS rate.
-    cRealFbsRub = cFbsRub;
-    logisticsFbo = oc.fbo_direct_flow_trans_max_amount ?? 0;
-    logisticsFbs = oc.fbs_direct_flow_trans_max_amount ?? 0;
+    // Older API versions only returned `sales_percent_fbs` for both — keep it
+    // as a fallback when `sales_percent_rfbs` is absent.
+    cRealFbsRub =
+      promoPrice *
+      ozonPercentOf(oc.sales_percent_rfbs ?? oc.sales_percent_fbs);
+
+    // Pick the min/max bracket of `direct_flow_trans` based on cluster choice:
+    // same dispatch+destination cluster ≈ "local" sale → min; otherwise → max.
+    const isLocal = input.dispatchCluster === input.destinationCluster;
+    const pickBracket = (
+      min: number | undefined,
+      max: number | undefined,
+    ): number => {
+      if (isLocal) return min ?? max ?? 0;
+      return max ?? min ?? 0;
+    };
+    logisticsFbo = pickBracket(
+      oc.fbo_direct_flow_trans_min_amount,
+      oc.fbo_direct_flow_trans_max_amount,
+    );
+    logisticsFbs = pickBracket(
+      oc.fbs_direct_flow_trans_min_amount,
+      oc.fbs_direct_flow_trans_max_amount,
+    );
     // FBS direct-flow is a clean proxy for "base delivery" used in return-services
-    // formulas; FBO additionally bundles its own markup.
+    // 'tz' formula; FBO additionally bundles its own markup.
     baseDelivery = logisticsFbs;
     lastMileFbo = oc.fbo_deliv_to_customer_amount ?? 0;
     lastMileFbs = oc.fbs_deliv_to_customer_amount ?? 0;
+    // FBS first-mile ("Обработка отправления") — Ozon's per-SKU value when
+    // present; otherwise legacy 30 ₽ constant.
+    firstMileFbsRub = oc.fbs_first_mile_max_amount ?? ACCEPTANCE_FBS_FEE;
     usedOzonCommissions = true;
   } else {
     const cRow = findCommission(refs.commissions, input.category, input.productType);
@@ -94,14 +118,43 @@ export const calculateRow = (
     lastMileFbs = lm;
   }
 
+  // Override логистики точной матрицей, если включено и данные подходят.
+  // Матрица одна на пару → для FBO/FBS подменяем оба значения. last-mile,
+  // first-mile и комиссии остаются как были (API/таблица). baseDelivery тоже
+  // подменяется, чтобы tz-формула возврата работала с актуальной величиной.
+  if (taxSettings.useClusterLogistics) {
+    const clusterTariff = findClusterTariff(
+      refs.logisticsClusterTariffs,
+      input.volumeL,
+      input.dispatchCluster,
+      input.destinationCluster,
+      promoPrice,
+    );
+    if (clusterTariff != null) {
+      logisticsFbo = clusterTariff;
+      logisticsFbs = clusterTariff;
+      baseDelivery = clusterTariff;
+    }
+  }
+
   // acquiring & marketing
   const acquiringRub = promoPrice * 0.015;
   const marketingRub = promoPrice * input.marketingPercent;
 
-  // ozon return services — proxy "base delivery" with FBS direct-flow value
-  const ozonReturnServices = ((baseDelivery + 15) * returnPercentInt) / 100;
-  const ozonReturnServicesFbo = ozonReturnServices;
-  const ozonReturnServicesFbs = ozonReturnServices;
+  // ozon return services — two formulas controlled by `taxSettings.calcMode`.
+  // Default ('tz') keeps the legacy spec formula `(baseDelivery + 15) × return%`.
+  // 'ozon' uses Ozon's per-SKU `*_return_flow_amount` × return% — matches the
+  // online calculator. The 'ozon' branch only differs in the API path; on the
+  // table path there is no API value to substitute, so we always use 'tz'.
+  const calcMode = taxSettings.calcMode ?? "tz";
+  const useOzonReturn = calcMode === "ozon" && usedOzonCommissions;
+  const oc = perSku.ozonCommissions;
+  const ozonReturnServicesFbo = useOzonReturn
+    ? ((oc?.fbo_return_flow_amount ?? 0) * returnPercentInt) / 100
+    : ((baseDelivery + 15) * returnPercentInt) / 100;
+  const ozonReturnServicesFbs = useOzonReturn
+    ? ((oc?.fbs_return_flow_amount ?? 0) * returnPercentInt) / 100
+    : ((baseDelivery + 15) * returnPercentInt) / 100;
 
   // потери возврата
   const earningFbo = promoPrice - cFboRub - acquiringRub - logisticsFbo - lastMileFbo;
@@ -155,7 +208,7 @@ export const calculateRow = (
     (cFbsRub +
       acquiringRub +
       marketingRub +
-      ACCEPTANCE_FBS_FEE +
+      firstMileFbsRub +
       logisticsFbs +
       ozonReturnServicesFbs +
       lastMileFbs) /
@@ -177,16 +230,29 @@ export const calculateRow = (
         promoPrice
       : 0;
 
-  // vat
-  const vatOut = vatOutOf(promoPrice, taxSettings.taxSystem, input.vatRate);
+  // vat — on USN we use the global `usnVatRate` (one rate for the whole shop,
+  // determined by previous-year revenue). On OSNO the per-product rate stays
+  // (mixed-rate categories: 10% books, 20% general, etc.).
+  const isUsn =
+    taxSettings.taxSystem === "УСН Доходы" ||
+    taxSettings.taxSystem === "УСН Доходы минус расходы";
+  const effectiveVatRate = isUsn
+    ? (taxSettings.usnVatRate ?? "Не облагается")
+    : input.vatRate;
+  // null в товаре → берём глобальный дефолт. Явный true/false в товаре —
+  // пользователь переопределил, не наследуем.
+  const effectiveWhitePurchase =
+    input.whitePurchase ?? taxSettings.defaultWhitePurchase ?? false;
+
+  const vatOut = vatOutOf(promoPrice, taxSettings.taxSystem, effectiveVatRate);
 
   const vatInFbo = vatInOf(
     promoPrice,
     ozonShareFbo,
     costShare,
     taxSettings.taxSystem,
-    input.vatRate,
-    input.whitePurchase,
+    effectiveVatRate,
+    effectiveWhitePurchase,
     input.incomingVatPurchase,
     input.incomingVatRate,
   );
@@ -195,8 +261,8 @@ export const calculateRow = (
     ozonShareFbs,
     costShare,
     taxSettings.taxSystem,
-    input.vatRate,
-    input.whitePurchase,
+    effectiveVatRate,
+    effectiveWhitePurchase,
     input.incomingVatPurchase,
     input.incomingVatRate,
   );
@@ -205,15 +271,15 @@ export const calculateRow = (
     ozonShareRealFbs,
     costShare,
     taxSettings.taxSystem,
-    input.vatRate,
-    input.whitePurchase,
+    effectiveVatRate,
+    effectiveWhitePurchase,
     input.incomingVatPurchase,
     input.incomingVatRate,
   );
 
-  const vatPayableFbo = vatPayableOf(vatOut, vatInFbo, taxSettings.taxSystem, input.vatRate);
-  const vatPayableFbs = vatPayableOf(vatOut, vatInFbs, taxSettings.taxSystem, input.vatRate);
-  const vatPayableRealFbs = vatPayableOf(vatOut, vatInRealFbs, taxSettings.taxSystem, input.vatRate);
+  const vatPayableFbo = vatPayableOf(vatOut, vatInFbo, taxSettings.taxSystem, effectiveVatRate);
+  const vatPayableFbs = vatPayableOf(vatOut, vatInFbs, taxSettings.taxSystem, effectiveVatRate);
+  const vatPayableRealFbs = vatPayableOf(vatOut, vatInRealFbs, taxSettings.taxSystem, effectiveVatRate);
 
   // ndfl (OSNO IP)
   const partyExtraPerUnit =
@@ -260,8 +326,8 @@ export const calculateRow = (
     extraShare,
     ndfl: ndflFbo,
     vatPayable: vatPayableFbo,
-    vatRate: input.vatRate,
-    whitePurchase: input.whitePurchase,
+    vatRate: effectiveVatRate,
+    whitePurchase: effectiveWhitePurchase,
     incomingVatPurchase: input.incomingVatPurchase,
     incomingVatRate: input.incomingVatRate,
     taxSettings,
@@ -273,8 +339,8 @@ export const calculateRow = (
     extraShare,
     ndfl: ndflFbs,
     vatPayable: vatPayableFbs,
-    vatRate: input.vatRate,
-    whitePurchase: input.whitePurchase,
+    vatRate: effectiveVatRate,
+    whitePurchase: effectiveWhitePurchase,
     incomingVatPurchase: input.incomingVatPurchase,
     incomingVatRate: input.incomingVatRate,
     taxSettings,
@@ -286,8 +352,8 @@ export const calculateRow = (
     extraShare,
     ndfl: ndflRealFbs,
     vatPayable: vatPayableRealFbs,
-    vatRate: input.vatRate,
-    whitePurchase: input.whitePurchase,
+    vatRate: effectiveVatRate,
+    whitePurchase: effectiveWhitePurchase,
     incomingVatPurchase: input.incomingVatPurchase,
     incomingVatRate: input.incomingVatRate,
     taxSettings,
@@ -310,7 +376,7 @@ export const calculateRow = (
   const expensesFbs =
     cFbsRub +
     acquiringRub +
-    ACCEPTANCE_FBS_FEE +
+    firstMileFbsRub +
     deliveryCostFbsRub +
     input.costPrice +
     input.extraExpensesPerUnit +
@@ -334,6 +400,7 @@ export const calculateRow = (
     lastMileRub: number,
     storageRub: number,
     acceptanceRub: number,
+    ozonReturnServicesRub: number,
     vatPayable: number,
     totalTax: number,
     totalExpenses: number,
@@ -341,6 +408,19 @@ export const calculateRow = (
     const marginRub = promoPrice - totalExpenses;
     const marginPercent = promoPrice > 0 ? marginRub / promoPrice : 0;
     const profitability = input.costPrice > 0 ? marginRub / input.costPrice : 0;
+    // Mirror Ozon online calculator's "К начислению за товар": price minus
+    // every Ozon-side fee, BEFORE taxes/cost/marketing. Marketing is treated
+    // as a seller's spend (not an Ozon deduction) — same as in the online calc
+    // toggle "Доля выкупа, налог, себестоимость и прочее".
+    const ozonNetPayout =
+      promoPrice -
+      (commissionRub +
+        acquiringRub +
+        logisticsRub +
+        lastMileRub +
+        storageRub +
+        acceptanceRub +
+        ozonReturnServicesRub);
     return {
       commissionRub,
       acquiringRub,
@@ -350,9 +430,11 @@ export const calculateRow = (
       storageRub,
       acceptanceRub,
       damageRub,
+      ozonReturnServicesRub,
       vatPayable,
       totalTax,
       totalExpenses,
+      ozonNetPayout,
       marginRub,
       marginPercent,
       profitability,
@@ -366,6 +448,7 @@ export const calculateRow = (
     lastMileFbo,
     storageFbo,
     acceptanceFboFee,
+    ozonReturnServicesFbo,
     vatPayableFbo,
     taxFbo,
     expensesFbo,
@@ -375,7 +458,8 @@ export const calculateRow = (
     logisticsFbs,
     lastMileFbs,
     0,
-    ACCEPTANCE_FBS_FEE,
+    firstMileFbsRub,
+    ozonReturnServicesFbs,
     vatPayableFbs,
     taxFbs,
     expensesFbs,
@@ -383,6 +467,7 @@ export const calculateRow = (
   const realFbs = buildResult(
     cRealFbsRub,
     deliveryRealFbs + returnDeliveryRealFbs,
+    0,
     0,
     0,
     0,
