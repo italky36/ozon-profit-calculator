@@ -133,7 +133,10 @@ export const products = sqliteTable("products", {
 });
 
 export const userSettings = sqliteTable("user_settings", {
-  id: integer("id").primaryKey().default(1),
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
   taxSettings: text("tax_settings", { mode: "json" })
     .$type<TaxSettings>()
     .notNull(),
@@ -146,11 +149,66 @@ export const userSettings = sqliteTable("user_settings", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// === Auth ===
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role", { enum: ["admin", "user"] })
+    .notNull()
+    .default("user"),
+  isVerified: integer("is_verified", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  isBlocked: integer("is_blocked", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const sessions = sqliteTable("sessions", {
+  id: text("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const emailVerificationTokens = sqliteTable(
+  "email_verification_tokens",
+  {
+    token: text("token").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+);
+
 // === Ozon credentials (used in phase 2) ===
 export const apiCredentials = sqliteTable("api_credentials", {
   id: integer("id").primaryKey().default(1),
   clientId: text("client_id").notNull(),
   apiKey: text("api_key").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// === SMTP settings (admin-editable; overrides env if a row exists) ===
+export const smtpSettings = sqliteTable("smtp_settings", {
+  id: integer("id").primaryKey().default(1),
+  host: text("host").notNull(),
+  port: integer("port").notNull(),
+  user: text("user").notNull(),
+  pass: text("pass").notNull(),
+  fromAddr: text("from_addr").notNull(),
+  secure: text("secure", {
+    enum: ["auto", "ssl", "starttls", "none"],
+  })
+    .notNull()
+    .default("auto"),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 

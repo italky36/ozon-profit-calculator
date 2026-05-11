@@ -2,31 +2,33 @@ import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import { apiCredentials } from "../db/schema";
 import type { DB } from "../db/client";
+import { requireAdmin } from "../middleware/session";
+import type { SessionUser } from "../auth/utils";
 
 interface PutBody {
   clientId?: unknown;
   apiKey?: unknown;
 }
 
-export function credentialsRoutes(db: DB): Hono {
-  const app = new Hono();
+type CredsEnv = { Variables: { user?: SessionUser } };
+
+export function credentialsRoutes(db: DB): Hono<CredsEnv> {
+  const app = new Hono<CredsEnv>();
 
   app.get("/status", async (c) => {
     const envHas =
       !!process.env.OZON_CLIENT_ID && !!process.env.OZON_API_KEY;
-    if (envHas) return c.json({ hasCredentials: true, source: "env" });
-
     const [row] = await db
       .select({ id: apiCredentials.id })
       .from(apiCredentials)
       .where(eq(apiCredentials.id, 1));
-    return c.json({
-      hasCredentials: !!row,
-      source: row ? "db" : null,
-    });
+    // DB takes priority over env (consistent with import client behavior).
+    if (row) return c.json({ hasCredentials: true, source: "db" });
+    if (envHas) return c.json({ hasCredentials: true, source: "env" });
+    return c.json({ hasCredentials: false, source: null });
   });
 
-  app.put("/", async (c) => {
+  app.put("/", requireAdmin, async (c) => {
     let body: PutBody;
     try {
       body = (await c.req.json()) as PutBody;

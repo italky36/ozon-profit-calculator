@@ -1,8 +1,11 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { userSettings } from "../db/schema";
 import type { DB } from "../db/client";
 import type { TaxSettings } from "../../src/types";
+import type { SessionUser } from "../auth/utils";
+
+type SettingsEnv = { Variables: { user?: SessionUser } };
 
 const TAX_SYSTEMS = new Set([
   "УСН Доходы",
@@ -61,16 +64,59 @@ const validate = (raw: unknown): TaxSettings => {
   return r as TaxSettings;
 };
 
-export function settingsRoutes(db: DB): Hono {
-  const app = new Hono();
+/** Lazy lookup + create for the current user's settings row. Defaults are
+ * copied from the seed row (`id=1`, possibly `user_id=NULL`). */
+function ensureUserRow(
+  db: DB,
+  userId: number,
+): typeof userSettings.$inferSelect | null {
+  const existing = db
+    .select()
+    .from(userSettings)
+    .where(eq(userSettings.userId, userId))
+    .get();
+  if (existing) return existing;
 
-  app.get("/", async (c) => {
-    const [row] = await db.select().from(userSettings).where(eq(userSettings.id, 1));
+  const seed =
+    db
+      .select()
+      .from(userSettings)
+      .where(and(eq(userSettings.id, 1), isNull(userSettings.userId)))
+      .get() ??
+    db.select().from(userSettings).where(eq(userSettings.id, 1)).get();
+  if (!seed) return null;
+
+  const now = new Date();
+  db.insert(userSettings)
+    .values({
+      userId,
+      taxSettings: seed.taxSettings,
+      autoRefreshEnabled: seed.autoRefreshEnabled,
+      autoRefreshIntervalMin: seed.autoRefreshIntervalMin,
+      updatedAt: now,
+    })
+    .run();
+  return (
+    db
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.userId, userId))
+      .get() ?? null
+  );
+}
+
+export function settingsRoutes(db: DB): Hono<SettingsEnv> {
+  const app = new Hono<SettingsEnv>();
+
+  app.get("/", (c) => {
+    const user = c.get("user")!;
+    const row = ensureUserRow(db, user.id);
     if (!row) return c.json({ error: "not seeded" }, 500);
     return c.json(row.taxSettings);
   });
 
   app.put("/", async (c) => {
+    const user = c.get("user")!;
     let body: unknown;
     try {
       body = await c.req.json();
@@ -83,31 +129,19 @@ export function settingsRoutes(db: DB): Hono {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
+    const row = ensureUserRow(db, user.id);
+    if (!row) return c.json({ error: "not seeded" }, 500);
     const now = new Date();
-    const [existing] = await db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.id, 1));
-    if (!existing) {
-      await db.insert(userSettings).values({
-        id: 1,
-        taxSettings: next,
-        updatedAt: now,
-      });
-    } else {
-      await db
-        .update(userSettings)
-        .set({ taxSettings: next, updatedAt: now })
-        .where(eq(userSettings.id, 1));
-    }
+    db.update(userSettings)
+      .set({ taxSettings: next, updatedAt: now })
+      .where(eq(userSettings.userId, user.id))
+      .run();
     return c.json(next);
   });
 
-  app.get("/auto-refresh", async (c) => {
-    const [row] = await db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.id, 1));
+  app.get("/auto-refresh", (c) => {
+    const user = c.get("user")!;
+    const row = ensureUserRow(db, user.id);
     return c.json({
       enabled: row?.autoRefreshEnabled ?? false,
       intervalMin: row?.autoRefreshIntervalMin ?? 30,
@@ -115,6 +149,7 @@ export function settingsRoutes(db: DB): Hono {
   });
 
   app.put("/auto-refresh", async (c) => {
+    const user = c.get("user")!;
     let body: unknown;
     try {
       body = await c.req.json();
@@ -128,23 +163,17 @@ export function settingsRoutes(db: DB): Hono {
       typeof r.intervalMin === "number" && Number.isFinite(r.intervalMin)
         ? Math.max(1, Math.min(1440, Math.round(r.intervalMin)))
         : 30;
-
+    const row = ensureUserRow(db, user.id);
+    if (!row) return c.json({ error: "not seeded" }, 500);
     const now = new Date();
-    const [existing] = await db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.id, 1));
-    if (!existing) {
-      return c.json({ error: "user_settings not seeded" }, 500);
-    }
-    await db
-      .update(userSettings)
+    db.update(userSettings)
       .set({
         autoRefreshEnabled: r.enabled,
         autoRefreshIntervalMin: min,
         updatedAt: now,
       })
-      .where(eq(userSettings.id, 1));
+      .where(eq(userSettings.userId, user.id))
+      .run();
     return c.json({ enabled: r.enabled, intervalMin: min });
   });
 

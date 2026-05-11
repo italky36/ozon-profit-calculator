@@ -95,6 +95,48 @@ export default function ProductForm({ value, onChange, lockedFields = [] }: Prop
       </fieldset>
 
       <fieldset>
+        <legend>Габариты</legend>
+        <div className="grid">
+          <label><span>Глубина, мм</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={value.depthMm ?? ""}
+              onChange={(e) => set("depthMm", e.target.value === "" ? null : num(e.target.value))}
+            />
+          </label>
+          <label><span>Ширина, мм</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={value.widthMm ?? ""}
+              onChange={(e) => set("widthMm", e.target.value === "" ? null : num(e.target.value))}
+            />
+          </label>
+          <label><span>Высота, мм</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={value.heightMm ?? ""}
+              onChange={(e) => set("heightMm", e.target.value === "" ? null : num(e.target.value))}
+            />
+          </label>
+          <label><span>Вес, г</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={value.weightG ?? ""}
+              onChange={(e) => set("weightG", e.target.value === "" ? null : num(e.target.value))}
+            />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>Цена и продажи</legend>
         <div className="grid">
           <label><span>Текущая цена, ₽</span>

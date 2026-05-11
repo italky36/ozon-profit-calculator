@@ -4,11 +4,13 @@ import ProductsTable, { type RowResult } from "./components/ProductsTable";
 import ProductDrawer from "./components/ProductDrawer";
 import OzonImportModal from "./components/OzonImportModal";
 import FinanceTab from "./components/FinanceTab";
+import AdminPage from "./components/admin/AdminPage";
 import AppHeader from "./components/AppHeader";
 import TabBar from "./components/TabBar";
 import TweaksPanel from "./components/TweaksPanel";
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
-import { Package, Wallet, Settings as SettingsIcon } from "lucide-react";
+import { useAuth } from "./contexts/AuthContext";
+import { Package, ShieldCheck, Wallet, Settings as SettingsIcon } from "lucide-react";
 import type { FilterValue } from "./components/ChannelFilter";
 import { calculateRow } from "./lib/calc";
 import type {
@@ -19,8 +21,6 @@ import type {
 } from "./types";
 import { api, type RealizedMarginRow, type RefsResponse } from "./api";
 import { initAutoRefresh, onAutoRefreshChange } from "./lib/autoRefresh";
-
-import "./App.css";
 
 const newId = (): string => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -84,7 +84,9 @@ const uniqueArticleId = (base: string, taken: Set<string>): string => {
   return `${base}-${Date.now()}`;
 };
 
-const TABS = [
+type TabId = "calc" | "finance" | "admin";
+
+const BASE_TABS = [
   {
     id: "calc" as const,
     label: (
@@ -103,7 +105,19 @@ const TABS = [
   },
 ];
 
+const ADMIN_TAB = {
+  id: "admin" as const,
+  label: (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <ShieldCheck size={16} /> Админка
+    </span>
+  ),
+};
+
 export default function App() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const TABS = isAdmin ? [...BASE_TABS, ADMIN_TAB] : BASE_TABS;
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
 
   const [refs, setRefs] = useState<References | null>(null);
@@ -117,10 +131,10 @@ export default function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
   const TAB_KEY = "ozon-calc.active-tab";
-  const [activeTab, setActiveTab] = useState<"calc" | "finance">(() => {
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === "calc" || v === "finance") return v;
+      if (v === "calc" || v === "finance" || v === "admin") return v;
     } catch {
       /* ignore */
     }
@@ -133,6 +147,10 @@ export default function App() {
       /* ignore */
     }
   }, [activeTab]);
+  // Если не-админ ранее был на "admin" и роль изменилась — откатить.
+  useEffect(() => {
+    if (activeTab === "admin" && !isAdmin) setActiveTab("calc");
+  }, [activeTab, isAdmin]);
   const [channelFilter, setChannelFilter] = useState<FilterValue>("Все");
   const ACTIVE_ONLY_KEY = "ozon-calc.active-only";
   const [activeOnly, setActiveOnly] = useState<boolean>(() => {
@@ -437,8 +455,8 @@ export default function App() {
           <div className="card" style={{ borderColor: "#FFB3B3", background: "#FEEFEF" }}>
             <p>Не удалось загрузить данные с сервера: {loadError ?? "unknown"}</p>
             <p className="muted">
-              Проверьте, что backend запущен и переменная VITE_AUTH_TOKEN
-              совпадает с AUTH_TOKEN сервера.
+              Проверьте, что backend запущен и сессия не истекла.
+              Попробуйте перелогиниться.
             </p>
           </div>
         </main>
@@ -586,6 +604,8 @@ export default function App() {
             }}
           />
         )}
+
+        {activeTab === "admin" && isAdmin && <AdminPage />}
       </main>
 
       {importOpen && (

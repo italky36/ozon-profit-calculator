@@ -4,12 +4,11 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "../../server/db/schema";
-import { financeTransactions, userSettings } from "../../server/db/schema";
+import { financeTransactions, sessions, userSettings } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import type { TaxSettings } from "../../src/types";
+import { createUserDirect } from "./_helpers";
 
-const AUTH = "test-token";
-const HEADERS = { "X-Auth-Token": AUTH };
 
 const SAMPLE_TAX: TaxSettings = {
   damageRate: 0.01,
@@ -27,6 +26,7 @@ const SAMPLE_TAX: TaxSettings = {
 interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
+  cookie: string;
 }
 
 const setupDb = (): TestEnv => {
@@ -44,7 +44,18 @@ const setupDb = (): TestEnv => {
   db.insert(userSettings)
     .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
     .run();
-  return { db, sqlite };
+
+  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const sessionId = "test-analytics-session";
+  db.insert(sessions)
+    .values({
+      id: sessionId,
+      userId: adminId,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      createdAt: new Date(),
+    })
+    .run();
+  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
 };
 
 interface Tx {
@@ -99,10 +110,10 @@ describe("/api/analytics/realized-margin", () => {
       { operation_id: 9, operation_type: "MarketplaceRedistributionOfAcquiringOperation", operation_date: "2026-04-22T00:00:00.000Z", posting_number: null, article_id: null, amount: -100, type: "commission" },
     ]);
 
-    const app = buildApp({ authToken: AUTH, db: env.db });
+    const app = buildApp({ db: env.db });
     const res = await app.request(
       "/api/analytics/realized-margin?from=2026-04-01&to=2026-04-30T23:59:59.999Z",
-      { headers: HEADERS },
+      { headers: { Cookie: env.cookie } },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -141,10 +152,10 @@ describe("/api/analytics/realized-margin", () => {
   });
 
   it("returns empty rows when no data in range", async () => {
-    const app = buildApp({ authToken: AUTH, db: env.db });
+    const app = buildApp({ db: env.db });
     const res = await app.request(
       "/api/analytics/realized-margin?from=2030-01-01&to=2030-01-31",
-      { headers: HEADERS },
+      { headers: { Cookie: env.cookie } },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { rows: unknown[] };
@@ -152,10 +163,10 @@ describe("/api/analytics/realized-margin", () => {
   });
 
   it("rejects bad date with 400", async () => {
-    const app = buildApp({ authToken: AUTH, db: env.db });
+    const app = buildApp({ db: env.db });
     const res = await app.request(
       "/api/analytics/realized-margin?from=garbage",
-      { headers: HEADERS },
+      { headers: { Cookie: env.cookie } },
     );
     expect(res.status).toBe(400);
   });

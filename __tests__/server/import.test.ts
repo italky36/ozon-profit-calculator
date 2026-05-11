@@ -6,14 +6,13 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
 import * as schema from "../../server/db/schema";
-import { products, userSettings } from "../../server/db/schema";
+import { products, sessions, userSettings } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { runCatalogImport } from "../../server/routes/import";
 import { getCategoryLookup } from "../../server/ozon/catalog";
 import type { OzonClient } from "../../server/ozon/client";
 import type { TaxSettings } from "../../src/types";
-
-const AUTH = "test-token";
+import { createUserDirect } from "./_helpers";
 
 const SAMPLE_TAX: TaxSettings = {
   damageRate: 0.01,
@@ -135,6 +134,7 @@ const makeMockClient = (): OzonClient => ({
 interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
+  cookie: string;
 }
 
 const setupDb = (): TestEnv => {
@@ -152,7 +152,17 @@ const setupDb = (): TestEnv => {
   db.insert(userSettings)
     .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
     .run();
-  return { db, sqlite };
+  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const sessionId = "test-import-session";
+  db.insert(sessions)
+    .values({
+      id: sessionId,
+      userId: adminId,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      createdAt: new Date(),
+    })
+    .run();
+  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
 };
 
 describe("getCategoryLookup", () => {
@@ -299,11 +309,10 @@ describe("import route", () => {
 
   it("POST /api/import/catalog creates a run and completes", async () => {
     const app = buildApp({
-      authToken: AUTH,
       db: env.db,
       importContext: { ozonClient: makeMockClient() },
     });
-    const headers = { "Content-Type": "application/json", "X-Auth-Token": AUTH };
+    const headers = { "Content-Type": "application/json", Cookie: env.cookie };
 
     const res = await app.request("/api/import/catalog", {
       method: "POST",
@@ -334,9 +343,9 @@ describe("import route", () => {
     delete process.env.OZON_CLIENT_ID;
     delete process.env.OZON_API_KEY;
     try {
-      const app = buildApp({ authToken: AUTH, db: env.db });
+      const app = buildApp({ db: env.db });
       const res = await app.request("/api/credentials/status", {
-        headers: { "X-Auth-Token": AUTH },
+        headers: { Cookie: env.cookie },
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ hasCredentials: false, source: null });
@@ -352,8 +361,8 @@ describe("import route", () => {
     delete process.env.OZON_CLIENT_ID;
     delete process.env.OZON_API_KEY;
     try {
-      const app = buildApp({ authToken: AUTH, db: env.db });
-      const headers = { "Content-Type": "application/json", "X-Auth-Token": AUTH };
+      const app = buildApp({ db: env.db });
+      const headers = { "Content-Type": "application/json", Cookie: env.cookie };
 
       const put = await app.request("/api/credentials", {
         method: "PUT",

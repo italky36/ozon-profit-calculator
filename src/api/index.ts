@@ -84,13 +84,24 @@ export interface RealizedMarginResponse {
 
 const BASE = "/api";
 
+export type AuthErrorListener = () => void;
+const authErrorListeners = new Set<AuthErrorListener>();
+export function onAuthError(listener: AuthErrorListener): () => void {
+  authErrorListeners.add(listener);
+  return () => authErrorListeners.delete(listener);
+}
+
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
-  const token = import.meta.env.VITE_AUTH_TOKEN as string | undefined;
-  if (token) headers.set("X-Auth-Token", token);
 
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+  if (res.status === 401 && !path.startsWith("/auth/"))
+    for (const l of authErrorListeners) l();
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   const body = text ? (JSON.parse(text) as unknown) : null;
@@ -105,14 +116,16 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function apiUpload<T>(path: string, file: File): Promise<T> {
-  const headers = new Headers();
-  const token = import.meta.env.VITE_AUTH_TOKEN as string | undefined;
-  if (token) headers.set("X-Auth-Token", token);
   const fd = new FormData();
   fd.append("file", file);
   // Не задаём Content-Type вручную — браузер добавит multipart/form-data с
   // правильным boundary.
-  const res = await fetch(`${BASE}${path}`, { method: "POST", headers, body: fd });
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    body: fd,
+    credentials: "include",
+  });
+  if (res.status === 401) for (const l of authErrorListeners) l();
   const text = await res.text();
   const body = text ? (JSON.parse(text) as unknown) : null;
   if (!res.ok) {
@@ -125,7 +138,113 @@ async function apiUpload<T>(path: string, file: File): Promise<T> {
   return body as T;
 }
 
+export interface AuthUser {
+  id: number;
+  email: string;
+  role: "admin" | "user";
+  isVerified: boolean;
+}
+
+export interface AdminUser extends AuthUser {
+  isBlocked: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminOzonCredentials {
+  hasCredentials: boolean;
+  source: "env" | "db" | null;
+  clientId: string | null;
+  hasApiKey: boolean;
+  updatedAt: string | null;
+}
+
+export type SmtpSecureMode = "auto" | "ssl" | "starttls" | "none";
+
+export interface AdminSmtpSettings {
+  source: "db" | "env" | "console";
+  host: string | null;
+  port: number | null;
+  user: string | null;
+  from: string | null;
+  secure: SmtpSecureMode;
+  hasPassword: boolean;
+  updatedAt: string | null;
+}
+
 export const api = {
+  auth: {
+    me: () => apiFetch<{ user: AuthUser }>("/auth/me"),
+    login: (email: string, password: string) =>
+      apiFetch<{ user: AuthUser }>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      }),
+    register: (email: string, password: string) =>
+      apiFetch<{ message: string }>("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      }),
+    verifyEmail: (token: string) =>
+      apiFetch<{ user: AuthUser }>("/auth/verify-email", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      }),
+    logout: () =>
+      apiFetch<{ message: string }>("/auth/logout", { method: "POST" }),
+  },
+  admin: {
+    listUsers: () => apiFetch<AdminUser[]>("/admin/users"),
+    setRole: (id: number, role: "admin" | "user") =>
+      apiFetch<AdminUser>(`/admin/users/${id}/role`, {
+        method: "PUT",
+        body: JSON.stringify({ role }),
+      }),
+    setBlocked: (id: number, blocked: boolean) =>
+      apiFetch<AdminUser>(`/admin/users/${id}/blocked`, {
+        method: "PUT",
+        body: JSON.stringify({ blocked }),
+      }),
+    deleteUser: (id: number) =>
+      apiFetch<{ message: string }>(`/admin/users/${id}`, { method: "DELETE" }),
+    resendVerification: (id: number) =>
+      apiFetch<{ message: string }>(
+        `/admin/users/${id}/resend-verification`,
+        { method: "POST" },
+      ),
+    revokeSessions: (id: number) =>
+      apiFetch<{ message: string }>(
+        `/admin/users/${id}/revoke-sessions`,
+        { method: "POST" },
+      ),
+    getOzonCredentials: () =>
+      apiFetch<AdminOzonCredentials>("/admin/ozon-credentials"),
+    putOzonCredentials: (creds: { clientId: string; apiKey?: string }) =>
+      apiFetch<{ ok: true }>("/admin/ozon-credentials", {
+        method: "PUT",
+        body: JSON.stringify(creds),
+      }),
+    getSmtp: () => apiFetch<AdminSmtpSettings>("/admin/smtp"),
+    putSmtp: (cfg: {
+      host: string;
+      port: number;
+      user: string;
+      pass?: string;
+      from: string;
+      secure: SmtpSecureMode;
+    }) =>
+      apiFetch<{ ok: true }>("/admin/smtp", {
+        method: "PUT",
+        body: JSON.stringify(cfg),
+      }),
+    deleteSmtp: () =>
+      apiFetch<{ ok: true }>("/admin/smtp", { method: "DELETE" }),
+    testSmtp: (to: string, subject?: string) =>
+      apiFetch<{ ok: true; source: string }>("/admin/smtp/test", {
+        method: "POST",
+        body: JSON.stringify({ to, subject }),
+      }),
+  },
   refs: {
     get: () => apiFetch<RefsResponse>("/refs"),
     clusterLogisticsStats: () =>

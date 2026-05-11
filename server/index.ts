@@ -3,7 +3,9 @@ import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
-import { authMiddleware } from "./middleware/auth";
+import { requireAuth, sessionMiddleware } from "./middleware/session";
+import { authRoutes } from "./routes/auth";
+import { adminRoutes } from "./routes/admin";
 import { refsRoutes } from "./routes/refs";
 import { productsRoutes } from "./routes/products";
 import { settingsRoutes } from "./routes/settings";
@@ -13,22 +15,26 @@ import type { ImportContext } from "./routes/import";
 import { financeRoutes } from "./routes/finance";
 import { analyticsRoutes } from "./routes/analytics";
 import { getDb } from "./db/client";
+import { setEmailClientDb } from "./email/client";
 
 export interface BuildAppOptions {
-  authToken: string;
   db?: ReturnType<typeof getDb>;
   importContext?: ImportContext;
 }
 
-export function buildApp(opts: BuildAppOptions): Hono {
+export function buildApp(opts: BuildAppOptions = {}): Hono {
   const db = opts.db ?? getDb();
+  setEmailClientDb(db);
 
   const app = new Hono();
   app.use("*", cors());
   app.get("/health", (c) => c.json({ ok: true }));
 
   const api = new Hono();
-  api.use("*", authMiddleware(opts.authToken));
+  api.use("*", sessionMiddleware(db));
+  api.route("/auth", authRoutes(db));
+  api.route("/admin", adminRoutes(db));
+  api.use("*", requireAuth);
   api.route("/refs", refsRoutes(db));
   api.route("/products", productsRoutes(db));
   api.route("/settings", settingsRoutes(db));
@@ -44,12 +50,7 @@ export function buildApp(opts: BuildAppOptions): Hono {
 const entry = process.argv[1];
 const isMain = entry ? import.meta.url === pathToFileURL(entry).href : false;
 if (isMain || process.env.START_SERVER === "1") {
-  const authToken = process.env.AUTH_TOKEN;
-  if (!authToken) {
-    console.error("AUTH_TOKEN is required (see .env.example)");
-    process.exit(1);
-  }
-  const app = buildApp({ authToken });
+  const app = buildApp();
   const port = Number(process.env.PORT ?? 3001);
   // HOST=0.0.0.0 exposes on all interfaces (LAN). Default localhost.
   const hostname = process.env.HOST || "localhost";

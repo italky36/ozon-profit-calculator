@@ -4,14 +4,13 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "../../server/db/schema";
-import { financeTransactions, userSettings } from "../../server/db/schema";
+import { financeTransactions, sessions, userSettings } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { runFinanceImport } from "../../server/routes/import";
 import type { OzonClient } from "../../server/ozon/client";
 import type { TaxSettings } from "../../src/types";
 import fixture from "../fixtures/ozon-finance.json" with { type: "json" };
-
-const AUTH = "test-token";
+import { createUserDirect } from "./_helpers";
 
 const SAMPLE_TAX: TaxSettings = {
   damageRate: 0.01,
@@ -36,6 +35,7 @@ const makeMockClient = (): OzonClient => ({
 interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
+  cookie: string;
 }
 
 const setupDb = (): TestEnv => {
@@ -53,7 +53,17 @@ const setupDb = (): TestEnv => {
   db.insert(userSettings)
     .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
     .run();
-  return { db, sqlite };
+  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const sessionId = "test-finance-session";
+  db.insert(sessions)
+    .values({
+      id: sessionId,
+      userId: adminId,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      createdAt: new Date(),
+    })
+    .run();
+  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
 };
 
 const FILTER = { from: "2026-04-01T00:00:00.000Z", to: "2026-04-30T23:59:59.999Z" };
@@ -107,17 +117,19 @@ describe("finance import route + finance API", () => {
   });
   afterEach(() => env.sqlite.close());
 
-  const headers = { "Content-Type": "application/json", "X-Auth-Token": AUTH };
+  const headers = (cookie: string) => ({
+    "Content-Type": "application/json",
+    Cookie: cookie,
+  });
 
   it("POST /api/import/finance runs and completes", async () => {
     const app = buildApp({
-      authToken: AUTH,
       db: env.db,
       importContext: { ozonClient: makeMockClient() },
     });
     const res = await app.request("/api/import/finance", {
       method: "POST",
-      headers,
+      headers: headers(env.cookie),
       body: JSON.stringify({ from: "2026-04-01", to: "2026-04-30" }),
     });
     expect(res.status).toBe(200);
@@ -125,7 +137,7 @@ describe("finance import route + finance API", () => {
 
     let final: { status: string; itemsProcessed: number } | null = null;
     for (let i = 0; i < 20; i++) {
-      const r = await app.request(`/api/import/runs/${runId}`, { headers });
+      const r = await app.request(`/api/import/runs/${runId}`, { headers: headers(env.cookie) });
       const body = (await r.json()) as { status: string; itemsProcessed: number };
       if (body.status !== "running") {
         final = body;
@@ -139,13 +151,12 @@ describe("finance import route + finance API", () => {
 
   it("rejects bad date format with 400", async () => {
     const app = buildApp({
-      authToken: AUTH,
       db: env.db,
       importContext: { ozonClient: makeMockClient() },
     });
     const res = await app.request("/api/import/finance", {
       method: "POST",
-      headers,
+      headers: headers(env.cookie),
       body: JSON.stringify({ from: "yesterday", to: "today" }),
     });
     expect(res.status).toBe(400);
@@ -153,16 +164,16 @@ describe("finance import route + finance API", () => {
 
   it("GET /api/finance/transactions returns rows + filters by type", async () => {
     await runFinanceImport(env.db, makeMockClient(), FILTER);
-    const app = buildApp({ authToken: AUTH, db: env.db });
+    const app = buildApp({ db: env.db });
 
-    const all = await app.request("/api/finance/transactions", { headers });
+    const all = await app.request("/api/finance/transactions", { headers: headers(env.cookie) });
     expect(all.status).toBe(200);
     const allRows = (await all.json()) as Array<{ type: string }>;
     expect(allRows).toHaveLength(7);
 
     const sales = await app.request(
       "/api/finance/transactions?type=sale",
-      { headers },
+      { headers: headers(env.cookie) },
     );
     const saleRows = (await sales.json()) as Array<{ type: string }>;
     expect(saleRows).toHaveLength(1);
@@ -171,8 +182,8 @@ describe("finance import route + finance API", () => {
 
   it("GET /api/finance/summary aggregates by type", async () => {
     await runFinanceImport(env.db, makeMockClient(), FILTER);
-    const app = buildApp({ authToken: AUTH, db: env.db });
-    const res = await app.request("/api/finance/summary", { headers });
+    const app = buildApp({ db: env.db });
+    const res = await app.request("/api/finance/summary", { headers: headers(env.cookie) });
     const summary = (await res.json()) as Array<{
       type: string;
       count: number;

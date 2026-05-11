@@ -4,11 +4,11 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { buildApp } from "../../server/index";
-import { userSettings } from "../../server/db/schema";
+import { sessions, userSettings } from "../../server/db/schema";
 import * as schema from "../../server/db/schema";
 import type { ProductInput, TaxSettings } from "../../src/types";
+import { createUserDirect } from "./_helpers";
 
-const AUTH = "test-token";
 const SAMPLE_TAX: TaxSettings = {
   damageRate: 0.01,
   taxSystem: "УСН Доходы минус расходы",
@@ -56,6 +56,7 @@ const SAMPLE_INPUT: ProductInput = {
 interface TestEnv {
   app: ReturnType<typeof buildApp>;
   sqlite: Database.Database;
+  cookie: string;
 }
 
 const setup = (): TestEnv => {
@@ -82,13 +83,25 @@ const setup = (): TestEnv => {
     .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
     .run();
 
-  const app = buildApp({ authToken: AUTH, db });
-  return { app, sqlite };
+  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const sessionId = "test-products-session";
+  db.insert(sessions)
+    .values({
+      id: sessionId,
+      userId: adminId,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      createdAt: new Date(),
+    })
+    .run();
+  const cookie = `ozon_calc_session=${sessionId}`;
+
+  const app = buildApp({ db });
+  return { app, sqlite, cookie };
 };
 
-const headers = () => ({
+const headers = (cookie: string) => ({
   "Content-Type": "application/json",
-  "X-Auth-Token": AUTH,
+  Cookie: cookie,
 });
 
 describe("products CRUD", () => {
@@ -106,7 +119,7 @@ describe("products CRUD", () => {
   });
 
   it("starts with an empty list", async () => {
-    const res = await env.app.request("/api/products", { headers: headers() });
+    const res = await env.app.request("/api/products", { headers: headers(env.cookie) });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
   });
@@ -115,7 +128,7 @@ describe("products CRUD", () => {
     // CREATE
     const createRes = await env.app.request("/api/products", {
       method: "POST",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(SAMPLE_INPUT),
     });
     expect(createRes.status).toBe(201);
@@ -126,7 +139,7 @@ describe("products CRUD", () => {
     expect(created.input.clustersCount).toBe("Считать без наценки");
 
     // LIST
-    const listRes = await env.app.request("/api/products", { headers: headers() });
+    const listRes = await env.app.request("/api/products", { headers: headers(env.cookie) });
     expect(listRes.status).toBe(200);
     const list = (await listRes.json()) as Array<{ id: string }>;
     expect(list).toHaveLength(1);
@@ -136,7 +149,7 @@ describe("products CRUD", () => {
     const updated = { ...SAMPLE_INPUT, salesPlan: 42, currentPrice: 400000 };
     const patchRes = await env.app.request(`/api/products/${created.id}`, {
       method: "PATCH",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(updated),
     });
     expect(patchRes.status).toBe(200);
@@ -147,24 +160,24 @@ describe("products CRUD", () => {
     // DELETE
     const delRes = await env.app.request(`/api/products/${created.id}`, {
       method: "DELETE",
-      headers: headers(),
+      headers: headers(env.cookie),
     });
     expect(delRes.status).toBe(204);
 
-    const afterRes = await env.app.request("/api/products", { headers: headers() });
+    const afterRes = await env.app.request("/api/products", { headers: headers(env.cookie) });
     expect(await afterRes.json()).toEqual([]);
   });
 
   it("rejects duplicate articleId with 409", async () => {
     const a = await env.app.request("/api/products", {
       method: "POST",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(SAMPLE_INPUT),
     });
     expect(a.status).toBe(201);
     const b = await env.app.request("/api/products", {
       method: "POST",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(SAMPLE_INPUT),
     });
     expect(b.status).toBe(409);
@@ -174,7 +187,7 @@ describe("products CRUD", () => {
     const bad = { ...SAMPLE_INPUT, vatRate: 0.5 };
     const res = await env.app.request("/api/products", {
       method: "POST",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(bad),
     });
     expect(res.status).toBe(400);
@@ -183,7 +196,7 @@ describe("products CRUD", () => {
   it("returns 404 when updating unknown id", async () => {
     const res = await env.app.request("/api/products/no-such-id", {
       method: "PATCH",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(SAMPLE_INPUT),
     });
     expect(res.status).toBe(404);
@@ -200,7 +213,7 @@ describe("settings", () => {
   });
 
   it("GET returns seeded tax settings", async () => {
-    const res = await env.app.request("/api/settings", { headers: headers() });
+    const res = await env.app.request("/api/settings", { headers: headers(env.cookie) });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ taxSystem: SAMPLE_TAX.taxSystem });
@@ -210,7 +223,7 @@ describe("settings", () => {
     const next = { ...SAMPLE_TAX, taxSystem: "НПД" as const, npdRate: 0.06 };
     const res = await env.app.request("/api/settings", {
       method: "PUT",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify(next),
     });
     expect(res.status).toBe(200);
@@ -221,7 +234,7 @@ describe("settings", () => {
   it("PUT rejects invalid taxSystem", async () => {
     const res = await env.app.request("/api/settings", {
       method: "PUT",
-      headers: headers(),
+      headers: headers(env.cookie),
       body: JSON.stringify({ ...SAMPLE_TAX, taxSystem: "BOGUS" }),
     });
     expect(res.status).toBe(400);
