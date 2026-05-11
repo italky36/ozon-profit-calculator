@@ -35,10 +35,10 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ## Запуск с нуля
 
-1. `cp .env.example .env`, прописать `AUTH_TOKEN` (генератор: `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`) — то же значение в `VITE_AUTH_TOKEN`.
-2. `npm run db:seed` — создаст `data/app.db` и засеет начальные данные.
+1. `cp .env.example .env`. Настроить SMTP-параметры (или оставить пустыми — письма пойдут в stdout) и `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого админа.
+2. `npm run db:seed` — создаст `data/app.db`, засеет начальные данные и первого админа (если таблица `users` пуста).
 3. `npm run db:extract` — наполнит `ref_*` справочники из Excel (требуется `C:/Users/admin/Downloads/Техника — копия2.xlsx` или `EXTRACT_SOURCE=…`).
-4. `npm run dev`. Фронт ходит в `/api/*` через Vite-прокси (`SERVER_URL`, по умолчанию `http://localhost:3001`).
+4. `npm run dev`. Фронт ходит в `/api/*` через Vite-прокси (`SERVER_URL`, по умолчанию `http://localhost:3001`). Войти на `/login` с теми creds, что в `.env`.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ npx vitest run __tests__/server/         # все backend-тесты
 | Бэкенд | Hono 4 + @hono/node-server |
 | ORM | Drizzle 0.45 + drizzle-kit 0.31 |
 | БД | SQLite через better-sqlite3 12 (файл `data/app.db`) |
-| Auth | Shared secret `X-Auth-Token` (single-tenant) |
+| Auth | Session cookies (HTTP-only) + `sessions` таблица; bcrypt-пароли, email-верификация, роли admin/user |
 | Тесты | Vitest 4 (calc unit + Hono integration через `app.request()`) |
 
 ### Поток данных (frontend)
@@ -109,11 +109,12 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ### Backend-структура
 
-- `server/db/schema.ts` — Drizzle-схема (9 таблиц: ref_*, products, user_settings, api_credentials, finance_transactions, import_runs).
+- `server/db/schema.ts` — Drizzle-схема (14 таблиц: ref_*, products, user_settings, api_credentials, smtp_settings, finance_transactions, import_runs, users, sessions, email_verification_tokens).
 - `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
-- `server/db/migrations/` — генерится через `drizzle-kit generate`. Текущие: `0000_init.sql`, `0001_ozon_commissions.sql`, `0002_yellow_toro.sql` (auto-refresh в `user_settings`), `0003_overrated_sasquatch.sql` (`products.regular_price`), `0004_purple_inhumans.sql` (`products.ozon_sku`). Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
-- `server/middleware/auth.ts` — проверка `X-Auth-Token`.
-- `server/routes/{refs,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов.
+- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
+- `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireAdmin` — гейты для роутов.
+- `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout.
+- `server/routes/{auth,admin,refs,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов.
 - `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`).
 
 ### Импорт из Ozon (Фазы 2–3)
@@ -144,6 +145,23 @@ npx vitest run __tests__/server/         # все backend-тесты
 ### Аналитика (Фаза 4)
 
 `GET /api/analytics/realized-margin?from&to` — SQL-агрегат `finance_transactions` группированный по `articleId`, отдаёт `actualRevenue/Refund/Commission/Logistics/LastMile/Storage/Other`, `actualMargin = sum(amount)`, `salesCount`, `txCount`. UI на вкладке «Калькулятор» — чекбокс «Сравнить с фактом за период» — добавляет колонки в `ProductsTable` и подвал с «Прогноз × факт.продажи» по схемам и «Δ факт − прогноз, %».
+
+### Аутентификация и админка
+
+- **Локализация ответов `/api/auth/*`** — все user-facing сообщения на русском (`Неверный email или пароль`, `Email не подтверждён…`, `Учётная запись заблокирована администратором`, и т.п. в `server/routes/auth.ts`). При добавлении новых эндпоинтов держи русский для всего, что попадает в UI; внутренние коды (`unauthorized`, `forbidden` в `middleware/session.ts`) можно оставить английскими — они не показываются.
+- **Блокировка пользователей** (миграция `0013`): колонка `users.is_blocked` (boolean, default `false`).
+  - `POST /api/auth/login` отклоняет заблокированного юзера с `403` **до** проверки `isVerified` — иначе сообщение «email не подтверждён» сбивало бы с толку.
+  - `validateSession` в `server/auth/utils.ts` возвращает `null` для заблокированных юзеров — defence-in-depth, чтобы они не прошли по существующим cookie, если revoke сессий не сработал.
+  - `PUT /api/admin/users/:id/blocked` body `{ blocked: boolean }` — при `blocked=true` атомарно удаляет все сессии юзера, его выкидывает со всех устройств. Нельзя заблокировать самого себя (400). Разблокировка сессии не восстанавливает.
+  - UI в `src/components/admin/AdminPage.tsx` — колонка «Статус» + кнопка-замок (`Ban` / `CircleCheck` из lucide). Заблокированная строка отрисовывается с `opacity: 0.55`, селект роли отключён.
+- **SMTP-настройки админки** (миграция `0011` ввела таблицу `smtp_settings`, `0012` добавила колонку `secure`):
+  - `secure: 'auto' | 'ssl' | 'starttls' | 'none'`. В `server/email/client.ts:resolveTlsOptions(mode, port)` маппится в nodemailer-флаги: `ssl` → `{ secure: true }`, `starttls` → `{ secure: false, requireTLS: true }`, `none` → `{ secure: false, ignoreTLS: true }`, `auto` → `{ secure: port === 465 }` (исторический дефолт).
+  - Env-переменная `SMTP_SECURE` (опциональная) — поддержана `readSmtpFromEnv`.
+  - `POST /api/admin/smtp/test` принимает опциональный `subject` и при `describeEmailSource() === "console"` сразу возвращает 400 с предупреждением «SMTP не настроен — письма пишутся в stdout, а не отправляются» (без попытки отправки), плюс пробрасывает в ответ полные поля nodemailer-ошибки (`code`, `responseCode`, `response`, `command`) — UI показывает их в alert, чтобы не лезть в логи сервера.
+  - В UI: автозеркалирование `User → From` (пока `From` пустой или совпадает с предыдущим `User`); placeholder порта подстраивается под выбранный `secure`-режим. Mail.ru/Yandex/Gmail требуют, чтобы email в `From` совпадал с `User` — об этом подсказка прямо в форме.
+- **Email-шаблон** `server/email/templates.ts` уже на русском. При добавлении новых писем держи единообразный стиль (Noto-friendly inline CSS, кнопка `var(--accent)`-цвета, fallback ссылка для Plain text).
+- **Password reveal toggle** — компонент `Field` в `src/components/auth/AuthShell.tsx` для `type="password"` рендерит иконку-глазик внутри инпута (`Eye` / `EyeOff` из lucide). Каждое поле управляет своим состоянием независимо; кнопка `tabIndex={-1}`, чтобы Tab её пропускал.
+- **При добавлении пути в админке**: помни, что `requireAdmin` в `server/middleware/session.ts` уже отсеивает не-админов. Не дублируй проверку в роуте; вместо этого защищай через монтирование (`app.route('/admin', adminRoutes)` уже под `requireAdmin`).
 
 ### TypeScript-конфиг
 

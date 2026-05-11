@@ -1,0 +1,1 @@
+ALTER TABLE `smtp_settings` ADD `secure` text DEFAULT 'auto' NOT NULL;
