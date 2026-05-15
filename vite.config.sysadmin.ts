@@ -15,9 +15,17 @@ export default defineConfig(({ mode }) => {
     root: path.resolve(__dirname, "sysadmin"),
     publicDir: path.resolve(__dirname, "public"),
     plugins: [react()],
+    resolve: {
+      alias: {
+        "/src": path.resolve(__dirname, "src"),
+      },
+    },
     server: {
       port: 5174,
       host: env.HOST || undefined,
+      fs: {
+        allow: [path.resolve(__dirname)],
+      },
       proxy: {
         "/api": { target, changeOrigin: false },
       },
