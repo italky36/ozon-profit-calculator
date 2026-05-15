@@ -20,10 +20,9 @@ export interface Shop {
   tariffSetId: number | null;
   createdAt: number;
   updatedAt: number;
-  /** True when the current user owns this shop. False for shared admin shops. */
+  /** True when the current user can edit shop metadata + assignment.
+   * Workspace owner/manager → true; member → false. */
   isOwner: boolean;
-  /** Email of the shop owner. Null when current user is the owner. */
-  ownerEmail: string | null;
   /** True when at least one field is overridden by current user (vs shop defaults). */
   hasOverrides: boolean;
 }
@@ -523,6 +522,16 @@ export const api = {
         {
           method: "PUT",
           body: JSON.stringify(shopId != null ? { ...next, shopId } : next),
+        },
+      ),
+    putTariffSet: (tariffSetId: number | null, shopId?: number) =>
+      apiFetch<{ shopId: number; tariffSetId: number | null }>(
+        "/settings/tariff-set",
+        {
+          method: "PUT",
+          body: JSON.stringify(
+            shopId != null ? { tariffSetId, shopId } : { tariffSetId },
+          ),
         },
       ),
   },

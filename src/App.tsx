@@ -138,7 +138,7 @@ const BASE_TABS = [
 ];
 
 export default function App() {
-  useAuth();
+  const { user } = useAuth();
   const TABS = BASE_TABS;
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
 
@@ -637,6 +637,30 @@ export default function App() {
 
         <div style={{ display: activeTab === "calc" ? undefined : "none" }}>
 
+            {shops.length === 0 ? (
+              <div className="card" style={{ textAlign: "center", padding: 32 }}>
+                <h3 style={{ margin: "0 0 8px", fontSize: 16 }}>
+                  {user?.workspaceRole === "member"
+                    ? "Owner ещё не дал вам доступ к магазинам"
+                    : "У команды пока нет ни одного магазина"}
+                </h3>
+                <p className="muted" style={{ margin: "0 0 16px" }}>
+                  {user?.workspaceRole === "member"
+                    ? "Попросите owner или manager команды назначить вам магазин — после этого здесь появятся товары и расчёт прибыли."
+                    : "Создайте первый магазин, чтобы начать импорт каталога и расчёт."}
+                </p>
+                {user?.workspaceRole !== "member" && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => setShopsModalOpen(true)}
+                    style={{ padding: "8px 16px" }}
+                  >
+                    Создать магазин
+                  </button>
+                )}
+              </div>
+            ) : (
+              <>
             <ShopSettings
               value={taxSettings}
               onChange={(next) => {
@@ -655,7 +679,6 @@ export default function App() {
               currentTariffSetId={activeShop?.tariffSetId ?? null}
               userIsAdmin={false}
               shopIsOwner={activeShop?.isOwner ?? true}
-              shopOwnerEmail={activeShop?.ownerEmail ?? null}
               shopHasOverrides={activeShop?.hasOverrides ?? false}
               allShops={shops}
               onActiveShopChange={setActiveShopId}
@@ -764,6 +787,8 @@ export default function App() {
                   refs={refs}
                 />
               </Suspense>
+            )}
+              </>
             )}
         </div>
 

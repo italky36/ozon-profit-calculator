@@ -143,7 +143,7 @@ export default function ShopSelector({
                   }}
                 >
                   <span>{s.name}</span>
-                  {!s.isOwner && s.ownerEmail && (
+                  {!s.isOwner && (
                     <span
                       style={{
                         fontSize: 11,
@@ -151,7 +151,7 @@ export default function ShopSelector({
                         fontWeight: 400,
                       }}
                     >
-                      Магазин админа: {s.ownerEmail}
+                      Общий магазин команды
                     </span>
                   )}
                 </span>

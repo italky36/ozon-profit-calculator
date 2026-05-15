@@ -44,9 +44,6 @@ interface ShopOut {
   /** True when the current user can edit shop metadata + assignment.
    * Workspace owner/manager → true; member → false (read-only). */
   isOwner: boolean;
-  /** Always null — shops are workspace-shared, not user-owned. Kept for
-   * forward-compatibility with the existing client type. */
-  ownerEmail: string | null;
   /** True when the user has at least one non-null override in
    * `shop_user_settings` for this shop. Surfaces the «Сбросить к дефолтам
    * команды» button in the UI. */
@@ -77,7 +74,6 @@ const buildOut = async (
     createdAt: row.createdAt.getTime(),
     updatedAt: row.updatedAt.getTime(),
     isOwner: canManageWorkspace(user.workspaceRole),
-    ownerEmail: null,
     hasOverrides,
   };
 };

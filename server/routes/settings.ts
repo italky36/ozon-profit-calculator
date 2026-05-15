@@ -1,6 +1,6 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
-import { shops } from "../db/schema";
+import { and, eq, isNull, or } from "drizzle-orm";
+import { logisticsClusterTariffSets, shops } from "../db/schema";
 import type { DB } from "../db/client";
 import type { TaxSettings } from "../../src/types";
 import type { SessionUser } from "../auth/utils";
@@ -229,6 +229,59 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
       autoRefreshIntervalMin: matchesDefault ? null : min,
     });
     return c.json({ shopId: shop, enabled: r.enabled, intervalMin: min });
+  });
+
+  // Per-user override for tariff set selection. Member uses this instead of
+  // PATCH /api/shops/:id (owner/manager-only). When the chosen set equals the
+  // shop default, the override is cleared.
+  app.put("/tariff-set", async (c) => {
+    const user = c.get("user");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid json" }, 400);
+    }
+    const r = (body ?? {}) as { tariffSetId?: unknown; shopId?: unknown };
+    const explicit =
+      r.shopId !== undefined ? String(r.shopId) : c.req.query("shopId");
+    const shop = await resolveShop(db, user, explicit);
+    if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+
+    let tariffSetId: number | null;
+    if (r.tariffSetId === null || r.tariffSetId === undefined) {
+      tariffSetId = null;
+    } else {
+      const n = Number(r.tariffSetId);
+      if (!Number.isFinite(n) || n <= 0)
+        return c.json({ error: "tariffSetId must be number or null" }, 400);
+      const [set] = await db
+        .select({ id: logisticsClusterTariffSets.id })
+        .from(logisticsClusterTariffSets)
+        .where(
+          and(
+            eq(logisticsClusterTariffSets.id, n),
+            or(
+              isNull(logisticsClusterTariffSets.workspaceId),
+              eq(logisticsClusterTariffSets.workspaceId, user.workspaceId),
+            ),
+          ),
+        );
+      if (!set) return c.json({ error: "tariff set not found" }, 404);
+      tariffSetId = n;
+    }
+
+    const [shopRow] = await db
+      .select({ tariffSetId: shops.tariffSetId })
+      .from(shops)
+      .where(eq(shops.id, shop));
+    if (!shopRow) return c.json({ error: "shop not found" }, 404);
+
+    const matchesDefault = (shopRow.tariffSetId ?? null) === tariffSetId;
+    await upsertShopUserSettings(db, shop, user.id, {
+      tariffSetId: matchesDefault ? null : tariffSetId,
+    });
+    return c.json({ shopId: shop, tariffSetId });
   });
 
   return app;

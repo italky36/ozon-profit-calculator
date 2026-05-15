@@ -64,11 +64,10 @@ interface Props {
   userIsAdmin?: boolean;
   /** Called when tariff selection / list changes — App refetches refs+shops. */
   onTariffChanged?: () => void | Promise<void>;
-  /** True when the current user owns this shop. Viewers of a shared admin
-   * shop see Ozon credentials as read-only. */
+  /** True when the current user can manage shop defaults (workspace
+   * owner/manager). Member sees Ozon credentials read-only and writes
+   * tax/tariff settings as per-user overrides. */
   shopIsOwner?: boolean;
-  /** Email of the shop owner — shown in the read-only viewer banner. */
-  shopOwnerEmail?: string | null;
   /** True when shop_user_settings has any override for current user. */
   shopHasOverrides?: boolean;
   /** Called after a successful "reset overrides" — refetches shops. */
@@ -356,6 +355,7 @@ interface SectionsCtx {
   shopId: number | null;
   currentTariffSetId: number | null;
   userIsAdmin: boolean;
+  shopIsOwner: boolean;
   onTariffChanged: () => void | Promise<void>;
 }
 
@@ -457,6 +457,7 @@ function LogisticsSection({
   shopId,
   currentTariffSetId,
   userIsAdmin,
+  shopIsOwner,
   onTariffChanged,
 }: SectionsCtx) {
   const hasMatrix = !!clusterStats && clusterStats.count > 0;
@@ -523,6 +524,7 @@ function LogisticsSection({
             shopId={shopId}
             currentTariffSetId={currentTariffSetId}
             userIsAdmin={userIsAdmin}
+            isOwner={shopIsOwner}
             onChanged={onTariffChanged}
           />
           <div className="gs-divider" />
@@ -612,10 +614,8 @@ function ParamsSection({
 
 function OzonCredsSection({
   isOwner = true,
-  ownerEmail = null,
 }: {
   isOwner?: boolean;
-  ownerEmail?: string | null;
 }) {
   const [status, setStatus] = useState<CredentialsStatus | null>(null);
   const [clientId, setClientId] = useState("");
@@ -796,10 +796,10 @@ function OzonCredsSection({
           className="gs-help"
           style={{ marginTop: 12, lineHeight: 1.5 }}
         >
-          Ключи Ozon API задаёт администратор — владелец магазина
-          {ownerEmail ? ` (${ownerEmail})` : ""}. Импорт и расчёт работают под
-          этими ключами, но ваши товары и финансы хранятся в вашем личном
-          пространстве и не пересекаются с данными других пользователей.
+          Ключи Ozon API задают owner или manager команды. Импорт и расчёт
+          работают под этими ключами; ваши товары и финансы хранятся в вашем
+          личном пространстве и не пересекаются с данными других участников
+          команды.
         </div>
       )}
     </div>
@@ -860,7 +860,6 @@ export default function ShopSettings({
   userIsAdmin = false,
   onTariffChanged,
   shopIsOwner = true,
-  shopOwnerEmail = null,
   shopHasOverrides = false,
   onResetOverrides,
   allShops,
@@ -1004,6 +1003,7 @@ export default function ShopSettings({
     shopId,
     currentTariffSetId,
     userIsAdmin,
+    shopIsOwner,
     onTariffChanged: onTariffChanged ?? (() => {}),
   };
 
@@ -1079,7 +1079,6 @@ export default function ShopSettings({
             >
               <OzonCredsSection
               isOwner={shopIsOwner}
-              ownerEmail={shopOwnerEmail}
             />
             </AccordionItem>
           </div>
@@ -1125,11 +1124,7 @@ export default function ShopSettings({
         {!shopIsOwner && (
           <span
             className="gs-pill"
-            title={
-              shopOwnerEmail
-                ? `Общий магазин · владелец ${shopOwnerEmail}`
-                : "Общий магазин"
-            }
+            title="Общий магазин команды — настройки задаёт owner или manager"
           >
             общий
           </span>
@@ -1150,7 +1145,7 @@ export default function ShopSettings({
             onClick={async () => {
               if (
                 !window.confirm(
-                  "Сбросить ваши персональные настройки этого магазина (СНО, набор тарифов, авто-импорт) к админским дефолтам?",
+                  "Сбросить ваши персональные настройки этого магазина (СНО, набор тарифов, авто-импорт) к дефолтам команды?",
                 )
               )
                 return;
@@ -1162,9 +1157,9 @@ export default function ShopSettings({
                 window.alert((e as Error).message);
               }
             }}
-            title="Вернуть СНО и тарифы к дефолтам, заданным админом"
+            title="Вернуть СНО и тарифы к дефолтам, заданным owner/manager"
           >
-            Сбросить к админским
+            Сбросить к дефолтам команды
           </button>
         </div>
       )}
@@ -1195,7 +1190,6 @@ export default function ShopSettings({
             {activeTab === "params" && <ParamsSection {...ctx} />}
             {activeTab === "api" && <OzonCredsSection
               isOwner={shopIsOwner}
-              ownerEmail={shopOwnerEmail}
             />}
           </div>
         </>

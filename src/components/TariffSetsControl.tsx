@@ -6,6 +6,9 @@ interface Props {
   shopId: number;
   currentTariffSetId: number | null;
   userIsAdmin: boolean;
+  /** True for workspace owner/manager — they edit shop default. False for
+   * member — they save a per-user override via PUT /api/settings/tariff-set. */
+  isOwner: boolean;
   /** Called whenever the selection / list changes — App refetches refs+shops. */
   onChanged: () => void | Promise<void>;
 }
@@ -17,6 +20,7 @@ export default function TariffSetsControl({
   shopId,
   currentTariffSetId,
   userIsAdmin,
+  isOwner,
   onChanged,
 }: Props) {
   const [sets, setSets] = useState<TariffSet[]>([]);
@@ -77,7 +81,11 @@ export default function TariffSetsControl({
     setBusy(true);
     setErr(null);
     try {
-      await api.shops.update(shopId, { tariffSetId: nextId });
+      if (isOwner) {
+        await api.shops.update(shopId, { tariffSetId: nextId });
+      } else {
+        await api.settings.putTariffSet(nextId, shopId);
+      }
       await onChanged();
     } catch (e) {
       setErr((e as Error).message);
@@ -105,7 +113,11 @@ export default function TariffSetsControl({
         scope: uploadScope,
         shopId: uploadScope === "shop" ? shopId : undefined,
       });
-      await api.shops.update(shopId, { tariffSetId: created.id });
+      if (isOwner) {
+        await api.shops.update(shopId, { tariffSetId: created.id });
+      } else {
+        await api.settings.putTariffSet(created.id, shopId);
+      }
       setShowUploadForm(false);
       setUploadName("");
       if (fileRef.current) fileRef.current.value = "";
