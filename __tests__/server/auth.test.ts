@@ -38,7 +38,7 @@ describe("auth routes", () => {
         .get();
       expect(user).toBeTruthy();
       expect(user!.isVerified).toBe(false);
-      expect(user!.role).toBe("user");
+      expect(user!.isSysadmin).toBe(false);
       expect(user!.passwordHash).not.toBe("password123");
 
       expect(env.emails).toHaveLength(1);

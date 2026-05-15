@@ -73,7 +73,7 @@ describe("admin routes", () => {
       expect(body.role).toBe("admin");
 
       const row = env.db.select().from(users).where(eq(users.id, targetId)).get();
-      expect(row!.role).toBe("admin");
+      expect(row!.isSysadmin).toBe(true);
     });
 
     it("rejects demoting self with 400", async () => {

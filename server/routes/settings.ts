@@ -4,11 +4,7 @@ import { shops } from "../db/schema";
 import type { DB } from "../db/client";
 import type { TaxSettings } from "../../src/types";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId } from "../middleware/session";
-import {
-  resolveShopSettings,
-  upsertShopUserSettings,
-} from "../settings/shopSettings";
+import { canManageWorkspace, resolveShopId } from "../middleware/session";
 
 type SettingsEnv = { Variables: { user: SessionUser } };
 
@@ -84,34 +80,32 @@ const resolveShop = async (
   }
 };
 
-const isShopOwner = async (
-  db: DB,
-  shopId: number,
-  userId: number,
-): Promise<boolean> => {
+const loadShop = async (db: DB, shopId: number) => {
   const [row] = await db
-    .select({ id: shops.id })
+    .select()
     .from(shops)
-    .where(and(eq(shops.id, shopId), eq(shops.userId, userId)));
-  return !!row;
+    .where(eq(shops.id, shopId));
+  return row ?? null;
 };
 
 export function settingsRoutes(db: DB): Hono<SettingsEnv> {
   const app = new Hono<SettingsEnv>();
 
-  // Effective TaxSettings for caller in shop. Combines shop defaults with
-  // per-user override (shop_user_settings).
+  // Shop's TaxSettings (workspace-shared — single source of truth).
   app.get("/", async (c) => {
     const user = c.get("user");
     const shop = await resolveShop(db, user, c.req.query("shopId"));
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    const effective = await resolveShopSettings(db, shop, user.id);
-    if (!effective) return c.json({ error: "shop not found" }, 404);
-    return c.json(effective.taxSettings);
+    const row = await loadShop(db, shop);
+    if (!row) return c.json({ error: "shop not found" }, 404);
+    return c.json(row.taxSettings);
   });
 
   app.put("/", async (c) => {
     const user = c.get("user");
+    if (!canManageWorkspace(user.workspaceRole)) {
+      return c.json({ error: "Только owner или manager меняет настройки" }, 403);
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -132,15 +126,12 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
       return c.json({ error: (e as Error).message }, 400);
     }
     const now = new Date();
-    const owner = await isShopOwner(db, shop, user.id);
-    if (owner) {
-      await db
-        .update(shops)
-        .set({ taxSettings: next, updatedAt: now })
-        .where(eq(shops.id, shop));
-    } else {
-      await upsertShopUserSettings(db, shop, user.id, { taxSettings: next });
-    }
+    await db
+      .update(shops)
+      .set({ taxSettings: next, updatedAt: now })
+      .where(
+        and(eq(shops.id, shop), eq(shops.workspaceId, user.workspaceId)),
+      );
     return c.json(next);
   });
 
@@ -148,17 +139,20 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
     const user = c.get("user");
     const shop = await resolveShop(db, user, c.req.query("shopId"));
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    const effective = await resolveShopSettings(db, shop, user.id);
-    if (!effective) return c.json({ error: "shop not found" }, 404);
+    const row = await loadShop(db, shop);
+    if (!row) return c.json({ error: "shop not found" }, 404);
     return c.json({
       shopId: shop,
-      enabled: effective.autoRefreshEnabled,
-      intervalMin: effective.autoRefreshIntervalMin,
+      enabled: row.autoRefreshEnabled,
+      intervalMin: row.autoRefreshIntervalMin,
     });
   });
 
   app.put("/auto-refresh", async (c) => {
     const user = c.get("user");
+    if (!canManageWorkspace(user.workspaceRole)) {
+      return c.json({ error: "Только owner или manager меняет настройки" }, 403);
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -182,22 +176,16 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
         ? Math.max(1, Math.min(1440, Math.round(r.intervalMin)))
         : 30;
     const now = new Date();
-    const owner = await isShopOwner(db, shop, user.id);
-    if (owner) {
-      await db
-        .update(shops)
-        .set({
-          autoRefreshEnabled: r.enabled,
-          autoRefreshIntervalMin: min,
-          updatedAt: now,
-        })
-        .where(eq(shops.id, shop));
-    } else {
-      await upsertShopUserSettings(db, shop, user.id, {
+    await db
+      .update(shops)
+      .set({
         autoRefreshEnabled: r.enabled,
         autoRefreshIntervalMin: min,
-      });
-    }
+        updatedAt: now,
+      })
+      .where(
+        and(eq(shops.id, shop), eq(shops.workspaceId, user.workspaceId)),
+      );
     return c.json({ shopId: shop, enabled: r.enabled, intervalMin: min });
   });
 

@@ -49,19 +49,12 @@ export const refLogisticsTariffs = sqliteTable("ref_logistics_tariffs", {
 
 /** Наборы тарифов кластерной логистики Ozon. Несколько версий могут
  * сосуществовать (исторические, для расчёта факта за прошлые периоды).
- * `shopId IS NULL` → глобальный набор (виден всем, грузит админ).
- * `shopId IS NOT NULL` → персональный набор магазина (виден только владельцу).
- */
+ * `workspaceId IS NULL` → глобальный набор (виден всем, грузит sysadmin).
+ * `workspaceId IS NOT NULL` → набор внутри одной команды. */
 export const logisticsClusterTariffSets = sqliteTable(
   "logistics_cluster_tariff_sets",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    shopId: integer("shop_id").references(() => shops.id, {
-      onDelete: "cascade",
-    }),
-    /** SaaS Stage 1: nullable while routes still scope by shop. NULL =
-     * глобальный набор (sysadmin); non-null = workspace-owned. Stage 2 сделает
-     * NOT NULL для не-глобальных и переключит refs.ts на workspace-фильтр. */
     workspaceId: integer("workspace_id").references(() => workspaces.id, {
       onDelete: "cascade",
     }),
@@ -96,10 +89,10 @@ export const refSettings = sqliteTable("ref_settings", {
   value: text("value", { mode: "json" }).notNull(),
 });
 
-// === SaaS multi-tenancy (Stage 1, additive) ===
+// === SaaS multi-tenancy ===
 // workspace ≈ «команда» в UI. Один user ↔ один workspace через UNIQUE-индекс
-// на workspace_members.user_id (см. миграцию 0019). Все бизнес-данные
-// scoped по workspace_id (Stage 2 переключит роуты и сделает NOT NULL).
+// на workspace_members.user_id. Все бизнес-данные (shops, products, finance,
+// imports, tariff sets) scoped по workspace_id.
 export const workspaces = sqliteTable("workspaces", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -144,22 +137,17 @@ export const workspaceInvites = sqliteTable("workspace_invites", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
-// === Shops (per-user namespace for products / finance / Ozon creds / tax) ===
-// Один user может вести N магазинов; каждый магазин полностью изолирован.
-// shortName — 2-символьный код, используется в бейдже строки товара.
-// color — HEX (опц.); NULL → нейтральный (фоллбэк на UI-accent).
+// === Shops (workspace-scoped) ===
+// Магазин принадлежит workspace'у; все его данные видны всем member'ам этого
+// workspace'а. shortName уникален в рамках workspace. color — HEX (опц.);
+// NULL → нейтральный (фоллбэк на UI-accent).
 export const shops = sqliteTable(
   "shops",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    userId: integer("user_id")
+    workspaceId: integer("workspace_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    /** SaaS Stage 1: nullable until backfill пробит во всех ALTER. Stage 2
-     * сделает NOT NULL и дропнет userId, перейдя на чистый workspace-scope. */
-    workspaceId: integer("workspace_id").references(() => workspaces.id, {
-      onDelete: "cascade",
-    }),
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     shortName: text("short_name").notNull(),
     color: text("color"),
@@ -172,75 +160,26 @@ export const shops = sqliteTable(
     autoRefreshIntervalMin: integer("auto_refresh_interval_min")
       .notNull()
       .default(30),
-    /** Per-shop Ozon API credentials. NULL → fallback на global (api_credentials user_id IS NULL) → env. */
+    /** Per-shop Ozon API credentials. NULL → импорт вернёт 400 «не настроены». */
     ozonClientId: text("ozon_client_id"),
     ozonApiKey: text("ozon_api_key"),
     ozonUpdatedAt: integer("ozon_updated_at", { mode: "timestamp_ms" }),
     /** Активный набор тарифов кластерной логистики. NULL → последний
      * глобальный набор по uploadedAt. FK enforced at SQL migration level —
-     * not modeled here to avoid Drizzle circular ref (logisticsClusterTariffSets
-     * also points back to shops). */
+     * not modeled here to avoid Drizzle circular ref. */
     tariffSetId: integer("tariff_set_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (t) => ({
-    userShortUnique: uniqueIndex("shops_user_short_unique").on(
-      t.userId,
+    workspaceShortUnique: uniqueIndex("shops_workspace_short_unique").on(
+      t.workspaceId,
       t.shortName,
     ),
   }),
 );
 
-// === Shop sharing ===
-// Когда admin (или просто owner) хочет дать read+write-доступ другому пользователю,
-// сюда добавляется строка (shopId, userId). Owner всегда видит свой shop через
-// shops.user_id; viewer'ы видят через эту таблицу. Ролей нет — все viewer'ы равны
-// (могут импортировать в свой namespace, править свои overrides), но не могут
-// менять admin-поля магазина (name/shortName/color/ozon_*) и не могут удалить shop.
-export const shopAccess = sqliteTable(
-  "shop_access",
-  {
-    shopId: integer("shop_id")
-      .notNull()
-      .references(() => shops.id, { onDelete: "cascade" }),
-    userId: integer("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.shopId, t.userId] }),
-  }),
-);
-
-// === Per-user overrides поверх shops ===
-// Хранит индивидуальные настройки конкретного user'а внутри shared shop:
-// налоги (СНО), выбор tariff_set_id, параметры auto-refresh. NULL в поле =
-// «наследовать с shops». Для owner'а тоже может существовать (если он хочет
-// держать свои переопределения отдельно от дефолтов магазина), но обычно
-// owner редактирует shops напрямую — см. PATCH /api/shops/:id.
-export const shopUserSettings = sqliteTable(
-  "shop_user_settings",
-  {
-    shopId: integer("shop_id")
-      .notNull()
-      .references(() => shops.id, { onDelete: "cascade" }),
-    userId: integer("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    taxSettings: text("tax_settings", { mode: "json" }).$type<TaxSettings>(),
-    tariffSetId: integer("tariff_set_id"),
-    autoRefreshEnabled: integer("auto_refresh_enabled", { mode: "boolean" }),
-    autoRefreshIntervalMin: integer("auto_refresh_interval_min"),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.shopId, t.userId] }),
-  }),
-);
-
-// === User data ===
+// === Products ===
 export const products = sqliteTable(
   "products",
   {
@@ -248,13 +187,9 @@ export const products = sqliteTable(
   shopId: integer("shop_id")
     .notNull()
     .references(() => shops.id, { onDelete: "cascade" }),
-  userId: integer("user_id")
+  workspaceId: integer("workspace_id")
     .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL и дропнет userId. */
-  workspaceId: integer("workspace_id").references(() => workspaces.id, {
-    onDelete: "cascade",
-  }),
+    .references(() => workspaces.id, { onDelete: "cascade" }),
   articleId: text("article_id").notNull(),
   productName: text("product_name").notNull(),
   category: text("category").notNull(),
@@ -325,14 +260,16 @@ export const products = sqliteTable(
   ozonStatusDescription: text("ozon_status_description"),
   },
   (t) => ({
-    shopUserArticleUnique: uniqueIndex(
-      "products_shop_user_article_unique",
-    ).on(t.shopId, t.userId, t.articleId),
+    shopArticleUnique: uniqueIndex("products_shop_article_unique").on(
+      t.shopId,
+      t.articleId,
+    ),
   }),
 );
 
-// Per-user UI state. Tax / autoRefresh / Ozon creds переехали в shops.
-// Здесь остался только трекер активного магазина (для дефолта на «куда импортировать / создавать товар»).
+// Per-user UI state. Workspace tax / autoRefresh / Ozon creds живут в shops.
+// Здесь остался только трекер активного магазина (для дефолта на «куда
+// импортировать / создавать товар»).
 export const userSettings = sqliteTable("user_settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id")
@@ -349,14 +286,9 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  /** Legacy: оставлено в Stage 1 для обратной совместимости с существующими
-   * роутами. В Stage 2 будет дропнут — sysadmin-уровень полностью заменяется
-   * на isSysadmin, org-уровень — на workspace_members.role. */
-  role: text("role", { enum: ["admin", "user"] })
-    .notNull()
-    .default("user"),
   /** Платформенный sysadmin-флаг (управление SaaS-ом: SMTP, все workspace'ы,
-   * глобальные tariff sets). Backfill: true для существующих role='admin'. */
+   * глобальные tariff sets). Не путать с workspace-уровнем (owner/manager/
+   * member в workspace_members). */
   isSysadmin: integer("is_sysadmin", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -391,7 +323,7 @@ export const emailVerificationTokens = sqliteTable(
   },
 );
 
-// === SMTP settings (admin-editable; overrides env if a row exists) ===
+// === SMTP settings (sysadmin-editable; overrides env if a row exists) ===
 export const smtpSettings = sqliteTable("smtp_settings", {
   id: integer("id").primaryKey().default(1),
   host: text("host").notNull(),
@@ -407,22 +339,18 @@ export const smtpSettings = sqliteTable("smtp_settings", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
-// === Imported finance (used in phase 3) ===
-// PK composite (shopId, userId, operationId) — в shared shop разные юзеры
-// импортируют независимо, операции одного Ozon-аккаунта повторяются у каждого.
+// === Imported finance ===
+// PK composite (workspace_id, operation_id) — одна команда импортирует один
+// Ozon-аккаунт; PK гарантирует идемпотентность повторных импортов.
 export const financeTransactions = sqliteTable(
   "finance_transactions",
   {
     shopId: integer("shop_id")
       .notNull()
       .references(() => shops.id, { onDelete: "cascade" }),
-    userId: integer("user_id")
+    workspaceId: integer("workspace_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL и дропнет userId. */
-    workspaceId: integer("workspace_id").references(() => workspaces.id, {
-      onDelete: "cascade",
-    }),
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     operationId: integer("operation_id").notNull(),
     operationType: text("operation_type").notNull(),
     operationDate: integer("operation_date", { mode: "timestamp_ms" }).notNull(),
@@ -433,7 +361,7 @@ export const financeTransactions = sqliteTable(
     raw: text("raw", { mode: "json" }).notNull(),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.shopId, t.userId, t.operationId] }),
+    pk: primaryKey({ columns: [t.workspaceId, t.operationId] }),
   }),
 );
 
@@ -442,14 +370,9 @@ export const importRuns = sqliteTable("import_runs", {
   shopId: integer("shop_id")
     .notNull()
     .references(() => shops.id, { onDelete: "cascade" }),
-  userId: integer("user_id")
+  workspaceId: integer("workspace_id")
     .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL. userId остаётся
-   * как audit-поле «кто запустил импорт». */
-  workspaceId: integer("workspace_id").references(() => workspaces.id, {
-    onDelete: "cascade",
-  }),
+    .references(() => workspaces.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
   finishedAt: integer("finished_at", { mode: "timestamp_ms" }),

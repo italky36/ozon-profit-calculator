@@ -41,7 +41,7 @@ if (fromRefs) {
 
 const now = Date.now();
 
-// 1. Seed first admin if users table is empty.
+// 1. Seed first sysadmin + their workspace if users table is empty.
 const userCount = sqlite.prepare("SELECT COUNT(*) AS n FROM users").get().n;
 let adminUserId = null;
 let adminWorkspaceId = null;
@@ -49,13 +49,11 @@ if (userCount === 0) {
   const passwordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
   const result = sqlite
     .prepare(
-      "INSERT INTO users (email, password_hash, role, is_sysadmin, is_verified, created_at, updated_at) VALUES (?, ?, 'admin', 1, 1, ?, ?)",
+      "INSERT INTO users (email, password_hash, is_sysadmin, is_verified, created_at, updated_at) VALUES (?, ?, 1, 1, ?, ?)",
     )
     .run(ADMIN_EMAIL, passwordHash, now, now);
   adminUserId = Number(result.lastInsertRowid);
 
-  // Personal workspace для админа (Stage 1: один user = один workspace через
-  // UNIQUE на workspace_members.user_id).
   const prefix = ADMIN_EMAIL.split("@")[0];
   const slug = `${prefix.replace(/\./g, "-").toLowerCase()}-${adminUserId}`;
   const wsResult = sqlite
@@ -71,7 +69,7 @@ if (userCount === 0) {
     .run(adminWorkspaceId, adminUserId, now);
 
   console.log("");
-  console.log("✅ First admin created:");
+  console.log("✅ First sysadmin created:");
   console.log(`   Email:     ${ADMIN_EMAIL}`);
   console.log(`   Password:  ${ADMIN_PASSWORD}`);
   console.log(`   Workspace: «Workspace ${prefix}» (slug: ${slug})`);
@@ -79,7 +77,7 @@ if (userCount === 0) {
   console.log("");
 } else {
   const existingAdmin = sqlite
-    .prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+    .prepare("SELECT id FROM users WHERE is_sysadmin = 1 ORDER BY id LIMIT 1")
     .get();
   adminUserId = existingAdmin?.id ?? null;
   if (adminUserId != null) {
@@ -96,25 +94,22 @@ if (userCount === 0) {
 }
 
 // 2. Seed default shop + user_settings for the admin if absent.
-//    Each user gets a default shop "Мой магазин" (code M1) with default tax
-//    settings; the same logic runs at registration via auth.verifyEmail.
-if (adminUserId != null) {
+if (adminUserId != null && adminWorkspaceId != null) {
   const existingShop = sqlite
-    .prepare("SELECT id FROM shops WHERE user_id = ? LIMIT 1")
-    .get(adminUserId);
+    .prepare("SELECT id FROM shops WHERE workspace_id = ? LIMIT 1")
+    .get(adminWorkspaceId);
   let adminShopId = existingShop?.id ?? null;
 
   if (!adminShopId) {
     const result = sqlite
       .prepare(
         `INSERT INTO shops (
-          user_id, workspace_id, name, short_name, color, tax_settings,
+          workspace_id, name, short_name, color, tax_settings,
           auto_refresh_enabled, auto_refresh_interval_min,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
+        ) VALUES (?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
       )
       .run(
-        adminUserId,
         adminWorkspaceId,
         "Мой магазин",
         "M1",

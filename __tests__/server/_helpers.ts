@@ -53,9 +53,6 @@ export function setupTestEnv(): TestEnv {
     }
   }
   const db = drizzle(sqlite, { schema });
-  // Per-user settings rows are created lazily on first GET /api/settings via
-  // ensureUserRow. Tests that exercise tax settings should login first; that
-  // path will seed the user's row.
 
   const emails: EmailMessage[] = [];
   const mock: EmailClient = {
@@ -74,8 +71,9 @@ export function teardownTestEnv(env: TestEnv): void {
   env.sqlite.close();
 }
 
-/** Insert a verified user directly + auto-create their personal workspace
- * (Stage 1: each user has exactly one workspace). Returns the user id. */
+/** Insert a verified user directly + auto-create their personal workspace as
+ * owner. Returns the user id. The legacy `role` arg ("admin"|"user") still
+ * exists for ergonomic test setup; "admin" maps to is_sysadmin=true. */
 export function createUserDirect(
   db: DB,
   email: string,
@@ -89,7 +87,6 @@ export function createUserDirect(
     .values({
       email,
       passwordHash: hash,
-      role,
       isSysadmin: role === "admin",
       isVerified: true,
       createdAt: now,
@@ -122,7 +119,7 @@ export function createUserDirect(
   return userId;
 }
 
-/** Look up the user's single workspace id (Stage 1 invariant). */
+/** Look up the user's single workspace id. */
 export function workspaceIdOf(db: DB, userId: number): number {
   const row = db
     .select({ id: workspaceMembers.workspaceId })
@@ -133,9 +130,8 @@ export function workspaceIdOf(db: DB, userId: number): number {
   return row.id;
 }
 
-/** Create a shop for `userId` with SAMPLE_TAX and set it as active. Returns the
- * shop's id. Used by tests that need a user with a default shop (multi-shop
- * model requires every user to have ≥1 shop). */
+/** Create a shop in `userId`'s workspace with SAMPLE_TAX and set it as
+ * active. Returns the shop's id. */
 export function createShopFor(
   db: DB,
   userId: number,
@@ -146,7 +142,6 @@ export function createShopFor(
   const inserted = db
     .insert(shops)
     .values({
-      userId,
       workspaceId,
       name: opts.name ?? "Тестовый магазин",
       shortName: opts.shortName ?? `T${userId % 9}`,
@@ -192,23 +187,24 @@ export async function loginAndGetCookie(
     throw new Error(`login ${res.status}: ${await res.text()}`);
   const setCookie = res.headers.get("set-cookie");
   if (!setCookie) throw new Error("no Set-Cookie header on login response");
-  const match = /(?:^|;\s*|,\s*)([A-Za-z0-9_-]+=[^;]+)(?:;|$)/.exec(setCookie);
-  // Hono sets ozon_calc_session=<value>; HttpOnly; ... — extract first kv pair
   const cookieValue = setCookie.split(";")[0];
   if (!cookieValue) throw new Error("could not parse cookie");
-  void match;
-  return cookieValue; // "ozon_calc_session=..."
+  return cookieValue;
 }
 
-/** Convenience: create user + default shop + login → return cookie & ids.
- * Multi-shop model requires every authenticated user to have ≥1 shop, so a
- * fresh user gets one automatically (mirrors the verifyEmail path). */
+/** Convenience: create user + workspace + default shop + login → return
+ * cookie & ids + workspaceId. */
 export async function loginAs(
   env: TestEnv,
   email: string,
   password: string,
   role: "admin" | "user" = "user",
-): Promise<{ cookie: string; userId: number; shopId: number }> {
+): Promise<{
+  cookie: string;
+  userId: number;
+  shopId: number;
+  workspaceId: number;
+}> {
   const existing = env.db
     .select({ id: users.id })
     .from(users)
@@ -218,10 +214,11 @@ export async function loginAs(
   let shopId: number;
   if (existing) {
     userId = existing.id;
+    const wsId = workspaceIdOf(env.db, userId);
     const existingShop = env.db
       .select({ id: shops.id })
       .from(shops)
-      .where(eq(shops.userId, userId))
+      .where(eq(shops.workspaceId, wsId))
       .get();
     shopId = existingShop?.id ?? createShopFor(env.db, userId);
   } else {
@@ -229,13 +226,15 @@ export async function loginAs(
     shopId = createShopFor(env.db, userId);
   }
   const cookie = await loginAndGetCookie(env.app, email, password);
-  return { cookie, userId, shopId };
+  return {
+    cookie,
+    userId,
+    shopId,
+    workspaceId: workspaceIdOf(env.db, userId),
+  };
 }
 
-/** Sync admin-cookie path for legacy tests: creates admin user + default
- * shop + inserts a session row directly. Avoids the bcrypt cost of /login.
- * Returns `cookie` only for backwards compatibility; call sites that need
- * shopId/userId should use loginAs instead. */
+/** Sync admin-cookie path for legacy tests. */
 export function adminSessionCookie(env: TestEnv): string {
   const userId = createUserDirect(
     env.db,

@@ -11,7 +11,7 @@ import { buildApp } from "../../server/index";
 import { runCatalogImport } from "../../server/routes/import";
 import { getCategoryLookup } from "../../server/ozon/catalog";
 import type { OzonClient } from "../../server/ozon/client";
-import { createShopFor, createUserDirect } from "./_helpers";
+import { createShopFor, createUserDirect, workspaceIdOf } from "./_helpers";
 
 const TREE_RESPONSE = {
   result: [
@@ -122,6 +122,7 @@ interface TestEnv {
   sqlite: Database.Database;
   cookie: string;
   userId: number;
+  workspaceId: number;
   shopId: number;
 }
 
@@ -139,6 +140,7 @@ const setupDb = (): TestEnv => {
   const db = drizzle(sqlite, { schema });
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
   const shopId = createShopFor(db, adminId);
+  const workspaceId = workspaceIdOf(db, adminId);
   const sessionId = "test-import-session";
   db.insert(sessions)
     .values({
@@ -153,6 +155,7 @@ const setupDb = (): TestEnv => {
     sqlite,
     cookie: `ozon_calc_session=${sessionId}`,
     userId: adminId,
+    workspaceId,
     shopId,
   };
 };
@@ -180,7 +183,7 @@ describe("runCatalogImport", () => {
   afterEach(() => env.sqlite.close());
 
   it("inserts new products with safe defaults", async () => {
-    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
     expect(counters.added).toBe(2);
     expect(counters.updated).toBe(0);
     expect(counters.itemsProcessed).toBe(2);
@@ -228,7 +231,7 @@ describe("runCatalogImport", () => {
       .values({
         id: randomUUID(),
         shopId: env.shopId,
-        userId: env.userId,
+        workspaceId: env.workspaceId,
         articleId: "OFFER-1",
         productName: "Стартовое имя",
         category: "Кофеварки и кофемашины",
@@ -260,7 +263,7 @@ describe("runCatalogImport", () => {
       })
       .run();
 
-    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
     expect(counters.updated).toBe(1);
     expect(counters.added).toBe(1);
 
@@ -282,9 +285,9 @@ describe("runCatalogImport", () => {
   });
 
   it("is idempotent across repeat runs", async () => {
-    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
     const before = env.db.select().from(products).all();
-    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
     const after = env.db.select().from(products).all();
     expect(after).toHaveLength(before.length);
     // ids stable

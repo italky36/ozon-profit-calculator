@@ -3,7 +3,7 @@ import { and, eq, gte, inArray, isNotNull, lte, sql, type SQL } from "drizzle-or
 import { financeTransactions } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, visibleShopIds } from "../middleware/session";
+import { resolveShopId, workspaceShopIds } from "../middleware/session";
 
 const sumWhereType = (typeLiteral: string) =>
   sql<number>`coalesce(sum(case when ${financeTransactions.type} = ${typeLiteral} then ${financeTransactions.amount} else 0 end), 0)`;
@@ -31,7 +31,7 @@ const scopeShopIds = async (
       };
     }
   }
-  return await visibleShopIds(db, user.id);
+  return await workspaceShopIds(db, user.workspaceId);
 };
 
 export function analyticsRoutes(db: DB): Hono<AnalyticsEnv> {
@@ -52,7 +52,7 @@ export function analyticsRoutes(db: DB): Hono<AnalyticsEnv> {
       return c.json({ period: { from: null, to: null }, rows: [] });
     }
     filters.push(inArray(financeTransactions.shopId, scope));
-    filters.push(eq(financeTransactions.userId, user.id));
+    filters.push(eq(financeTransactions.workspaceId, user.workspaceId));
 
     let fromIso: string | null = null;
     let toIso: string | null = null;

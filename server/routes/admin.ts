@@ -1,17 +1,7 @@
 import { Hono } from "hono";
-import { and, eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { DB } from "../db/client";
-import {
-  financeTransactions,
-  importRuns,
-  products,
-  sessions,
-  shopAccess,
-  shops,
-  shopUserSettings,
-  smtpSettings,
-  users,
-} from "../db/schema";
+import { sessions, smtpSettings, users } from "../db/schema";
 import {
   createVerificationToken,
   type SessionUser,
@@ -22,42 +12,35 @@ import {
   invalidateEmailClient,
 } from "../email/client";
 import { generateVerificationEmail } from "../email/templates";
-import { requireAdmin } from "../middleware/session";
+import { requireSysadmin } from "../middleware/session";
 
 type AdminEnv = { Variables: { user?: SessionUser } };
 
-const ROLES = new Set(["admin", "user"] as const);
+/** Stage-2 compat: API still exposes a `role` field on user payloads. Frontend
+ * (Stage 6) will switch to `isSysadmin`, but until then we emit the legacy
+ * shape so AdminPage.tsx keeps rendering.  */
+const userPayload = (u: typeof users.$inferSelect) => ({
+  id: u.id,
+  email: u.email,
+  role: u.isSysadmin ? ("admin" as const) : ("user" as const),
+  isSysadmin: u.isSysadmin,
+  isVerified: u.isVerified,
+  isBlocked: u.isBlocked,
+  createdAt: u.createdAt.toISOString(),
+  updatedAt: u.updatedAt.toISOString(),
+});
 
 export function adminRoutes(db: DB): Hono<AdminEnv> {
   const app = new Hono<AdminEnv>();
-  app.use("*", requireAdmin);
+  app.use("*", requireSysadmin);
 
   app.get("/users", (c) => {
-    const rows = db
-      .select({
-        id: users.id,
-        email: users.email,
-        role: users.role,
-        isVerified: users.isVerified,
-        isBlocked: users.isBlocked,
-        createdAt: users.createdAt,
-        updatedAt: users.updatedAt,
-      })
-      .from(users)
-      .all();
-    return c.json(
-      rows.map((r) => ({
-        id: r.id,
-        email: r.email,
-        role: r.role,
-        isVerified: r.isVerified,
-        isBlocked: r.isBlocked,
-        createdAt: r.createdAt.toISOString(),
-        updatedAt: r.updatedAt.toISOString(),
-      })),
-    );
+    const rows = db.select().from(users).all();
+    return c.json(rows.map(userPayload));
   });
 
+  /** Toggle sysadmin flag. Body still accepts the legacy `{role: 'admin'|'user'}`
+   * shape from the existing UI; "admin" maps to isSysadmin=true. */
   app.put("/users/:id/role", async (c) => {
     const me = c.get("user")!;
     const id = Number(c.req.param("id"));
@@ -70,12 +53,19 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
-    const r = (body ?? {}) as { role?: unknown };
-    if (typeof r.role !== "string" || !ROLES.has(r.role as "admin" | "user"))
+    const r = (body ?? {}) as { role?: unknown; isSysadmin?: unknown };
+    let nextSysadmin: boolean;
+    if (typeof r.isSysadmin === "boolean") {
+      nextSysadmin = r.isSysadmin;
+    } else if (r.role === "admin") {
+      nextSysadmin = true;
+    } else if (r.role === "user") {
+      nextSysadmin = false;
+    } else {
       return c.json({ error: "invalid role" }, 400);
-    const role = r.role as "admin" | "user";
+    }
 
-    if (id === me.id && role !== "admin")
+    if (id === me.id && !nextSysadmin)
       return c.json({ error: "cannot demote yourself" }, 400);
 
     const existing = db
@@ -87,20 +77,12 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
 
     const now = new Date();
     db.update(users)
-      .set({ role, updatedAt: now })
+      .set({ isSysadmin: nextSysadmin, updatedAt: now })
       .where(eq(users.id, id))
       .run();
 
     const updated = db.select().from(users).where(eq(users.id, id)).get()!;
-    return c.json({
-      id: updated.id,
-      email: updated.email,
-      role: updated.role,
-      isVerified: updated.isVerified,
-      isBlocked: updated.isBlocked,
-      createdAt: updated.createdAt.toISOString(),
-      updatedAt: updated.updatedAt.toISOString(),
-    });
+    return c.json(userPayload(updated));
   });
 
   app.put("/users/:id/blocked", async (c) => {
@@ -141,15 +123,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     }
 
     const updated = db.select().from(users).where(eq(users.id, id)).get()!;
-    return c.json({
-      id: updated.id,
-      email: updated.email,
-      role: updated.role,
-      isVerified: updated.isVerified,
-      isBlocked: updated.isBlocked,
-      createdAt: updated.createdAt.toISOString(),
-      updatedAt: updated.updatedAt.toISOString(),
-    });
+    return c.json(userPayload(updated));
   });
 
   app.delete("/users/:id", (c) => {
@@ -167,7 +141,8 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       .get();
     if (!existing) return c.json({ error: "user not found" }, 404);
 
-    // sessions/email_verification_tokens/user_settings cascade via FK.
+    // sessions/email_verification_tokens/user_settings/workspace_members
+    // cascade via FK.
     db.delete(users).where(eq(users.id, id)).run();
     return c.json({ message: "user deleted" });
   });
@@ -384,212 +359,6 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       );
     }
     return c.json({ ok: true, source });
-  });
-
-  // === Shop sharing ===
-  // Admin owns shops via shops.user_id = admin.id. They can grant viewers
-  // (shop_access) and revoke them, which also wipes the viewer's per-user data
-  // in that shop.
-
-  app.get("/shops", async (c) => {
-    const me = c.get("user")!;
-    const rows = await db
-      .select()
-      .from(shops)
-      .where(eq(shops.userId, me.id))
-      .orderBy(shops.createdAt);
-    const accessCounts = await db
-      .select({
-        shopId: shopAccess.shopId,
-        cnt: sql<number>`count(*)`,
-      })
-      .from(shopAccess)
-      .groupBy(shopAccess.shopId);
-    const cntMap = new Map<number, number>(
-      accessCounts.map((r) => [r.shopId, r.cnt]),
-    );
-    return c.json(
-      rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        shortName: r.shortName,
-        color: r.color ?? null,
-        hasOzonCreds: !!(r.ozonClientId && r.ozonApiKey),
-        viewersCount: cntMap.get(r.id) ?? 0,
-        createdAt: r.createdAt.getTime(),
-      })),
-    );
-  });
-
-  app.get("/shops/:id/access", async (c) => {
-    const me = c.get("user")!;
-    const id = Number(c.req.param("id"));
-    if (!Number.isInteger(id) || id <= 0)
-      return c.json({ error: "invalid id" }, 400);
-    const [shop] = await db
-      .select({ id: shops.id })
-      .from(shops)
-      .where(and(eq(shops.id, id), eq(shops.userId, me.id)));
-    if (!shop) return c.json({ error: "shop not found" }, 404);
-
-    const rows = await db
-      .select({
-        userId: users.id,
-        email: users.email,
-        role: users.role,
-        isBlocked: users.isBlocked,
-        createdAt: shopAccess.createdAt,
-      })
-      .from(shopAccess)
-      .innerJoin(users, eq(users.id, shopAccess.userId))
-      .where(eq(shopAccess.shopId, id))
-      .orderBy(shopAccess.createdAt);
-    return c.json(
-      rows.map((r) => ({
-        userId: r.userId,
-        email: r.email,
-        role: r.role,
-        isBlocked: r.isBlocked,
-        grantedAt: r.createdAt.getTime(),
-      })),
-    );
-  });
-
-  app.post("/shops/:id/access", async (c) => {
-    const me = c.get("user")!;
-    const id = Number(c.req.param("id"));
-    if (!Number.isInteger(id) || id <= 0)
-      return c.json({ error: "invalid id" }, 400);
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "invalid json" }, 400);
-    }
-    const { userId } = (body ?? {}) as { userId?: unknown };
-    const uid = Number(userId);
-    if (!Number.isInteger(uid) || uid <= 0)
-      return c.json({ error: "userId required" }, 400);
-
-    const [shop] = await db
-      .select({ ownerId: shops.userId })
-      .from(shops)
-      .where(eq(shops.id, id));
-    if (!shop || shop.ownerId !== me.id)
-      return c.json({ error: "shop not found" }, 404);
-    if (uid === me.id)
-      return c.json({ error: "owner already has access" }, 400);
-
-    const [target] = await db
-      .select({ id: users.id, isBlocked: users.isBlocked })
-      .from(users)
-      .where(eq(users.id, uid));
-    if (!target) return c.json({ error: "user not found" }, 404);
-    if (target.isBlocked)
-      return c.json({ error: "cannot grant access to a blocked user" }, 400);
-
-    const [existing] = await db
-      .select()
-      .from(shopAccess)
-      .where(and(eq(shopAccess.shopId, id), eq(shopAccess.userId, uid)));
-    if (existing) {
-      return c.json({ ok: true, alreadyGranted: true });
-    }
-    await db.insert(shopAccess).values({
-      shopId: id,
-      userId: uid,
-      createdAt: new Date(),
-    });
-    return c.json({ ok: true });
-  });
-
-  app.delete("/shops/:id/access/:userId", async (c) => {
-    const me = c.get("user")!;
-    const id = Number(c.req.param("id"));
-    const uid = Number(c.req.param("userId"));
-    if (!Number.isInteger(id) || id <= 0)
-      return c.json({ error: "invalid id" }, 400);
-    if (!Number.isInteger(uid) || uid <= 0)
-      return c.json({ error: "invalid userId" }, 400);
-
-    const [shop] = await db
-      .select({ ownerId: shops.userId })
-      .from(shops)
-      .where(eq(shops.id, id));
-    if (!shop || shop.ownerId !== me.id)
-      return c.json({ error: "shop not found" }, 404);
-
-    const result = await db
-      .delete(shopAccess)
-      .where(and(eq(shopAccess.shopId, id), eq(shopAccess.userId, uid)));
-    // Also wipe viewer's per-user artefacts in this shop. The shop_access row
-    // is gone, so the viewer can no longer reach this data anyway — but
-    // leaving rows would leave orphans against an inaccessible shop. Cascade
-    // via FK isn't enough because data is keyed on (shop_id, user_id).
-    await db
-      .delete(shopUserSettings)
-      .where(
-        and(
-          eq(shopUserSettings.shopId, id),
-          eq(shopUserSettings.userId, uid),
-        ),
-      );
-    await db
-      .delete(products)
-      .where(and(eq(products.shopId, id), eq(products.userId, uid)));
-    await db
-      .delete(financeTransactions)
-      .where(
-        and(
-          eq(financeTransactions.shopId, id),
-          eq(financeTransactions.userId, uid),
-        ),
-      );
-    await db
-      .delete(importRuns)
-      .where(and(eq(importRuns.shopId, id), eq(importRuns.userId, uid)));
-    return c.json({ ok: true, revoked: result.changes });
-  });
-
-  // List of users who could be granted access to a given shop — every user
-  // except the owner and those who already have access. Used to populate the
-  // grant modal selector.
-  app.get("/shops/:id/access/candidates", async (c) => {
-    const me = c.get("user")!;
-    const id = Number(c.req.param("id"));
-    if (!Number.isInteger(id) || id <= 0)
-      return c.json({ error: "invalid id" }, 400);
-    const [shop] = await db
-      .select({ ownerId: shops.userId })
-      .from(shops)
-      .where(eq(shops.id, id));
-    if (!shop || shop.ownerId !== me.id)
-      return c.json({ error: "shop not found" }, 404);
-
-    const granted = await db
-      .select({ userId: shopAccess.userId })
-      .from(shopAccess)
-      .where(eq(shopAccess.shopId, id));
-    const excludeIds = new Set<number>([me.id, ...granted.map((g) => g.userId)]);
-
-    const all = await db
-      .select({
-        id: users.id,
-        email: users.email,
-        role: users.role,
-        isBlocked: users.isBlocked,
-      })
-      .from(users);
-    return c.json(
-      all
-        .filter((u) => !excludeIds.has(u.id))
-        .map((u) => ({
-          id: u.id,
-          email: u.email,
-          role: u.role,
-          isBlocked: u.isBlocked,
-        })),
-    );
   });
 
   return app;

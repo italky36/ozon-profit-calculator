@@ -8,7 +8,7 @@ import {
 import type { OzonCommissions } from "../../src/types";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, visibleShopIds } from "../middleware/session";
+import { resolveShopId, workspaceShopIds } from "../middleware/session";
 import { createOzonClient, resolveCredentials, type OzonClient } from "../ozon/client";
 import {
   getCategoryLookup,
@@ -46,7 +46,7 @@ export async function runCatalogImport(
   db: DB,
   client: OzonClient,
   shopId: number,
-  userId: number,
+  workspaceId: number,
   onProgress: (counters: RunCounters) => void = () => {},
 ): Promise<RunCounters> {
   const counters: RunCounters = {
@@ -78,7 +78,6 @@ export async function runCatalogImport(
             and(
               eq(products.articleId, entry.articleId),
               eq(products.shopId, shopId),
-              eq(products.userId, userId),
             ),
           )
           .all();
@@ -134,7 +133,6 @@ export async function runCatalogImport(
               and(
                 eq(products.articleId, entry.articleId),
                 eq(products.shopId, shopId),
-                eq(products.userId, userId),
               ),
             )
             .run();
@@ -156,7 +154,7 @@ export async function runCatalogImport(
               clustersCount: String(NEW_PRODUCT_DEFAULTS.clustersCount),
               id: randomUUID(),
               shopId,
-              userId,
+              workspaceId,
               articleId: entry.articleId,
               productName: entry.patch.productName,
               category: entry.patch.category,
@@ -209,9 +207,7 @@ const toIsoStartOfDay = (s: string): string =>
 const toIsoEndOfDay = (s: string): string =>
   s.includes("T") ? s : `${s}T23:59:59.999Z`;
 
-/** Разбить ISO-период на чанки ≤ 30 дней inclusive (предел Ozon API).
- * Каждый чанк начинается со start-of-day, заканчивается end-of-day и не
- * пересекается со следующим. */
+/** Разбить ISO-период на чанки ≤ 30 дней inclusive (предел Ozon API). */
 function splitFinanceRange(
   fromIso: string,
   toIso: string,
@@ -233,18 +229,16 @@ function splitFinanceRange(
   return out;
 }
 
-/** Build sku → articleId map for (shop, user) products. Per-user — каталог
- * другого юзера (в том же shared shop) или другого shop'а не должен влиять
- * на резолв. */
+/** Build sku → articleId map for a workspace (used to backfill articleId on
+ * finance transactions when only items[].sku is present). */
 const buildSkuMap = async (
   db: DB,
-  shopId: number,
-  userId: number,
+  workspaceId: number,
 ): Promise<Map<number, string>> => {
   const rows = await db
     .select({ sku: products.ozonSku, articleId: products.articleId })
     .from(products)
-    .where(and(eq(products.shopId, shopId), eq(products.userId, userId)));
+    .where(eq(products.workspaceId, workspaceId));
   const map = new Map<number, string>();
   for (const r of rows) {
     if (r.sku != null) map.set(r.sku, r.articleId);
@@ -257,7 +251,7 @@ export async function runFinanceImport(
   db: DB,
   client: OzonClient,
   shopId: number,
-  userId: number,
+  workspaceId: number,
   filter: TransactionFilter,
   onProgress: (counters: FinanceCounters) => void = () => {},
 ): Promise<FinanceCounters> {
@@ -267,7 +261,7 @@ export async function runFinanceImport(
     skipped: 0,
   };
 
-  const skuMap = await buildSkuMap(db, shopId, userId);
+  const skuMap = await buildSkuMap(db, workspaceId);
 
   const resolveArticle = (op: {
     items?: Array<{ sku?: number; offer_id?: string }>;
@@ -293,7 +287,7 @@ export async function runFinanceImport(
           .insert(financeTransactions)
           .values({
             shopId,
-            userId,
+            workspaceId,
             operationId: op.operation_id,
             operationType: op.operation_type,
             operationDate: new Date(op.operation_date),
@@ -352,7 +346,7 @@ export function importRoutes(
       .insert(importRuns)
       .values({
         shopId,
-        userId: user.id,
+        workspaceId: user.workspaceId,
         kind: "catalog",
         startedAt,
         status: "running",
@@ -361,17 +355,22 @@ export function importRoutes(
       })
       .returning();
 
-    // Fire-and-forget. Per-(shop, user) — каждый импорт изолирован FK.
     const importShopId = shopId;
-    const importUserId = user.id;
+    const importWorkspaceId = user.workspaceId;
     void (async () => {
       try {
-        const counters = await runCatalogImport(db, client, importShopId, importUserId, (c2) => {
-          db.update(importRuns)
-            .set({ itemsProcessed: c2.itemsProcessed })
-            .where(eq(importRuns.id, run.id))
-            .run();
-        });
+        const counters = await runCatalogImport(
+          db,
+          client,
+          importShopId,
+          importWorkspaceId,
+          (c2) => {
+            db.update(importRuns)
+              .set({ itemsProcessed: c2.itemsProcessed })
+              .where(eq(importRuns.id, run.id))
+              .run();
+          },
+        );
         await db
           .update(importRuns)
           .set({
@@ -428,10 +427,6 @@ export function importRoutes(
     }
     const fromIso = toIsoStartOfDay(from);
     const toIso = toIsoEndOfDay(to);
-    // Ozon API ограничивает один запрос к /v3/finance/transaction/list 30
-    // днями. Период длиннее автоматически разбиваем на 30-дневные чанки и
-    // прогоняем последовательно. Дедуп — через PK operation_id с
-    // onConflictDoNothing, поэтому стыки чанков идемпотентны.
     if (new Date(toIso).getTime() <= new Date(fromIso).getTime()) {
       return c.json({ error: "to должно быть позже from" }, 400);
     }
@@ -458,7 +453,7 @@ export function importRoutes(
       .insert(importRuns)
       .values({
         shopId,
-        userId: user.id,
+        workspaceId: user.workspaceId,
         kind: "finance",
         startedAt,
         status: "running",
@@ -468,7 +463,7 @@ export function importRoutes(
       .returning();
 
     const importShopId = shopId;
-    const importUserId = user.id;
+    const importWorkspaceId = user.workspaceId;
     void (async () => {
       try {
         const total = {
@@ -483,22 +478,29 @@ export function importRoutes(
             to: ch.to,
             transactionType: transactionTypeStr,
           };
-          const counters = await runFinanceImport(db, client, importShopId, importUserId, chunkFilter, (c2) => {
-            db.update(importRuns)
-              .set({
-                itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
-                params: {
-                  from: filter.from,
-                  to: filter.to,
-                  chunks: { total: chunks.length, current: i + 1 },
-                  inserted: total.inserted + c2.inserted,
-                  skipped: total.skipped + c2.skipped,
+          const counters = await runFinanceImport(
+            db,
+            client,
+            importShopId,
+            importWorkspaceId,
+            chunkFilter,
+            (c2) => {
+              db.update(importRuns)
+                .set({
                   itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
-                },
-              })
-              .where(eq(importRuns.id, run.id))
-              .run();
-          });
+                  params: {
+                    from: filter.from,
+                    to: filter.to,
+                    chunks: { total: chunks.length, current: i + 1 },
+                    inserted: total.inserted + c2.inserted,
+                    skipped: total.skipped + c2.skipped,
+                    itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
+                  },
+                })
+                .where(eq(importRuns.id, run.id))
+                .run();
+            },
+          );
           total.itemsProcessed += counters.itemsProcessed;
           total.inserted += counters.inserted;
           total.skipped += counters.skipped;
@@ -532,10 +534,6 @@ export function importRoutes(
     return c.json({ runId: run.id });
   });
 
-  /** Returns all shopIds visible to `user` (owned + shared via shop_access). */
-  const allVisibleShopsOf = async (user: SessionUser): Promise<number[]> =>
-    visibleShopIds(db, user.id);
-
   app.get("/runs/:id", async (c) => {
     const user = c.get("user");
     const id = Number(c.req.param("id"));
@@ -543,7 +541,9 @@ export function importRoutes(
     const [row] = await db
       .select()
       .from(importRuns)
-      .where(and(eq(importRuns.id, id), eq(importRuns.userId, user.id)));
+      .where(
+        and(eq(importRuns.id, id), eq(importRuns.workspaceId, user.workspaceId)),
+      );
     if (!row) return c.json({ error: "not found" }, 404);
     return c.json(row);
   });
@@ -565,7 +565,7 @@ export function importRoutes(
         );
       }
     } else {
-      scope = await allVisibleShopsOf(user);
+      scope = await workspaceShopIds(db, user.workspaceId);
     }
     if (scope.length === 0) return c.json([]);
     const rows = await db
@@ -574,7 +574,7 @@ export function importRoutes(
       .where(
         and(
           inArray(importRuns.shopId, scope),
-          eq(importRuns.userId, user.id),
+          eq(importRuns.workspaceId, user.workspaceId),
         ),
       )
       .orderBy(desc(importRuns.startedAt))
@@ -582,17 +582,12 @@ export function importRoutes(
     return c.json(rows);
   });
 
-  // Refresh catalog data for a single SKU on demand. Useful when the user
-  // wants to pull the latest price/promo without re-running the full import.
-  // Updates only the catalog fields; local fields stay intact. Returns 404 if
-  // the article isn't in the local DB or wasn't found in Ozon.
+  // Refresh catalog data for a single SKU on demand.
   app.post("/catalog/refresh/:articleId", async (c) => {
     const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
 
-    // Resolve product by (shopId, articleId). shopId comes from ?shopId=
-    // (if provided) or active. Verify ownership via JOIN on shops.userId.
     let shopId: number | null;
     try {
       shopId = await resolveShopId(db, user, { explicit: c.req.query("shopId") });
@@ -609,7 +604,7 @@ export function importRoutes(
         and(
           eq(products.articleId, articleId),
           eq(products.shopId, shopId),
-          eq(products.userId, user.id),
+          eq(products.workspaceId, user.workspaceId),
         ),
       );
     if (!productRow) return c.json({ error: "product not found" }, 404);
@@ -655,12 +650,10 @@ export function importRoutes(
       const priceItem =
         priceMap.get(info.id) ??
         (await (async () => {
-          // If we resolved info via product_list scan, also fetch its price.
           const m = await getPrices(client, [info.id]);
           return m.get(info.id);
         })());
 
-      // Подтягиваем точные габариты из /v4/product/info/attributes.
       const attrsMap = await getProductsAttributes(client, [info.id]);
       const attrsItem = attrsMap.get(info.id);
 
@@ -729,21 +722,14 @@ export function importRoutes(
 
   // Backfill articleId for finance_transactions rows that came in with
   // items[].sku but no items[].offer_id (Ozon's API quirk on older ops).
-  // Walks rows where article_id IS NULL, checks raw.items[].sku against
-  // products.ozon_sku, updates row when match is found.
   app.post("/finance/relink", async (c) => {
     const user = c.get("user");
-    // Process every shop the user can see. SKU maps are scoped per (shop, user)
-    // so a viewer of a shared shop never picks up another user's articleIds.
-    const shopIds = await allVisibleShopsOf(user);
+    const shopIds = await workspaceShopIds(db, user.workspaceId);
     if (shopIds.length === 0)
       return c.json({ ok: true, scanned: 0, linked: 0 });
 
-    const skuMaps = new Map<number, Map<number, string>>();
-    for (const shopId of shopIds) {
-      skuMaps.set(shopId, await buildSkuMap(db, shopId, user.id));
-    }
-    if ([...skuMaps.values()].every((m) => m.size === 0)) {
+    const skuMap = await buildSkuMap(db, user.workspaceId);
+    if (skuMap.size === 0) {
       return c.json({ ok: true, scanned: 0, linked: 0, note: "no SKU data" });
     }
 
@@ -753,8 +739,7 @@ export function importRoutes(
       .where(
         and(
           isNull(financeTransactions.articleId),
-          inArray(financeTransactions.shopId, shopIds),
-          eq(financeTransactions.userId, user.id),
+          eq(financeTransactions.workspaceId, user.workspaceId),
         ),
       );
 
@@ -773,15 +758,12 @@ export function importRoutes(
           }
         }
         if (!articleId) {
-          const skuMap = skuMaps.get(r.shopId);
-          if (skuMap) {
-            for (const it of items) {
-              if (typeof it.sku === "number") {
-                const a = skuMap.get(it.sku);
-                if (a) {
-                  articleId = a;
-                  break;
-                }
+          for (const it of items) {
+            if (typeof it.sku === "number") {
+              const a = skuMap.get(it.sku);
+              if (a) {
+                articleId = a;
+                break;
               }
             }
           }
@@ -792,8 +774,7 @@ export function importRoutes(
             .where(
               and(
                 eq(financeTransactions.operationId, r.operationId),
-                eq(financeTransactions.shopId, r.shopId),
-                eq(financeTransactions.userId, r.userId),
+                eq(financeTransactions.workspaceId, r.workspaceId),
               ),
             )
             .run();
@@ -805,16 +786,11 @@ export function importRoutes(
   });
 
   // Aggregate already-imported finance_transactions for a single article.
-  // Useful when /v5/product/info/prices says one thing but the storefront /
-  // actual buyer payment differs — this lets us verify what Ozon really
-  // credited per sale. Includes grand-total since first import (Ozon's own
-  // /finance API caps at ~30 days; we keep history forever locally).
   app.get("/debug/finance/:articleId", async (c) => {
     const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
 
-    // Scope: ?shopId=N (validated for visibility) or all visible shops.
     let scope: number[];
     const explicit = c.req.query("shopId");
     if (explicit) {
@@ -833,7 +809,7 @@ export function importRoutes(
         );
       }
     } else {
-      scope = await allVisibleShopsOf(user);
+      scope = await workspaceShopIds(db, user.workspaceId);
     }
     if (scope.length === 0)
       return c.json({
@@ -851,7 +827,7 @@ export function importRoutes(
         and(
           eq(financeTransactions.articleId, articleId),
           inArray(financeTransactions.shopId, scope),
-          eq(financeTransactions.userId, user.id),
+          eq(financeTransactions.workspaceId, user.workspaceId),
         ),
       );
 
@@ -932,9 +908,7 @@ export function importRoutes(
     });
   });
 
-  // Diagnostic: dump raw /v3/product/info/list for a single article. Used to
-  // verify that Ozon actually returns visibility_details / status fields for
-  // a given SKU when the inactivity badge is missing.
+  // Diagnostic: dump raw /v3/product/info/list for a single article.
   app.get("/debug/info/:articleId", async (c) => {
     const user = c.get("user");
     const articleId = c.req.param("articleId");
@@ -982,8 +956,6 @@ export function importRoutes(
   });
 
   // Diagnostic: dump raw /v5/product/info/prices response for a single article.
-  // Useful to inspect what Ozon currently returns for a SKU without re-running
-  // the full catalog import.
   app.get("/debug/prices/:articleId", async (c) => {
     const user = c.get("user");
     const articleId = c.req.param("articleId");

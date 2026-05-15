@@ -4,9 +4,9 @@ import { shops } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
 import {
+  canManageWorkspace,
   resolveShopId,
-  userOwnsShop,
-  visibleShopIds,
+  workspaceShopIds,
 } from "../middleware/session";
 
 interface PutBody {
@@ -74,11 +74,11 @@ export function credentialsRoutes(db: DB): Hono<CredsEnv> {
     });
   });
 
-  // Status for ALL shops visible to the user (owned + granted via shop_access).
+  // Status for ALL shops in workspace.
   app.get("/status/all", async (c) => {
     const user = c.get("user");
 
-    const visibleIds = await visibleShopIds(db, user.id);
+    const visibleIds = await workspaceShopIds(db, user.workspaceId);
     const rows = visibleIds.length
       ? await db
           .select({
@@ -102,10 +102,15 @@ export function credentialsRoutes(db: DB): Hono<CredsEnv> {
     return c.json({ shops: shopsStatus });
   });
 
-  // Upsert credentials for a shop — owner only. Viewer of a shared shop sees
-  // 403: they must use the keys the owner attached.
+  // Upsert credentials for a shop — owner/manager only.
   app.put("/", async (c) => {
     const user = c.get("user");
+    if (!canManageWorkspace(user.workspaceRole)) {
+      return c.json(
+        { error: "Только owner или manager редактирует ключи Ozon" },
+        403,
+      );
+    }
     let body: PutBody;
     try {
       body = (await c.req.json()) as PutBody;
@@ -118,9 +123,6 @@ export function credentialsRoutes(db: DB): Hono<CredsEnv> {
         : c.req.query("shopId");
     const shop = await resolveShop(db, user, explicit);
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    if (!(await userOwnsShop(db, user.id, shop))) {
-      return c.json({ error: "only shop owner can edit credentials" }, 403);
-    }
 
     const parsed = parsePutBody(body);
     if (typeof parsed === "string") return c.json({ error: parsed }, 400);
@@ -138,14 +140,17 @@ export function credentialsRoutes(db: DB): Hono<CredsEnv> {
     return c.json({ ok: true, shopId: shop });
   });
 
-  // Remove shop credentials — owner only.
+  // Remove shop credentials — owner/manager only.
   app.delete("/", async (c) => {
     const user = c.get("user");
+    if (!canManageWorkspace(user.workspaceRole)) {
+      return c.json(
+        { error: "Только owner или manager редактирует ключи Ozon" },
+        403,
+      );
+    }
     const shop = await resolveShop(db, user, c.req.query("shopId"));
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    if (!(await userOwnsShop(db, user.id, shop))) {
-      return c.json({ error: "only shop owner can edit credentials" }, 403);
-    }
 
     const now = new Date();
     const result = await db

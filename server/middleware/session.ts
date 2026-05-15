@@ -1,8 +1,8 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { DB } from "../db/client";
-import { shopAccess, shops, userSettings } from "../db/schema";
+import { shops, userSettings, workspaceMembers } from "../db/schema";
 import { validateSession, type SessionUser } from "../auth/utils";
 
 export const SESSION_COOKIE_NAME =
@@ -31,10 +31,12 @@ export const requireAuth: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
-export const requireAdmin: MiddlewareHandler = async (c, next) => {
+/** Platform-level gate: only sysadmins (the SaaS-owner side, not workspace
+ * roles) reach SMTP / users / global tariff sets. */
+export const requireSysadmin: MiddlewareHandler = async (c, next) => {
   const user = c.get("user") as SessionUser | undefined;
   if (!user) return c.json({ error: "unauthorized" }, 401);
-  if (user.role !== "admin") return c.json({ error: "forbidden" }, 403);
+  if (!user.isSysadmin) return c.json({ error: "forbidden" }, 403);
   await next();
 };
 
@@ -42,62 +44,51 @@ export function getSessionUser(c: Context): SessionUser | undefined {
   return c.get("user") as SessionUser | undefined;
 }
 
-/** Returns true if the user owns the shop OR has been granted access via
- * shop_access. Used by all routes to gate per-shop reads/writes. */
-export async function userCanSeeShop(
+/** Returns true when the shop belongs to the current workspace. Used as the
+ * single visibility check for everything per-shop (products, finance, settings,
+ * credentials). */
+export async function shopBelongsToWorkspace(
   db: DB,
-  userId: number,
+  workspaceId: number,
   shopId: number,
 ): Promise<boolean> {
   const [row] = await db
     .select({ id: shops.id })
     .from(shops)
-    .leftJoin(
-      shopAccess,
-      and(eq(shopAccess.shopId, shops.id), eq(shopAccess.userId, userId)),
-    )
-    .where(
-      and(
-        eq(shops.id, shopId),
-        or(eq(shops.userId, userId), eq(shopAccess.userId, userId)),
-      ),
-    );
+    .where(and(eq(shops.id, shopId), eq(shops.workspaceId, workspaceId)));
   return Boolean(row);
 }
 
-/** Returns true only when the user is the shop's owner (admin-fields gate). */
-export async function userOwnsShop(
-  db: DB,
-  userId: number,
-  shopId: number,
-): Promise<boolean> {
-  const [row] = await db
-    .select({ id: shops.id })
-    .from(shops)
-    .where(and(eq(shops.id, shopId), eq(shops.userId, userId)));
-  return Boolean(row);
+/** Workspace-level role gate. owner/manager can mutate shop admin-fields and
+ * credentials; member can read+edit data but not change shop metadata. */
+export function canManageWorkspace(role: SessionUser["workspaceRole"]): boolean {
+  return role === "owner" || role === "manager";
 }
 
 /**
  * Resolve shopId for a request. Priority:
- *   1. explicit `?shopId=` query parameter (validated against visibility);
- *   2. user_settings.active_shop_id (lazy fallback, validated);
- *   3. any visible shop (last-ditch — happens right after autocreate).
+ *   1. explicit `?shopId=` query parameter (validated against the workspace);
+ *   2. user_settings.active_shop_id (validated);
+ *   3. any shop in the workspace (last-ditch fallback).
  *
- * Returns null if the user can see no shops at all (caller decides response).
- * Throws { status: 404 } if requested shopId is not visible.
+ * Returns null when the workspace has no shops at all (caller decides
+ * response). Throws { status: 404 } if requested shopId is not in workspace.
  */
 export async function resolveShopId(
   db: DB,
   user: SessionUser,
   opts: { explicit?: number | string | null } = {},
 ): Promise<number | null> {
-  if (opts.explicit !== undefined && opts.explicit !== null && opts.explicit !== "") {
+  if (
+    opts.explicit !== undefined &&
+    opts.explicit !== null &&
+    opts.explicit !== ""
+  ) {
     const n = Number(opts.explicit);
     if (!Number.isFinite(n) || n <= 0) {
       throw Object.assign(new Error("invalid shopId"), { status: 400 });
     }
-    const visible = await userCanSeeShop(db, user.id, n);
+    const visible = await shopBelongsToWorkspace(db, user.workspaceId, n);
     if (!visible) {
       throw Object.assign(new Error("shop not found"), { status: 404 });
     }
@@ -109,36 +100,52 @@ export async function resolveShopId(
     .from(userSettings)
     .where(eq(userSettings.userId, user.id));
   if (settings?.activeShopId) {
-    const visible = await userCanSeeShop(db, user.id, settings.activeShopId);
+    const visible = await shopBelongsToWorkspace(
+      db,
+      user.workspaceId,
+      settings.activeShopId,
+    );
     if (visible) return settings.activeShopId;
   }
 
-  const visibleIds = await visibleShopIds(db, user.id);
-  return visibleIds[0] ?? null;
-}
-
-/** List ids of all shops visible to the user — owned shops plus shops granted
- * via shop_access. Used as default scope when caller didn't specify shopId. */
-export async function visibleShopIds(
-  db: DB,
-  userId: number,
-): Promise<number[]> {
-  const owned = await db
+  const [first] = await db
     .select({ id: shops.id })
     .from(shops)
-    .where(eq(shops.userId, userId));
-  const granted = await db
-    .select({ id: shopAccess.shopId })
-    .from(shopAccess)
-    .where(eq(shopAccess.userId, userId));
-  const set = new Set<number>();
-  for (const r of owned) set.add(r.id);
-  for (const r of granted) set.add(r.id);
-  return [...set];
+    .where(eq(shops.workspaceId, user.workspaceId))
+    .limit(1);
+  return first?.id ?? null;
 }
 
-/** Backwards-compatible alias retained for routes that still call it. */
-export const listUserShopIds = async (
+/** All shops in current workspace (used as default scope when caller didn't
+ * specify shopId). */
+export async function workspaceShopIds(
   db: DB,
-  user: SessionUser,
-): Promise<number[]> => visibleShopIds(db, user.id);
+  workspaceId: number,
+): Promise<number[]> {
+  const rows = await db
+    .select({ id: shops.id })
+    .from(shops)
+    .where(eq(shops.workspaceId, workspaceId));
+  return rows.map((r) => r.id);
+}
+
+/** Looks up the user's single workspace membership (Stage 2 invariant: 1 user
+ * = 1 workspace). Returns null if the user has no membership yet — callers
+ * should treat this as «нужно создать workspace» (Stage 3 wires registration). */
+export async function findUserWorkspace(
+  db: DB,
+  userId: number,
+): Promise<{
+  workspaceId: number;
+  workspaceRole: "owner" | "manager" | "member";
+} | null> {
+  const [row] = await db
+    .select({
+      workspaceId: workspaceMembers.workspaceId,
+      role: workspaceMembers.role,
+    })
+    .from(workspaceMembers)
+    .where(eq(workspaceMembers.userId, userId));
+  if (!row) return null;
+  return { workspaceId: row.workspaceId, workspaceRole: row.role };
+}

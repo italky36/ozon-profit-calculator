@@ -152,7 +152,7 @@ describe("cluster tariff sets", () => {
     const oldGlobal = env.db
       .insert(logisticsClusterTariffSets)
       .values({
-        shopId: null,
+        workspaceId: null,
         name: "Old",
         uploadedAt: new Date(2026, 0, 1),
         createdAt: new Date(),
@@ -162,7 +162,7 @@ describe("cluster tariff sets", () => {
     const newGlobal = env.db
       .insert(logisticsClusterTariffSets)
       .values({
-        shopId: null,
+        workspaceId: null,
         name: "New",
         uploadedAt: new Date(2026, 5, 1),
         createdAt: new Date(),
@@ -180,11 +180,11 @@ describe("cluster tariff sets", () => {
     expect(await resolveTariffSetId(env.db, user.shopId)).toBe(oldGlobal.id);
   });
 
-  it("resolveTariffSetId rejects pointing at another user's personal set", async () => {
+  it("resolveTariffSetId rejects pointing at another workspace's personal set", async () => {
     const adminPersonal = env.db
       .insert(logisticsClusterTariffSets)
       .values({
-        shopId: admin.shopId,
+        workspaceId: admin.workspaceId,
         name: "Admin's personal",
         uploadedAt: new Date(),
         createdAt: new Date(),

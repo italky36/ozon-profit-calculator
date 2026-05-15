@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "../../server/db/schema";
 import { financeTransactions, sessions } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
-import { createShopFor, createUserDirect } from "./_helpers";
+import { createShopFor, createUserDirect, workspaceIdOf } from "./_helpers";
 
 
 interface TestEnv {
@@ -14,6 +14,7 @@ interface TestEnv {
   sqlite: Database.Database;
   cookie: string;
   userId: number;
+  workspaceId: number;
   shopId: number;
 }
 
@@ -32,6 +33,7 @@ const setupDb = (): TestEnv => {
 
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
   const shopId = createShopFor(db, adminId);
+  const workspaceId = workspaceIdOf(db, adminId);
   const sessionId = "test-analytics-session";
   db.insert(sessions)
     .values({
@@ -46,6 +48,7 @@ const setupDb = (): TestEnv => {
     sqlite,
     cookie: `ozon_calc_session=${sessionId}`,
     userId: adminId,
+    workspaceId,
     shopId,
   };
 };
@@ -66,7 +69,7 @@ const seedTx = (env: TestEnv, list: Tx[]) => {
       .insert(financeTransactions)
       .values({
         shopId: env.shopId,
-        userId: env.userId,
+        workspaceId: env.workspaceId,
         operationId: t.operation_id,
         operationType: t.operation_type,
         operationDate: new Date(t.operation_date),

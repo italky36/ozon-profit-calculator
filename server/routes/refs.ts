@@ -9,10 +9,10 @@ import {
   refStorage,
   shops,
 } from "../db/schema";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { requireAdmin } from "../middleware/session";
+import { canManageWorkspace, requireSysadmin } from "../middleware/session";
 import { loadActiveTariffRows, resolveTariffSetId } from "../settings/tariffSets";
 
 type RefsEnv = { Variables: { user: SessionUser } };
@@ -81,6 +81,7 @@ const parseClusterXlsx = (buf: Buffer): ParsedRow[] | string => {
   return "Не нашёл лист с нужной структурой. Должны быть колонки «Объём…», «Кластер отправки», «Кластер назначения», «…до 300», «…свыше 300».";
 };
 
+/** Resolve a shopId: explicit ?shopId= or first shop in workspace. */
 const resolveShopFromQuery = async (
   db: DB,
   user: SessionUser,
@@ -93,11 +94,10 @@ const resolveShopFromQuery = async (
       return { status: 400, error: "invalid shopId" };
     candidate = n;
   } else {
-    // Pick first own shop as fallback (used for /api/refs main bundle).
     const [first] = await db
       .select({ id: shops.id })
       .from(shops)
-      .where(eq(shops.userId, user.id))
+      .where(eq(shops.workspaceId, user.workspaceId))
       .limit(1);
     if (!first) return { status: 400, error: "no shop available" };
     candidate = first.id;
@@ -105,7 +105,9 @@ const resolveShopFromQuery = async (
   const [own] = await db
     .select({ id: shops.id })
     .from(shops)
-    .where(and(eq(shops.id, candidate), eq(shops.userId, user.id)));
+    .where(
+      and(eq(shops.id, candidate), eq(shops.workspaceId, user.workspaceId)),
+    );
   if (!own) return { status: 404, error: "shop not found" };
   return candidate;
 };
@@ -172,9 +174,6 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     }
     for (const cat of Object.keys(categories)) categories[cat].sort();
 
-    // Cluster tariffs of the resolved shop's active set (or empty when no
-    // sets exist / no shop was found — calc gracefully falls back to
-    // logisticsTariffs in that case).
     let logisticsClusterTariffsRows: Array<{
       volumeFrom: number;
       fromCluster: string;
@@ -201,30 +200,21 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
   });
 
   // ── Cluster tariff sets ─────────────────────────────────────────────────
-  // List sets visible to the user: all globals + own personal sets.
+  // List sets visible to the workspace: globals + workspace-owned.
   app.get("/cluster-logistics/sets", async (c) => {
     const user = c.get("user");
-    const ownShops = await db
-      .select({ id: shops.id })
-      .from(shops)
-      .where(eq(shops.userId, user.id));
-    const ownShopIds = ownShops.map((s) => s.id);
 
-    // SQL: shopId IS NULL OR shopId IN (own shops).
-    const globals = await db
+    const allSets = await db
       .select()
       .from(logisticsClusterTariffSets)
-      .where(isNull(logisticsClusterTariffSets.shopId))
+      .where(
+        or(
+          isNull(logisticsClusterTariffSets.workspaceId),
+          eq(logisticsClusterTariffSets.workspaceId, user.workspaceId),
+        ),
+      )
       .orderBy(desc(logisticsClusterTariffSets.uploadedAt));
-    const personal = ownShopIds.length
-      ? await db
-          .select()
-          .from(logisticsClusterTariffSets)
-          .where(inArray(logisticsClusterTariffSets.shopId, ownShopIds))
-          .orderBy(desc(logisticsClusterTariffSets.uploadedAt))
-      : [];
 
-    const allSets = [...globals, ...personal];
     const counts = new Map<number, number>();
     if (allSets.length > 0) {
       const ids = allSets.map((s) => s.id);
@@ -238,8 +228,10 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     return c.json(
       allSets.map((s) => ({
         id: s.id,
-        shopId: s.shopId,
-        scope: s.shopId === null ? "global" : "shop",
+        // Stage-2 compat: client still uses `shopId` to discriminate scope.
+        // workspaceId NULL → "global", non-null → "shop" (workspace-owned).
+        shopId: s.workspaceId,
+        scope: s.workspaceId === null ? "global" : "shop",
         name: s.name,
         uploadedAt: s.uploadedAt.getTime(),
         rowCount: counts.get(s.id) ?? 0,
@@ -249,8 +241,9 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
 
   // Upload a new cluster tariff set. Body: multipart with `file` (xlsx) +
   // form fields `name`, `scope` ("global" | "shop"), `shopId` (when scope=shop).
-  // - scope=global requires admin role
-  // - scope=shop  requires ownership of shopId
+  // - scope=global requires sysadmin
+  // - scope=shop  requires owner/manager of current workspace; the chosen
+  //   shopId must belong to the workspace
   app.post("/cluster-logistics/sets", async (c) => {
     const user = c.get("user");
     let body: FormData;
@@ -270,12 +263,21 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
       return c.json({ error: "scope must be 'global' or 'shop'" }, 400);
     }
 
-    let targetShopId: number | null = null;
+    let workspaceIdForSet: number | null = null;
     if (scopeStr === "global") {
-      if (user.role !== "admin") {
-        return c.json({ error: "только админ может загружать глобальные наборы" }, 403);
+      if (!user.isSysadmin) {
+        return c.json(
+          { error: "только sysadmin может загружать глобальные наборы" },
+          403,
+        );
       }
     } else {
+      if (!canManageWorkspace(user.workspaceRole)) {
+        return c.json(
+          { error: "только owner или manager workspace'а может загружать наборы" },
+          403,
+        );
+      }
       const raw = body.get("shopId");
       const n = Number(raw);
       if (!Number.isFinite(n) || n <= 0)
@@ -283,9 +285,9 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
       const [own] = await db
         .select({ id: shops.id })
         .from(shops)
-        .where(and(eq(shops.id, n), eq(shops.userId, user.id)));
+        .where(and(eq(shops.id, n), eq(shops.workspaceId, user.workspaceId)));
       if (!own) return c.json({ error: "shop not found" }, 404);
-      targetShopId = n;
+      workspaceIdForSet = user.workspaceId;
     }
 
     const buf = Buffer.from(await file.arrayBuffer());
@@ -296,7 +298,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     const [created] = await db
       .insert(logisticsClusterTariffSets)
       .values({
-        shopId: targetShopId,
+        workspaceId: workspaceIdForSet,
         name,
         uploadedAt: now,
         createdAt: now,
@@ -316,8 +318,8 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     return c.json(
       {
         id: created.id,
-        shopId: created.shopId,
-        scope: created.shopId === null ? "global" : "shop",
+        shopId: created.workspaceId,
+        scope: created.workspaceId === null ? "global" : "shop",
         name: created.name,
         uploadedAt: created.uploadedAt.getTime(),
         rowCount: parsed.length,
@@ -328,7 +330,8 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     );
   });
 
-  // Delete a cluster tariff set. Global → admin only. Personal → owner only.
+  // Delete a cluster tariff set. Global → sysadmin. Workspace-owned →
+  // workspace owner/manager.
   app.delete("/cluster-logistics/sets/:id", async (c) => {
     const user = c.get("user");
     const id = Number(c.req.param("id"));
@@ -340,15 +343,20 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
       .where(eq(logisticsClusterTariffSets.id, id));
     if (!set) return c.json({ error: "not found" }, 404);
 
-    if (set.shopId === null) {
-      if (user.role !== "admin")
-        return c.json({ error: "только админ удаляет глобальные наборы" }, 403);
+    if (set.workspaceId === null) {
+      if (!user.isSysadmin)
+        return c.json(
+          { error: "только sysadmin удаляет глобальные наборы" },
+          403,
+        );
     } else {
-      const [own] = await db
-        .select({ id: shops.id })
-        .from(shops)
-        .where(and(eq(shops.id, set.shopId), eq(shops.userId, user.id)));
-      if (!own) return c.json({ error: "forbidden" }, 403);
+      if (set.workspaceId !== user.workspaceId)
+        return c.json({ error: "forbidden" }, 403);
+      if (!canManageWorkspace(user.workspaceRole))
+        return c.json(
+          { error: "только owner или manager удаляет наборы команды" },
+          403,
+        );
     }
 
     await db
@@ -358,7 +366,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
   });
 
   // Stats endpoint kept for backward compat — returns counts of the resolved
-  // active set for the requested shop (or current user's first shop).
+  // active set for the requested shop (or workspace's first shop).
   app.get("/cluster-logistics", async (c) => {
     const user = c.get("user");
     const shopResult = await resolveShopFromQuery(
@@ -383,9 +391,9 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     });
   });
 
-  // Legacy upload endpoint — now creates a NEW global set (admin only) named
-  // after the upload date. Kept for backwards compat with the old UI button.
-  app.post("/cluster-logistics/upload", requireAdmin, async (c) => {
+  // Legacy upload endpoint — now creates a NEW global set (sysadmin only)
+  // named after the upload date. Kept for backwards compat with the old UI.
+  app.post("/cluster-logistics/upload", requireSysadmin, async (c) => {
     let body: FormData;
     try {
       body = await c.req.formData();
@@ -405,7 +413,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     const [created] = await db
       .insert(logisticsClusterTariffSets)
       .values({
-        shopId: null,
+        workspaceId: null,
         name: autoName,
         uploadedAt: now,
         createdAt: now,

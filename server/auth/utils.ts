@@ -6,6 +6,7 @@ import {
   emailVerificationTokens,
   sessions,
   users,
+  workspaceMembers,
 } from "../db/schema";
 
 const BCRYPT_ROUNDS = 10;
@@ -48,11 +49,18 @@ export function createSession(db: DB, userId: number): SessionInfo {
   return { sessionId, expiresAt };
 }
 
+export type WorkspaceRole = "owner" | "manager" | "member";
+
 export interface SessionUser {
   id: number;
   email: string;
-  role: "admin" | "user";
+  isSysadmin: boolean;
   isVerified: boolean;
+  /** The user's single workspace (Stage 2 invariant). 0 means «not yet
+   * assigned» — used during registration before workspace creation; routes
+   * that scope by workspace will reject with 403 until the user has one. */
+  workspaceId: number;
+  workspaceRole: WorkspaceRole;
 }
 
 /** Validates a session token. Returns the associated user, or null if the
@@ -64,7 +72,7 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
       expiresAt: sessions.expiresAt,
       userId: users.id,
       email: users.email,
-      role: users.role,
+      isSysadmin: users.isSysadmin,
       isVerified: users.isVerified,
       isBlocked: users.isBlocked,
     })
@@ -83,11 +91,23 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
     // (e.g. due to a race), a blocked user must not pass auth.
     return null;
   }
+
+  const member = db
+    .select({
+      workspaceId: workspaceMembers.workspaceId,
+      role: workspaceMembers.role,
+    })
+    .from(workspaceMembers)
+    .where(eq(workspaceMembers.userId, row.userId))
+    .get();
+
   return {
     id: row.userId,
     email: row.email,
-    role: row.role,
+    isSysadmin: row.isSysadmin,
     isVerified: row.isVerified,
+    workspaceId: member?.workspaceId ?? 0,
+    workspaceRole: member?.role ?? "member",
   };
 }
 

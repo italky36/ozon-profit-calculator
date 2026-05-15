@@ -3,7 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { products, type ProductRow as DbProduct } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, visibleShopIds } from "../middleware/session";
+import { resolveShopId, workspaceShopIds } from "../middleware/session";
 import type {
   ClustersCount,
   IncomingVatRate,
@@ -160,9 +160,8 @@ const validateInput = (raw: unknown): ProductInput => {
 type ProductsEnv = { Variables: { user: SessionUser } };
 
 /** Returns the shopId scope for the current request:
- *   - explicit `?shopId=N` → that single shop (validated for visibility);
- *   - missing → every shop visible to user (owned + granted).
- * Per-user data scoping is applied separately via `products.userId`. */
+ *   - explicit `?shopId=N` → that single shop (validated against workspace);
+ *   - missing → every shop in the workspace. */
 const scopeShopIds = async (
   db: DB,
   user: SessionUser,
@@ -181,7 +180,7 @@ const scopeShopIds = async (
       };
     }
   }
-  return await visibleShopIds(db, user.id);
+  return await workspaceShopIds(db, user.workspaceId);
 };
 
 export function productsRoutes(db: DB): Hono<ProductsEnv> {
@@ -198,7 +197,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
       .where(
         and(
           inArray(products.shopId, scope),
-          eq(products.userId, user.id),
+          eq(products.workspaceId, user.workspaceId),
         ),
       )
       .orderBy(products.createdAt);
@@ -235,7 +234,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
       await db.insert(products).values({
         id,
         shopId,
-        userId: user.id,
+        workspaceId: user.workspaceId,
         ...inputToColumns(input),
         createdAt: now,
         updatedAt: now,
@@ -251,9 +250,8 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
     return c.json(dbToRow(row), 201);
   });
 
-  /** Verifies that product `id` exists and was created by the current user.
-   * Per-user data isolation: products in shared shops belong to the user who
-   * imported them, not the shop owner. Returns shopId on success. */
+  /** Verifies that product `id` exists in the current workspace. Returns
+   * shopId on success. */
   const requireOwnership = async (
     user: SessionUser,
     id: string,
@@ -261,7 +259,9 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
     const [row] = await db
       .select({ shopId: products.shopId })
       .from(products)
-      .where(and(eq(products.id, id), eq(products.userId, user.id)));
+      .where(
+        and(eq(products.id, id), eq(products.workspaceId, user.workspaceId)),
+      );
     return row?.shopId ?? null;
   };
 
@@ -309,7 +309,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
   });
 
   // Bulk reset whitePurchase to NULL ("По умолчанию"). Scope: либо
-  // ?shopId=N, либо все видимые магазины. Trogает только товары текущего юзера.
+  // ?shopId=N, либо все магазины workspace'а.
   app.post("/bulk/white-purchase-reset", async (c) => {
     const user = c.get("user");
     const scope = await scopeShopIds(db, user, c.req.query("shopId"));
@@ -321,16 +321,15 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
       .where(
         and(
           inArray(products.shopId, scope),
-          eq(products.userId, user.id),
+          eq(products.workspaceId, user.workspaceId),
         ),
       );
     return c.json({ updated: result.changes });
   });
 
   // Bulk-update arbitrary subset of products. Supported fields:
-  //   - whitePurchase: boolean | null  (Белая / Не белая / По умолчанию)
-  //   - vatRate: VatRate                (only OSNO uses per-product VAT;
-  //                                       client gates the action by taxSystem)
+  //   - whitePurchase: boolean | null
+  //   - vatRate: VatRate
   app.post("/bulk/update", async (c) => {
     const user = c.get("user");
     const body = (await c.req.json().catch(() => null)) as
@@ -380,7 +379,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         and(
           inArray(products.id, ids),
           inArray(products.shopId, scope),
-          eq(products.userId, user.id),
+          eq(products.workspaceId, user.workspaceId),
         ),
       );
     return c.json({ updated: result.changes });
@@ -405,7 +404,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         and(
           inArray(products.id, ids),
           inArray(products.shopId, scope),
-          eq(products.userId, user.id),
+          eq(products.workspaceId, user.workspaceId),
         ),
       );
     return c.json({ deleted: result.changes });

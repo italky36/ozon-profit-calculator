@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-or
 import { financeTransactions } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, visibleShopIds } from "../middleware/session";
+import { resolveShopId, workspaceShopIds } from "../middleware/session";
 
 const TYPES = new Set([
   "sale",
@@ -18,8 +18,8 @@ const TYPES = new Set([
 type FinanceEnv = { Variables: { user: SessionUser } };
 
 /** Resolve which shopIds the request scopes to.
- *  - explicit `?shopId=N` → just that shop (validated for visibility);
- *  - omitted → all shops visible to the user (owned + granted).
+ *  - explicit `?shopId=N` → just that shop (validated against workspace);
+ *  - omitted → all shops in workspace.
  */
 const scopeShopIds = async (
   db: DB,
@@ -39,7 +39,7 @@ const scopeShopIds = async (
       };
     }
   }
-  return await visibleShopIds(db, user.id);
+  return await workspaceShopIds(db, user.workspaceId);
 };
 
 export function financeRoutes(db: DB): Hono<FinanceEnv> {
@@ -60,7 +60,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
 
     const filters: SQL[] = [
       inArray(financeTransactions.shopId, scope),
-      eq(financeTransactions.userId, user.id),
+      eq(financeTransactions.workspaceId, user.workspaceId),
     ];
     if (fromRaw) {
       const from = new Date(fromRaw);
@@ -133,7 +133,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
     const toRaw = c.req.query("to");
     const filters: SQL[] = [
       inArray(financeTransactions.shopId, scope),
-      eq(financeTransactions.userId, user.id),
+      eq(financeTransactions.workspaceId, user.workspaceId),
     ];
     if (fromRaw) {
       const from = new Date(fromRaw);
@@ -164,7 +164,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
   });
 
   // Удалить накопленные транзакции. Scope: либо ?shopId=N, либо все магазины
-  // юзера.
+  // workspace'а.
   app.delete("/transactions/all", async (c) => {
     const user = c.get("user");
     const scope = await scopeShopIds(db, user, c.req.query("shopId"));
@@ -175,7 +175,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
       .where(
         and(
           inArray(financeTransactions.shopId, scope),
-          eq(financeTransactions.userId, user.id),
+          eq(financeTransactions.workspaceId, user.workspaceId),
         ),
       );
     return c.json({ deleted: result.changes });

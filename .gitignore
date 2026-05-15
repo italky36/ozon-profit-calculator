@@ -24,7 +24,7 @@ data/*.bak
 
 # Local working files
 plans/
-settings/
+/settings/
 settings*.zip
 
 # Local agent settings

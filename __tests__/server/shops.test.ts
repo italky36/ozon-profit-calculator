@@ -130,7 +130,7 @@ describe("shops CRUD", () => {
     const after = env.db
       .select()
       .from(shops)
-      .where(eq(shops.userId, alice.userId))
+      .where(eq(shops.workspaceId, alice.workspaceId))
       .all();
     expect(after).toHaveLength(1);
   });
