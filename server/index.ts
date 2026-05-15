@@ -15,6 +15,7 @@ import { importRoutes } from "./routes/import";
 import type { ImportContext } from "./routes/import";
 import { financeRoutes } from "./routes/finance";
 import { analyticsRoutes } from "./routes/analytics";
+import { exportRoutes } from "./routes/export";
 import { getDb } from "./db/client";
 import { setEmailClientDb } from "./email/client";
 
@@ -44,6 +45,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
   api.route("/import", importRoutes(db, opts.importContext));
   api.route("/finance", financeRoutes(db));
   api.route("/analytics", analyticsRoutes(db));
+  api.route("/export", exportRoutes());
 
   app.route("/api", api);
   return app;

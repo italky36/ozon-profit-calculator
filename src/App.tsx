@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ShopSettings from "./components/ShopSettings";
 import ProductsTable, { type RowResult } from "./components/ProductsTable";
-import ProductDrawer from "./components/ProductDrawer";
-import OzonImportModal from "./components/OzonImportModal";
-import FinanceTab from "./components/FinanceTab";
-import AdminPage from "./components/admin/AdminPage";
 import AppHeader from "./components/AppHeader";
 import TabBar from "./components/TabBar";
 import TweaksPanel from "./components/TweaksPanel";
-import ShopsModal from "./components/ShopsModal";
+
+const ProductDrawer = lazy(() => import("./components/ProductDrawer"));
+const OzonImportModal = lazy(() => import("./components/OzonImportModal"));
+const FinanceTab = lazy(() => import("./components/FinanceTab"));
+const AdminPage = lazy(() => import("./components/admin/AdminPage"));
+const ShopsModal = lazy(() => import("./components/ShopsModal"));
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
 import { useAuth } from "./contexts/useAuth";
 import { Package, ShieldCheck, Wallet, Settings as SettingsIcon } from "lucide-react";
@@ -716,66 +717,78 @@ export default function App() {
             </div>
 
             {selectedRow && selectedResult && (
-              <ProductDrawer
-                input={selectedRow.input}
-                result={selectedResult}
-                onChange={(next) => updateRow(selectedRow.id, next)}
-                onClose={() => setSelectedId(null)}
-                fromOzon={selectedRow.ozonProductId != null}
-                ozonProductId={selectedRow.ozonProductId ?? null}
-                ozonSku={selectedRow.ozonSku ?? null}
-                onRefreshed={refreshProducts}
-                taxSettings={taxSettings}
-                refs={refs}
-              />
+              <Suspense fallback={null}>
+                <ProductDrawer
+                  input={selectedRow.input}
+                  result={selectedResult}
+                  onChange={(next) => updateRow(selectedRow.id, next)}
+                  onClose={() => setSelectedId(null)}
+                  fromOzon={selectedRow.ozonProductId != null}
+                  ozonProductId={selectedRow.ozonProductId ?? null}
+                  ozonSku={selectedRow.ozonSku ?? null}
+                  onRefreshed={refreshProducts}
+                  taxSettings={taxSettings}
+                  refs={refs}
+                />
+              </Suspense>
             )}
           </>
         )}
 
         {activeTab === "finance" && (
-          <FinanceTab
-            shops={shops}
-            onOpenArticle={(articleId) => {
-              const row = rows.find((r) => r.input.articleId === articleId);
-              if (row) {
-                setSelectedId(row.id);
-                setActiveTab("calc");
-              } else {
-                setActionError(
-                  `Товар с артикулом «${articleId}» не найден в локальном каталоге. Запусти импорт каталога или добавь товар вручную.`,
-                );
-              }
-            }}
-          />
+          <Suspense fallback={<p className="muted">Загрузка…</p>}>
+            <FinanceTab
+              shops={shops}
+              onOpenArticle={(articleId) => {
+                const row = rows.find((r) => r.input.articleId === articleId);
+                if (row) {
+                  setSelectedId(row.id);
+                  setActiveTab("calc");
+                } else {
+                  setActionError(
+                    `Товар с артикулом «${articleId}» не найден в локальном каталоге. Запусти импорт каталога или добавь товар вручную.`,
+                  );
+                }
+              }}
+            />
+          </Suspense>
         )}
 
-        {activeTab === "admin" && isAdmin && <AdminPage />}
+        {activeTab === "admin" && isAdmin && (
+          <Suspense fallback={<p className="muted">Загрузка…</p>}>
+            <AdminPage />
+          </Suspense>
+        )}
       </main>
 
       {shopsModalOpen && (
-        <ShopsModal
-          shops={shops}
-          activeShopId={activeShopId}
-          onClose={() => setShopsModalOpen(false)}
-          onChanged={(next) => {
-            setShops(next);
-            // If active shop got removed, fall back to first.
-            if (
-              activeShopId !== null &&
-              !next.find((s) => s.id === activeShopId)
-            ) {
-              setActiveShopId(next[0]?.id ?? null);
-            }
-          }}
-        />
+        <Suspense fallback={null}>
+          <ShopsModal
+            shops={shops}
+            activeShopId={activeShopId}
+            onClose={() => setShopsModalOpen(false)}
+            onChanged={(next) => {
+              setShops(next);
+              // If active shop got removed, fall back to first.
+              if (
+                activeShopId !== null &&
+                !next.find((s) => s.id === activeShopId)
+              ) {
+                setActiveShopId(next[0]?.id ?? null);
+              }
+            }}
+          />
+        </Suspense>
       )}
 
       {importOpen && shops.length > 0 && (
-        <OzonImportModal
-          shops={shops}
-          onClose={() => setImportOpen(false)}
-          onImported={refreshProducts}
-        />
+        <Suspense fallback={null}>
+          <OzonImportModal
+            shops={shops}
+            onClose={() => setImportOpen(false)}
+            onImported={refreshProducts}
+          />
+        </Suspense>
       )}
 
       <TweaksPanel

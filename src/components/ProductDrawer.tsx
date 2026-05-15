@@ -1,14 +1,15 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import type { ProductInput, References, TaxSettings } from "../types";
 import type { RowResult } from "./ProductsTable";
 import ProductForm, { type LockedField } from "./ProductForm";
 import OzonBreakdown from "./OzonBreakdown";
 import ResultsPanel from "./ResultsPanel";
-import OzonPricesDebugModal from "./OzonPricesDebugModal";
-import OzonInfoDebugModal from "./OzonInfoDebugModal";
-import OzonFinanceDebugModal from "./OzonFinanceDebugModal";
 import { api } from "../api";
+
+const OzonPricesDebugModal = lazy(() => import("./OzonPricesDebugModal"));
+const OzonInfoDebugModal = lazy(() => import("./OzonInfoDebugModal"));
+const OzonFinanceDebugModal = lazy(() => import("./OzonFinanceDebugModal"));
 
 interface Props {
   input: ProductInput;
@@ -176,22 +177,28 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
         </div>
       </aside>
       {debugOpen && input.articleId && (
-        <OzonPricesDebugModal
-          articleId={input.articleId}
-          onClose={() => setDebugOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <OzonPricesDebugModal
+            articleId={input.articleId}
+            onClose={() => setDebugOpen(false)}
+          />
+        </Suspense>
       )}
       {infoDebugOpen && input.articleId && (
-        <OzonInfoDebugModal
-          articleId={input.articleId}
-          onClose={() => setInfoDebugOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <OzonInfoDebugModal
+            articleId={input.articleId}
+            onClose={() => setInfoDebugOpen(false)}
+          />
+        </Suspense>
       )}
       {financeOpen && input.articleId && (
-        <OzonFinanceDebugModal
-          articleId={input.articleId}
-          onClose={() => setFinanceOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <OzonFinanceDebugModal
+            articleId={input.articleId}
+            onClose={() => setFinanceOpen(false)}
+          />
+        </Suspense>
       )}
     </>
   );
