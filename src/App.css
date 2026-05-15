@@ -404,6 +404,7 @@ fieldset legend {
 
 /* ── Channel pills / badges ─────────────────────────────────────────────── */
 .ch-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+.shop-filter-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .ch-pill {
   padding: 5px 14px;
   border-radius: 20px;
