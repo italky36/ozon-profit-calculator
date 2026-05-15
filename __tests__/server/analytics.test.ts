@@ -70,6 +70,7 @@ const seedTx = (env: TestEnv, list: Tx[]) => {
       .values({
         shopId: env.shopId,
         workspaceId: env.workspaceId,
+        userId: env.userId,
         operationId: t.operation_id,
         operationType: t.operation_type,
         operationDate: new Date(t.operation_date),

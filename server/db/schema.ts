@@ -138,9 +138,9 @@ export const workspaceInvites = sqliteTable("workspace_invites", {
 });
 
 // === Shops (workspace-scoped) ===
-// Магазин принадлежит workspace'у; все его данные видны всем member'ам этого
-// workspace'а. shortName уникален в рамках workspace. color — HEX (опц.);
-// NULL → нейтральный (фоллбэк на UI-accent).
+// Магазин принадлежит workspace'у; видимость member'ов ограничивается через
+// shop_member (hard gate, выдаёт owner/manager). shortName уникален в рамках
+// workspace. color — HEX (опц.); NULL → нейтральный (фоллбэк на UI-accent).
 export const shops = sqliteTable(
   "shops",
   {
@@ -179,7 +179,54 @@ export const shops = sqliteTable(
   }),
 );
 
+/** Assignment: who in the workspace has access to which shop.
+ * Workspace owner sees every shop unconditionally; for everyone else,
+ * a row here is the hard gate. Owner/manager creates/destroys rows. */
+export const shopMember = sqliteTable(
+  "shop_member",
+  {
+    shopId: integer("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.shopId, t.userId] }),
+  }),
+);
+
+/** Per-user override of shop defaults. NULL columns → inherit from shops.*.
+ * resolveShopSettings(db, shopId, userId) is the canonical accessor. */
+export const shopUserSettings = sqliteTable(
+  "shop_user_settings",
+  {
+    shopId: integer("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    taxSettings: text("tax_settings", { mode: "json" }).$type<TaxSettings>(),
+    tariffSetId: integer("tariff_set_id"),
+    autoRefreshEnabled: integer("auto_refresh_enabled", { mode: "boolean" }),
+    autoRefreshIntervalMin: integer("auto_refresh_interval_min"),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.shopId, t.userId] }),
+  }),
+);
+
 // === Products ===
+// Каталог-поля (productName, category, Ozon-метаданные) синкаются у всех
+// assignee shop'а при импорте. Manual/финансовые поля (costPrice, salesPlan,
+// marketingPercent, redemptionPercent, whitePurchase, …) — per-user.
 export const products = sqliteTable(
   "products",
   {
@@ -190,6 +237,9 @@ export const products = sqliteTable(
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
   articleId: text("article_id").notNull(),
   productName: text("product_name").notNull(),
   category: text("category").notNull(),
@@ -260,8 +310,9 @@ export const products = sqliteTable(
   ozonStatusDescription: text("ozon_status_description"),
   },
   (t) => ({
-    shopArticleUnique: uniqueIndex("products_shop_article_unique").on(
+    shopUserArticleUnique: uniqueIndex("products_shop_user_article_unique").on(
       t.shopId,
+      t.userId,
       t.articleId,
     ),
   }),
@@ -340,8 +391,9 @@ export const smtpSettings = sqliteTable("smtp_settings", {
 });
 
 // === Imported finance ===
-// PK composite (workspace_id, operation_id) — одна команда импортирует один
-// Ozon-аккаунт; PK гарантирует идемпотентность повторных импортов.
+// PK composite (shop_id, user_id, operation_id) — каждый member импортирует
+// свой период (operation_id Ozon-аккаунта одинаков, но каждый юзер хранит
+// свою копию выписки).
 export const financeTransactions = sqliteTable(
   "finance_transactions",
   {
@@ -351,6 +403,9 @@ export const financeTransactions = sqliteTable(
     workspaceId: integer("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
     operationId: integer("operation_id").notNull(),
     operationType: text("operation_type").notNull(),
     operationDate: integer("operation_date", { mode: "timestamp_ms" }).notNull(),
@@ -361,7 +416,7 @@ export const financeTransactions = sqliteTable(
     raw: text("raw", { mode: "json" }).notNull(),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.workspaceId, t.operationId] }),
+    pk: primaryKey({ columns: [t.shopId, t.userId, t.operationId] }),
   }),
 );
 
@@ -373,6 +428,9 @@ export const importRuns = sqliteTable("import_runs", {
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
   finishedAt: integer("finished_at", { mode: "timestamp_ms" }),

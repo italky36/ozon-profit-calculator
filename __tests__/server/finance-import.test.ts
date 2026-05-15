@@ -71,7 +71,7 @@ describe("runFinanceImport", () => {
   afterEach(() => env.sqlite.close());
 
   it("inserts transactions classified by operation_type", async () => {
-    const counters = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, FILTER);
+    const counters = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     expect(counters.inserted).toBe(7);
     expect(counters.skipped).toBe(0);
 
@@ -93,10 +93,10 @@ describe("runFinanceImport", () => {
   });
 
   it("is idempotent on repeat run (INSERT OR IGNORE)", async () => {
-    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     const before = env.db.select().from(financeTransactions).all();
 
-    const second = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, FILTER);
+    const second = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     expect(second.inserted).toBe(0);
     expect(second.skipped).toBe(7);
 
@@ -158,7 +158,7 @@ describe("finance import route + finance API", () => {
   });
 
   it("GET /api/finance/transactions returns rows + filters by type", async () => {
-    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     const app = buildApp({ db: env.db });
 
     const all = await app.request("/api/finance/transactions", { headers: headers(env.cookie) });
@@ -176,7 +176,7 @@ describe("finance import route + finance API", () => {
   });
 
   it("GET /api/finance/summary aggregates by type", async () => {
-    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     const app = buildApp({ db: env.db });
     const res = await app.request("/api/finance/summary", { headers: headers(env.cookie) });
     const summary = (await res.json()) as Array<{

@@ -47,6 +47,7 @@ export async function runCatalogImport(
   client: OzonClient,
   shopId: number,
   workspaceId: number,
+  userId: number,
   onProgress: (counters: RunCounters) => void = () => {},
 ): Promise<RunCounters> {
   const counters: RunCounters = {
@@ -155,6 +156,7 @@ export async function runCatalogImport(
               id: randomUUID(),
               shopId,
               workspaceId,
+              userId,
               articleId: entry.articleId,
               productName: entry.patch.productName,
               category: entry.patch.category,
@@ -252,6 +254,7 @@ export async function runFinanceImport(
   client: OzonClient,
   shopId: number,
   workspaceId: number,
+  userId: number,
   filter: TransactionFilter,
   onProgress: (counters: FinanceCounters) => void = () => {},
 ): Promise<FinanceCounters> {
@@ -288,6 +291,7 @@ export async function runFinanceImport(
           .values({
             shopId,
             workspaceId,
+            userId,
             operationId: op.operation_id,
             operationType: op.operation_type,
             operationDate: new Date(op.operation_date),
@@ -347,6 +351,7 @@ export function importRoutes(
       .values({
         shopId,
         workspaceId: user.workspaceId,
+        userId: user.id,
         kind: "catalog",
         startedAt,
         status: "running",
@@ -357,6 +362,7 @@ export function importRoutes(
 
     const importShopId = shopId;
     const importWorkspaceId = user.workspaceId;
+    const importUserId = user.id;
     void (async () => {
       try {
         const counters = await runCatalogImport(
@@ -364,6 +370,7 @@ export function importRoutes(
           client,
           importShopId,
           importWorkspaceId,
+          importUserId,
           (c2) => {
             db.update(importRuns)
               .set({ itemsProcessed: c2.itemsProcessed })
@@ -454,6 +461,7 @@ export function importRoutes(
       .values({
         shopId,
         workspaceId: user.workspaceId,
+        userId: user.id,
         kind: "finance",
         startedAt,
         status: "running",
@@ -464,6 +472,7 @@ export function importRoutes(
 
     const importShopId = shopId;
     const importWorkspaceId = user.workspaceId;
+    const importUserId = user.id;
     void (async () => {
       try {
         const total = {
@@ -483,6 +492,7 @@ export function importRoutes(
             client,
             importShopId,
             importWorkspaceId,
+            importUserId,
             chunkFilter,
             (c2) => {
               db.update(importRuns)

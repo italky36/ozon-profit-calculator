@@ -121,6 +121,15 @@ if (adminUserId != null && adminWorkspaceId != null) {
     console.log("seeded default shop M1 for admin");
   }
 
+  // Owner of the workspace gets shop_member assignment for every workspace
+  // shop so they can see their own seeded shop. Idempotent.
+  sqlite
+    .prepare(
+      `INSERT OR IGNORE INTO shop_member (shop_id, user_id, created_at, created_by)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .run(adminShopId, adminUserId, now, adminUserId);
+
   const existingSettings = sqlite
     .prepare("SELECT id FROM user_settings WHERE user_id = ?")
     .get(adminUserId);

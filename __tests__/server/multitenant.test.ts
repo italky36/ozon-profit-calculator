@@ -136,6 +136,7 @@ describe("multi-tenant workspace isolation", () => {
       .values({
         shopId: alice.shopId,
         workspaceId: alice.workspaceId,
+        userId: alice.userId,
         operationId: 1,
         operationType: "OperationAgentDeliveredToCustomer",
         operationDate: new Date("2026-04-15"),
@@ -151,6 +152,7 @@ describe("multi-tenant workspace isolation", () => {
       .values({
         shopId: bob.shopId,
         workspaceId: bob.workspaceId,
+        userId: bob.userId,
         operationId: 1,
         operationType: "OperationAgentDeliveredToCustomer",
         operationDate: new Date("2026-04-15"),

@@ -235,6 +235,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         id,
         shopId,
         workspaceId: user.workspaceId,
+        userId: user.id,
         ...inputToColumns(input),
         createdAt: now,
         updatedAt: now,

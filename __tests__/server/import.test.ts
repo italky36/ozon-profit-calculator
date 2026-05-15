@@ -183,7 +183,7 @@ describe("runCatalogImport", () => {
   afterEach(() => env.sqlite.close());
 
   it("inserts new products with safe defaults", async () => {
-    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
     expect(counters.added).toBe(2);
     expect(counters.updated).toBe(0);
     expect(counters.itemsProcessed).toBe(2);
@@ -232,6 +232,7 @@ describe("runCatalogImport", () => {
         id: randomUUID(),
         shopId: env.shopId,
         workspaceId: env.workspaceId,
+        userId: env.userId,
         articleId: "OFFER-1",
         productName: "Стартовое имя",
         category: "Кофеварки и кофемашины",
@@ -263,7 +264,7 @@ describe("runCatalogImport", () => {
       })
       .run();
 
-    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
     expect(counters.updated).toBe(1);
     expect(counters.added).toBe(1);
 
@@ -285,9 +286,9 @@ describe("runCatalogImport", () => {
   });
 
   it("is idempotent across repeat runs", async () => {
-    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
     const before = env.db.select().from(products).all();
-    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId);
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
     const after = env.db.select().from(products).all();
     expect(after).toHaveLength(before.length);
     // ids stable
