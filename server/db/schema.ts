@@ -59,6 +59,12 @@ export const logisticsClusterTariffSets = sqliteTable(
     shopId: integer("shop_id").references(() => shops.id, {
       onDelete: "cascade",
     }),
+    /** SaaS Stage 1: nullable while routes still scope by shop. NULL =
+     * глобальный набор (sysadmin); non-null = workspace-owned. Stage 2 сделает
+     * NOT NULL для не-глобальных и переключит refs.ts на workspace-фильтр. */
+    workspaceId: integer("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     name: text("name").notNull(),
     uploadedAt: integer("uploaded_at", { mode: "timestamp_ms" }).notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
@@ -90,6 +96,54 @@ export const refSettings = sqliteTable("ref_settings", {
   value: text("value", { mode: "json" }).notNull(),
 });
 
+// === SaaS multi-tenancy (Stage 1, additive) ===
+// workspace ≈ «команда» в UI. Один user ↔ один workspace через UNIQUE-индекс
+// на workspace_members.user_id (см. миграцию 0019). Все бизнес-данные
+// scoped по workspace_id (Stage 2 переключит роуты и сделает NOT NULL).
+export const workspaces = sqliteTable("workspaces", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const workspaceMembers = sqliteTable(
+  "workspace_members",
+  {
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ["owner", "manager", "member"] }).notNull(),
+    status: text("status", { enum: ["active", "suspended"] })
+      .notNull()
+      .default("active"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.workspaceId, t.userId] }),
+    userUnique: uniqueIndex("workspace_members_user_unique").on(t.userId),
+  }),
+);
+
+export const workspaceInvites = sqliteTable("workspace_invites", {
+  token: text("token").primaryKey(),
+  workspaceId: integer("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  role: text("role", { enum: ["owner", "manager", "member"] }).notNull(),
+  invitedBy: integer("invited_by")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  usedAt: integer("used_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 // === Shops (per-user namespace for products / finance / Ozon creds / tax) ===
 // Один user может вести N магазинов; каждый магазин полностью изолирован.
 // shortName — 2-символьный код, используется в бейдже строки товара.
@@ -101,6 +155,11 @@ export const shops = sqliteTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    /** SaaS Stage 1: nullable until backfill пробит во всех ALTER. Stage 2
+     * сделает NOT NULL и дропнет userId, перейдя на чистый workspace-scope. */
+    workspaceId: integer("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     name: text("name").notNull(),
     shortName: text("short_name").notNull(),
     color: text("color"),
@@ -192,6 +251,10 @@ export const products = sqliteTable(
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL и дропнет userId. */
+  workspaceId: integer("workspace_id").references(() => workspaces.id, {
+    onDelete: "cascade",
+  }),
   articleId: text("article_id").notNull(),
   productName: text("product_name").notNull(),
   category: text("category").notNull(),
@@ -286,9 +349,17 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  /** Legacy: оставлено в Stage 1 для обратной совместимости с существующими
+   * роутами. В Stage 2 будет дропнут — sysadmin-уровень полностью заменяется
+   * на isSysadmin, org-уровень — на workspace_members.role. */
   role: text("role", { enum: ["admin", "user"] })
     .notNull()
     .default("user"),
+  /** Платформенный sysadmin-флаг (управление SaaS-ом: SMTP, все workspace'ы,
+   * глобальные tariff sets). Backfill: true для существующих role='admin'. */
+  isSysadmin: integer("is_sysadmin", { mode: "boolean" })
+    .notNull()
+    .default(false),
   isVerified: integer("is_verified", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -348,6 +419,10 @@ export const financeTransactions = sqliteTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL и дропнет userId. */
+    workspaceId: integer("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     operationId: integer("operation_id").notNull(),
     operationType: text("operation_type").notNull(),
     operationDate: integer("operation_date", { mode: "timestamp_ms" }).notNull(),
@@ -370,6 +445,11 @@ export const importRuns = sqliteTable("import_runs", {
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  /** SaaS Stage 1: nullable; Stage 2 сделает NOT NULL. userId остаётся
+   * как audit-поле «кто запустил импорт». */
+  workspaceId: integer("workspace_id").references(() => workspaces.id, {
+    onDelete: "cascade",
+  }),
   kind: text("kind").notNull(),
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
   finishedAt: integer("finished_at", { mode: "timestamp_ms" }),

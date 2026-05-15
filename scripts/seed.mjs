@@ -44,18 +44,37 @@ const now = Date.now();
 // 1. Seed first admin if users table is empty.
 const userCount = sqlite.prepare("SELECT COUNT(*) AS n FROM users").get().n;
 let adminUserId = null;
+let adminWorkspaceId = null;
 if (userCount === 0) {
   const passwordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
   const result = sqlite
     .prepare(
-      "INSERT INTO users (email, password_hash, role, is_verified, created_at, updated_at) VALUES (?, ?, 'admin', 1, ?, ?)",
+      "INSERT INTO users (email, password_hash, role, is_sysadmin, is_verified, created_at, updated_at) VALUES (?, ?, 'admin', 1, 1, ?, ?)",
     )
     .run(ADMIN_EMAIL, passwordHash, now, now);
   adminUserId = Number(result.lastInsertRowid);
+
+  // Personal workspace для админа (Stage 1: один user = один workspace через
+  // UNIQUE на workspace_members.user_id).
+  const prefix = ADMIN_EMAIL.split("@")[0];
+  const slug = `${prefix.replace(/\./g, "-").toLowerCase()}-${adminUserId}`;
+  const wsResult = sqlite
+    .prepare(
+      "INSERT INTO workspaces (name, slug, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    )
+    .run(`Workspace ${prefix}`, slug, now, now);
+  adminWorkspaceId = Number(wsResult.lastInsertRowid);
+  sqlite
+    .prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at) VALUES (?, ?, 'owner', 'active', ?)",
+    )
+    .run(adminWorkspaceId, adminUserId, now);
+
   console.log("");
   console.log("✅ First admin created:");
-  console.log(`   Email:    ${ADMIN_EMAIL}`);
-  console.log(`   Password: ${ADMIN_PASSWORD}`);
+  console.log(`   Email:     ${ADMIN_EMAIL}`);
+  console.log(`   Password:  ${ADMIN_PASSWORD}`);
+  console.log(`   Workspace: «Workspace ${prefix}» (slug: ${slug})`);
   console.log("   ⚠️  Change the password after first login!");
   console.log("");
 } else {
@@ -63,8 +82,16 @@ if (userCount === 0) {
     .prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
     .get();
   adminUserId = existingAdmin?.id ?? null;
+  if (adminUserId != null) {
+    const existingMember = sqlite
+      .prepare(
+        "SELECT workspace_id FROM workspace_members WHERE user_id = ?",
+      )
+      .get(adminUserId);
+    adminWorkspaceId = existingMember?.workspace_id ?? null;
+  }
   console.log(
-    `users table has ${userCount} rows, skipping admin seed (admin id=${adminUserId ?? "none"})`,
+    `users table has ${userCount} rows, skipping admin seed (admin id=${adminUserId ?? "none"}, workspace=${adminWorkspaceId ?? "none"})`,
   );
 }
 
@@ -81,13 +108,14 @@ if (adminUserId != null) {
     const result = sqlite
       .prepare(
         `INSERT INTO shops (
-          user_id, name, short_name, color, tax_settings,
+          user_id, workspace_id, name, short_name, color, tax_settings,
           auto_refresh_enabled, auto_refresh_interval_min,
           created_at, updated_at
-        ) VALUES (?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
       )
       .run(
         adminUserId,
+        adminWorkspaceId,
         "Мой магазин",
         "M1",
         JSON.stringify(defaultTaxSettings),

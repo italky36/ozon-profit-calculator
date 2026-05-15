@@ -5,7 +5,14 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import * as schema from "../../server/db/schema";
-import { sessions, shops, userSettings, users } from "../../server/db/schema";
+import {
+  sessions,
+  shops,
+  userSettings,
+  users,
+  workspaceMembers,
+  workspaces,
+} from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { setEmailClient, type EmailClient, type EmailMessage } from "../../server/email/client";
 import type { TaxSettings } from "../../src/types";
@@ -67,7 +74,8 @@ export function teardownTestEnv(env: TestEnv): void {
   env.sqlite.close();
 }
 
-/** Insert a verified user directly. Returns id. */
+/** Insert a verified user directly + auto-create their personal workspace
+ * (Stage 1: each user has exactly one workspace). Returns the user id. */
 export function createUserDirect(
   db: DB,
   email: string,
@@ -82,13 +90,47 @@ export function createUserDirect(
       email,
       passwordHash: hash,
       role,
+      isSysadmin: role === "admin",
       isVerified: true,
       createdAt: now,
       updatedAt: now,
     })
     .returning({ id: users.id })
     .get();
-  return result.id;
+  const userId = result.id;
+  const prefix = email.split("@")[0];
+  const slug = `${prefix.replace(/\./g, "-").toLowerCase()}-${userId}`;
+  const ws = db
+    .insert(workspaces)
+    .values({
+      name: `Workspace ${prefix}`,
+      slug,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: workspaces.id })
+    .get();
+  db.insert(workspaceMembers)
+    .values({
+      workspaceId: ws.id,
+      userId,
+      role: "owner",
+      status: "active",
+      createdAt: now,
+    })
+    .run();
+  return userId;
+}
+
+/** Look up the user's single workspace id (Stage 1 invariant). */
+export function workspaceIdOf(db: DB, userId: number): number {
+  const row = db
+    .select({ id: workspaceMembers.workspaceId })
+    .from(workspaceMembers)
+    .where(eq(workspaceMembers.userId, userId))
+    .get();
+  if (!row) throw new Error(`no workspace for user ${userId}`);
+  return row.id;
 }
 
 /** Create a shop for `userId` with SAMPLE_TAX and set it as active. Returns the
@@ -100,10 +142,12 @@ export function createShopFor(
   opts: { name?: string; shortName?: string; color?: string | null } = {},
 ): number {
   const now = new Date();
+  const workspaceId = workspaceIdOf(db, userId);
   const inserted = db
     .insert(shops)
     .values({
       userId,
+      workspaceId,
       name: opts.name ?? "Тестовый магазин",
       shortName: opts.shortName ?? `T${userId % 9}`,
       color: opts.color ?? null,
