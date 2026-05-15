@@ -10,9 +10,16 @@ const OzonImportModal = lazy(() => import("./components/OzonImportModal"));
 const FinanceTab = lazy(() => import("./components/FinanceTab"));
 const AdminPage = lazy(() => import("./components/admin/AdminPage"));
 const ShopsModal = lazy(() => import("./components/ShopsModal"));
+const TeamPage = lazy(() => import("./components/TeamPage"));
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
 import { useAuth } from "./contexts/useAuth";
-import { Package, ShieldCheck, Wallet, Settings as SettingsIcon } from "lucide-react";
+import {
+  Package,
+  ShieldCheck,
+  Wallet,
+  Settings as SettingsIcon,
+  Users,
+} from "lucide-react";
 import type { FilterValue } from "./components/ChannelFilter";
 import { calculateRow } from "./lib/calc";
 import type {
@@ -103,7 +110,7 @@ const uniqueArticleId = (base: string, taken: Set<string>): string => {
   return `${base}-${Date.now()}`;
 };
 
-type TabId = "calc" | "finance" | "admin";
+type TabId = "calc" | "finance" | "team" | "admin";
 
 const BASE_TABS = [
   {
@@ -119,6 +126,14 @@ const BASE_TABS = [
     label: (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
         <Wallet size={16} /> Финансы
+      </span>
+    ),
+  },
+  {
+    id: "team" as const,
+    label: (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <Users size={16} /> Команда
       </span>
     ),
   },
@@ -215,7 +230,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === "calc" || v === "finance" || v === "admin") return v;
+      if (v === "calc" || v === "finance" || v === "team" || v === "admin")
+        return v;
     } catch {
       /* ignore */
     }
@@ -785,6 +801,12 @@ export default function App() {
                 }
               }}
             />
+          </Suspense>
+        )}
+
+        {activeTab === "team" && (
+          <Suspense fallback={<p className="muted">Загрузка…</p>}>
+            <TeamPage />
           </Suspense>
         )}
 
