@@ -16,6 +16,7 @@ import { Package, ShieldCheck, Wallet, Settings as SettingsIcon } from "lucide-r
 import type { FilterValue } from "./components/ChannelFilter";
 import { calculateRow } from "./lib/calc";
 import type {
+  OzonCommissions,
   ProductInput,
   ProductRow,
   References,
@@ -431,28 +432,62 @@ export default function App() {
     };
   }, [activeShop]);
 
+  // Per-row memoization: edit one row → only that row recomputes. Cache key
+  // is reference identity of (input, tax, ozonCommissions, refs). When the row
+  // object survives an Array.map, its `.input` reference is preserved and we
+  // reuse the prior result; on edit, App.tsx replaces just that one row.
+  // useState (vs useRef) so React Compiler treats this as plain state.
+  const [cache] = useState(
+    () =>
+      new Map<
+        string,
+        {
+          input: ProductInput;
+          tax: TaxSettings;
+          oz: OzonCommissions | null;
+          refs: References;
+          result: RowResult;
+        }
+      >(),
+  );
   const results = useMemo(() => {
     const map = new Map<string, RowResult>();
     if (!refs) return map;
+    const alive = new Set<string>();
     for (const row of rows) {
+      alive.add(row.id);
       const tax = taxByShop.get(row.shopId);
       if (!tax) {
         map.set(row.id, { error: "магазин не найден" });
         continue;
       }
-      try {
-        map.set(
-          row.id,
-          calculateRow(row.input, tax, refs, {
-            ozonCommissions: row.ozonCommissions ?? null,
-          }),
-        );
-      } catch (e) {
-        map.set(row.id, { error: (e as Error).message });
+      const oz = row.ozonCommissions ?? null;
+      const cached = cache.get(row.id);
+      if (
+        cached &&
+        cached.input === row.input &&
+        cached.tax === tax &&
+        cached.oz === oz &&
+        cached.refs === refs
+      ) {
+        map.set(row.id, cached.result);
+        continue;
       }
+      let result: RowResult;
+      try {
+        result = calculateRow(row.input, tax, refs, { ozonCommissions: oz });
+      } catch (e) {
+        result = { error: (e as Error).message };
+      }
+      cache.set(row.id, { input: row.input, tax, oz, refs, result });
+      map.set(row.id, result);
+    }
+    // Evict entries for deleted rows so the cache doesn't grow unbounded.
+    for (const id of cache.keys()) {
+      if (!alive.has(id)) cache.delete(id);
     }
     return map;
-  }, [rows, taxByShop, refs]);
+  }, [rows, taxByShop, refs, cache]);
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -601,8 +636,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "calc" && (
-          <>
+        <div style={{ display: activeTab === "calc" ? undefined : "none" }}>
 
             <ShopSettings
               value={taxSettings}
@@ -716,7 +750,7 @@ export default function App() {
               />
             </div>
 
-            {selectedRow && selectedResult && (
+            {selectedRow && selectedResult && activeTab === "calc" && (
               <Suspense fallback={null}>
                 <ProductDrawer
                   input={selectedRow.input}
@@ -732,8 +766,8 @@ export default function App() {
                 />
               </Suspense>
             )}
-          </>
-        )}
+        </div>
+
 
         {activeTab === "finance" && (
           <Suspense fallback={<p className="muted">Загрузка…</p>}>
