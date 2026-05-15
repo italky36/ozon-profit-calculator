@@ -7,6 +7,7 @@ import {
   shops,
   userSettings,
   users,
+  workspaceInvites,
   workspaceMembers,
   workspaces,
 } from "../db/schema";
@@ -182,19 +183,38 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       workspaceName?: unknown;
       inviteToken?: unknown;
     };
-    if (typeof r.inviteToken === "string" && r.inviteToken.trim()) {
-      // Stage 4 territory — invite-flow not implemented yet.
-      return c.json(
-        { error: "Регистрация по приглашению пока не поддерживается" },
-        501,
-      );
+    const inviteToken =
+      typeof r.inviteToken === "string" && r.inviteToken.trim()
+        ? r.inviteToken.trim()
+        : null;
+
+    let invite:
+      | typeof workspaceInvites.$inferSelect
+      | null = null;
+    if (inviteToken) {
+      const inv = db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.token, inviteToken))
+        .get();
+      if (!inv)
+        return c.json({ error: "Приглашение не найдено" }, 404);
+      if (inv.usedAt)
+        return c.json({ error: "Приглашение уже использовано" }, 410);
+      if (inv.expiresAt.getTime() < Date.now())
+        return c.json({ error: "Приглашение просрочено" }, 410);
+      invite = inv;
     }
-    const workspaceName =
-      typeof r.workspaceName === "string" ? r.workspaceName.trim() : "";
-    if (!workspaceName)
-      return c.json({ error: "Укажите название команды" }, 400);
-    if (workspaceName.length > 80)
-      return c.json({ error: "Название команды не длиннее 80 символов" }, 400);
+
+    let workspaceName = "";
+    if (!invite) {
+      workspaceName =
+        typeof r.workspaceName === "string" ? r.workspaceName.trim() : "";
+      if (!workspaceName)
+        return c.json({ error: "Укажите название команды" }, 400);
+      if (workspaceName.length > 80)
+        return c.json({ error: "Название команды не длиннее 80 символов" }, 400);
+    }
 
     const existing = db
       .select({ id: users.id })
@@ -207,7 +227,8 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const now = new Date();
     const defaultTax = readDefaultTaxSettings(db);
 
-    // user → workspace → owner-membership → default shop, atomically.
+    // user → (workspace + owner-membership + default shop) OR (join via invite),
+    // atomically.
     const userId = db.transaction((tx) => {
       const u = tx
         .insert(users)
@@ -222,50 +243,87 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         .returning({ id: users.id })
         .get();
 
-      const slug = buildPersonalSlug(parsed.email, u.id);
-      const ws = tx
-        .insert(workspaces)
-        .values({
-          name: workspaceName,
-          slug,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: workspaces.id })
-        .get();
+      if (invite) {
+        // Join existing workspace via invite.
+        tx.insert(workspaceMembers)
+          .values({
+            workspaceId: invite.workspaceId,
+            userId: u.id,
+            role: invite.role,
+            status: "active",
+            createdAt: now,
+          })
+          .run();
+        tx.update(workspaceInvites)
+          .set({ usedAt: now })
+          .where(eq(workspaceInvites.token, invite.token))
+          .run();
+        const firstShop = tx
+          .select({ id: shops.id })
+          .from(shops)
+          .where(eq(shops.workspaceId, invite.workspaceId))
+          .get();
+        tx.insert(userSettings)
+          .values({
+            userId: u.id,
+            activeShopId: firstShop?.id ?? null,
+            updatedAt: now,
+          })
+          .run();
+      } else {
+        const slug = buildPersonalSlug(parsed.email, u.id);
+        const ws = tx
+          .insert(workspaces)
+          .values({
+            name: workspaceName,
+            slug,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning({ id: workspaces.id })
+          .get();
 
-      tx.insert(workspaceMembers)
-        .values({
-          workspaceId: ws.id,
-          userId: u.id,
-          role: "owner",
-          status: "active",
-          createdAt: now,
-        })
-        .run();
+        tx.insert(workspaceMembers)
+          .values({
+            workspaceId: ws.id,
+            userId: u.id,
+            role: "owner",
+            status: "active",
+            createdAt: now,
+          })
+          .run();
 
-      const shop = tx
-        .insert(shops)
-        .values({
-          workspaceId: ws.id,
-          name: "Мой магазин",
-          shortName: "M1",
-          color: null,
-          taxSettings: defaultTax,
-          autoRefreshEnabled: false,
-          autoRefreshIntervalMin: 30,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: shops.id })
-        .get();
+        const shop = tx
+          .insert(shops)
+          .values({
+            workspaceId: ws.id,
+            name: "Мой магазин",
+            shortName: "M1",
+            color: null,
+            taxSettings: defaultTax,
+            autoRefreshEnabled: false,
+            autoRefreshIntervalMin: 30,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning({ id: shops.id })
+          .get();
 
-      tx.insert(userSettings)
-        .values({ userId: u.id, activeShopId: shop.id, updatedAt: now })
-        .run();
+        tx.insert(userSettings)
+          .values({ userId: u.id, activeShopId: shop.id, updatedAt: now })
+          .run();
+      }
 
       return u.id;
     });
+
+    // Sanity guard: if invite email differed from registration email, surface
+    // a hint in logs (we still accept — the link grants access regardless).
+    if (invite && invite.email.toLowerCase() !== parsed.email.toLowerCase()) {
+      console.warn(
+        `[auth] invite ${invite.token} consumed by ${parsed.email} (was for ${invite.email})`,
+      );
+    }
 
     const { token } = createVerificationToken(db, userId);
     try {

@@ -9,6 +9,7 @@ export interface AuthContextValue {
     email: string,
     password: string,
     workspaceName: string,
+    inviteToken?: string,
   ) => Promise<{ message: string }>;
   verifyEmail: (token: string) => Promise<void>;
   logout: () => Promise<void>;

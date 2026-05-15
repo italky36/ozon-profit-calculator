@@ -16,6 +16,7 @@ import type { ImportContext } from "./routes/import";
 import { financeRoutes } from "./routes/finance";
 import { analyticsRoutes } from "./routes/analytics";
 import { exportRoutes } from "./routes/export";
+import { inviteRoutes, workspaceRoutes } from "./routes/workspace";
 import { getDb } from "./db/client";
 import { setEmailClientDb } from "./email/client";
 
@@ -36,6 +37,9 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
   api.use("*", sessionMiddleware(db));
   api.route("/auth", authRoutes(db));
   api.route("/admin", adminRoutes(db));
+  // /api/invites/:token is public (GET) — must be mounted BEFORE requireAuth.
+  // The accept handler does its own auth check.
+  api.route("/invites", inviteRoutes(db));
   api.use("*", requireAuth);
   api.route("/refs", refsRoutes(db));
   api.route("/shops", shopsRoutes(db));
@@ -46,6 +50,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
   api.route("/finance", financeRoutes(db));
   api.route("/analytics", analyticsRoutes(db));
   api.route("/export", exportRoutes());
+  api.route("/workspace", workspaceRoutes(db));
 
   app.route("/api", api);
   return app;

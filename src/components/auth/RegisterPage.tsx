@@ -1,42 +1,113 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api, type PublicInviteInfo } from "../../api";
 import { useAuth } from "../../contexts/useAuth";
-import { navigate } from "../../lib/router";
+import { getQueryParam, navigate } from "../../lib/router";
 import AuthShell, { Field, FormError, FormNotice } from "./AuthShell";
 import { useSubmit } from "./useSubmit";
 
+const ROLE_LABEL: Record<string, string> = {
+  owner: "владелец",
+  manager: "менеджер",
+  member: "участник",
+};
+
 export default function RegisterPage() {
   const { register } = useAuth();
+  const inviteToken = getQueryParam("invite");
   const [email, setEmail] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [invite, setInvite] = useState<PublicInviteInfo | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteLoading, setInviteLoading] = useState<boolean>(!!inviteToken);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    void api.invites
+      .lookup(inviteToken)
+      .then((info) => {
+        setInvite(info);
+        setEmail(info.email);
+      })
+      .catch((e: Error) => setInviteError(e.message))
+      .finally(() => setInviteLoading(false));
+  }, [inviteToken]);
 
   const { submitting, onSubmit } = useSubmit(async () => {
-    if (!workspaceName.trim()) throw new Error("Укажите название команды");
-    if (password.length < 8) throw new Error("Пароль должен быть минимум 8 символов");
+    if (!inviteToken && !workspaceName.trim())
+      throw new Error("Укажите название команды");
+    if (password.length < 8)
+      throw new Error("Пароль должен быть минимум 8 символов");
     if (password !== confirm) throw new Error("Пароли не совпадают");
-    const res = await register(email, password, workspaceName.trim());
-    setNotice(res.message || "Регистрация успешна. Проверьте почту для подтверждения.");
-    setEmail("");
-    setWorkspaceName("");
+    const res = await register(
+      email,
+      password,
+      workspaceName.trim(),
+      inviteToken ?? undefined,
+    );
+    setNotice(
+      res.message || "Регистрация успешна. Проверьте почту для подтверждения.",
+    );
     setPassword("");
     setConfirm("");
   }, setError);
 
+  if (inviteToken && inviteLoading) {
+    return (
+      <AuthShell title="Приглашение" subtitle="Проверяем ссылку…">
+        <p className="muted">Загрузка…</p>
+      </AuthShell>
+    );
+  }
+
+  if (inviteToken && inviteError) {
+    return (
+      <AuthShell
+        title="Приглашение"
+        subtitle="Ссылка недействительна"
+        footer={
+          <>
+            <a
+              href="/login"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate("/login");
+              }}
+              style={{ color: "var(--accent)", fontWeight: 600 }}
+            >
+              Перейти ко входу
+            </a>
+          </>
+        }
+      >
+        <FormError message={inviteError} />
+      </AuthShell>
+    );
+  }
+
   return (
     <AuthShell
-      title="Регистрация"
-      subtitle="Калькулятор прибыли продавца Ozon"
+      title={invite ? "Регистрация по приглашению" : "Регистрация"}
+      subtitle={
+        invite
+          ? `Вы вступаете в «${invite.workspaceName}» как ${ROLE_LABEL[invite.role] ?? invite.role}`
+          : "Калькулятор прибыли продавца Ozon"
+      }
       footer={
         <>
           Уже есть аккаунт?{" "}
           <a
-            href="/login"
+            href={inviteToken ? `/login?invite=${encodeURIComponent(inviteToken)}` : "/login"}
             onClick={(e) => {
               e.preventDefault();
-              navigate("/login");
+              navigate(
+                inviteToken
+                  ? `/login?invite=${encodeURIComponent(inviteToken)}`
+                  : "/login",
+              );
             }}
             style={{ color: "var(--accent)", fontWeight: 600 }}
           >
@@ -55,16 +126,19 @@ export default function RegisterPage() {
           onChange={setEmail}
           autoComplete="email"
           required
+          disabled={!!invite}
         />
-        <Field
-          label="Название команды"
-          type="text"
-          value={workspaceName}
-          onChange={setWorkspaceName}
-          autoComplete="organization"
-          maxLength={80}
-          required
-        />
+        {!invite && (
+          <Field
+            label="Название команды"
+            type="text"
+            value={workspaceName}
+            onChange={setWorkspaceName}
+            autoComplete="organization"
+            maxLength={80}
+            required
+          />
+        )}
         <Field
           label="Пароль (минимум 8 символов)"
           type="password"

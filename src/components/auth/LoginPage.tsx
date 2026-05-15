@@ -1,17 +1,22 @@
 import { useState } from "react";
 import { useAuth } from "../../contexts/useAuth";
-import { navigate } from "../../lib/router";
+import { getQueryParam, navigate } from "../../lib/router";
 import AuthShell, { Field, FormError } from "./AuthShell";
 import { useSubmit } from "./useSubmit";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const inviteToken = getQueryParam("invite");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const { submitting, onSubmit } = useSubmit(async () => {
     await login(email, password);
-    navigate("/");
+    if (inviteToken) {
+      navigate(`/invite/${encodeURIComponent(inviteToken)}`);
+    } else {
+      navigate("/");
+    }
   }, setError);
 
   return (
@@ -22,10 +27,14 @@ export default function LoginPage() {
         <>
           Нет аккаунта?{" "}
           <a
-            href="/register"
+            href={inviteToken ? `/register?invite=${encodeURIComponent(inviteToken)}` : "/register"}
             onClick={(e) => {
               e.preventDefault();
-              navigate("/register");
+              navigate(
+                inviteToken
+                  ? `/register?invite=${encodeURIComponent(inviteToken)}`
+                  : "/register",
+              );
             }}
             style={{ color: "var(--accent)", fontWeight: 600 }}
           >

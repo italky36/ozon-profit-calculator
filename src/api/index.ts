@@ -248,6 +248,44 @@ export interface AdminShopCandidate {
   isBlocked: boolean;
 }
 
+export type WorkspaceRole = "owner" | "manager" | "member";
+
+export interface WorkspaceMember {
+  userId: number;
+  email: string;
+  role: WorkspaceRole;
+  status: "active" | "suspended";
+  isYou: boolean;
+  createdAt: number;
+}
+
+export interface WorkspaceInfo {
+  id: number;
+  name: string;
+  slug: string;
+  createdAt: number;
+  updatedAt: number;
+  role: WorkspaceRole;
+  members: WorkspaceMember[];
+}
+
+export interface WorkspaceInviteRow {
+  token: string;
+  email: string;
+  role: WorkspaceRole;
+  invitedBy: { id: number; email: string };
+  expiresAt: number;
+  createdAt: number;
+}
+
+export interface PublicInviteInfo {
+  workspaceName: string;
+  email: string;
+  role: WorkspaceRole;
+  inviterEmail: string;
+  expiresAt: number;
+}
+
 export const api = {
   auth: {
     me: () => apiFetch<{ user: AuthUser }>("/auth/me"),
@@ -256,10 +294,19 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ email, password }),
       }),
-    register: (email: string, password: string, workspaceName: string) =>
+    register: (
+      email: string,
+      password: string,
+      workspaceName: string,
+      inviteToken?: string,
+    ) =>
       apiFetch<{ message: string }>("/auth/register", {
         method: "POST",
-        body: JSON.stringify({ email, password, workspaceName }),
+        body: JSON.stringify(
+          inviteToken
+            ? { email, password, inviteToken }
+            : { email, password, workspaceName },
+        ),
       }),
     verifyEmail: (token: string) =>
       apiFetch<{ user: AuthUser }>("/auth/verify-email", {
@@ -621,6 +668,44 @@ export const api = {
         `/analytics/realized-margin${qs ? `?${qs}` : ""}`,
       );
     },
+  },
+  workspace: {
+    me: () => apiFetch<WorkspaceInfo>("/workspace/me"),
+    update: (patch: { name?: string; slug?: string }) =>
+      apiFetch<{ id: number; name: string; slug: string }>("/workspace/me", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      }),
+    listInvites: () =>
+      apiFetch<WorkspaceInviteRow[]>("/workspace/me/invites"),
+    createInvite: (email: string, role: WorkspaceRole) =>
+      apiFetch<WorkspaceInviteRow>("/workspace/me/invites", {
+        method: "POST",
+        body: JSON.stringify({ email, role }),
+      }),
+    revokeInvite: (token: string) =>
+      apiFetch<{ ok: true }>(
+        `/workspace/me/invites/${encodeURIComponent(token)}`,
+        { method: "DELETE" },
+      ),
+    setMemberRole: (userId: number, role: WorkspaceRole) =>
+      apiFetch<{ ok: true; userId: number; role: WorkspaceRole }>(
+        `/workspace/me/members/${userId}`,
+        { method: "PATCH", body: JSON.stringify({ role }) },
+      ),
+    removeMember: (userId: number) =>
+      apiFetch<{ ok: true }>(`/workspace/me/members/${userId}`, {
+        method: "DELETE",
+      }),
+  },
+  invites: {
+    lookup: (token: string) =>
+      apiFetch<PublicInviteInfo>(`/invites/${encodeURIComponent(token)}`),
+    accept: (token: string) =>
+      apiFetch<{ ok: true; workspaceId: number; role: WorkspaceRole }>(
+        `/invites/${encodeURIComponent(token)}/accept`,
+        { method: "POST" },
+      ),
   },
 };
 

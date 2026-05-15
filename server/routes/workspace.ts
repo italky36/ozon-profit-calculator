@@ -1,0 +1,591 @@
+import { randomBytes } from "node:crypto";
+import { Hono } from "hono";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import type { DB } from "../db/client";
+import {
+  shops,
+  userSettings,
+  users,
+  workspaceInvites,
+  workspaceMembers,
+  workspaces,
+} from "../db/schema";
+import type { SessionUser, WorkspaceRole } from "../auth/utils";
+import { canManageWorkspace, requireAuth } from "../middleware/session";
+import { getEmailClient } from "../email/client";
+import { generateInviteEmail } from "../email/templates";
+
+type Env = { Variables: { user: SessionUser } };
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ALLOWED_ROLES: readonly WorkspaceRole[] = ["owner", "manager", "member"];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+const newToken = () => randomBytes(32).toString("hex");
+
+function inviteLink(token: string): string {
+  const base = process.env.APP_URL ?? "http://localhost:5173";
+  return `${base}/invite/${encodeURIComponent(token)}`;
+}
+
+interface MemberOut {
+  userId: number;
+  email: string;
+  role: WorkspaceRole;
+  status: "active" | "suspended";
+  isYou: boolean;
+  createdAt: number;
+}
+
+interface InviteOut {
+  token: string;
+  email: string;
+  role: WorkspaceRole;
+  invitedBy: { id: number; email: string };
+  expiresAt: number;
+  createdAt: number;
+}
+
+function listMembers(db: DB, workspaceId: number, currentUserId: number): MemberOut[] {
+  const rows = db
+    .select({
+      userId: workspaceMembers.userId,
+      email: users.email,
+      role: workspaceMembers.role,
+      status: workspaceMembers.status,
+      createdAt: workspaceMembers.createdAt,
+    })
+    .from(workspaceMembers)
+    .innerJoin(users, eq(users.id, workspaceMembers.userId))
+    .where(eq(workspaceMembers.workspaceId, workspaceId))
+    .all();
+  return rows
+    .map((r) => ({
+      userId: r.userId,
+      email: r.email,
+      role: r.role,
+      status: r.status,
+      isYou: r.userId === currentUserId,
+      createdAt: r.createdAt.getTime(),
+    }))
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
+  const rows = db
+    .select({
+      token: workspaceInvites.token,
+      email: workspaceInvites.email,
+      role: workspaceInvites.role,
+      expiresAt: workspaceInvites.expiresAt,
+      createdAt: workspaceInvites.createdAt,
+      invitedById: users.id,
+      invitedByEmail: users.email,
+    })
+    .from(workspaceInvites)
+    .innerJoin(users, eq(users.id, workspaceInvites.invitedBy))
+    .where(
+      and(
+        eq(workspaceInvites.workspaceId, workspaceId),
+        isNull(workspaceInvites.usedAt),
+      ),
+    )
+    .all();
+  const now = Date.now();
+  return rows
+    .filter((r) => r.expiresAt.getTime() > now)
+    .map((r) => ({
+      token: r.token,
+      email: r.email,
+      role: r.role,
+      invitedBy: { id: r.invitedById, email: r.invitedByEmail },
+      expiresAt: r.expiresAt.getTime(),
+      createdAt: r.createdAt.getTime(),
+    }))
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function ownerCount(db: DB, workspaceId: number): number {
+  const row = db
+    .select({ n: sql<number>`count(*)` })
+    .from(workspaceMembers)
+    .where(
+      and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.role, "owner"),
+      ),
+    )
+    .get();
+  return row?.n ?? 0;
+}
+
+/** Per-workspace «team» management routes. Mount under requireAuth. */
+export function workspaceRoutes(db: DB): Hono<Env> {
+  const app = new Hono<Env>();
+
+  app.get("/me", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId)
+      return c.json({ error: "У вас нет команды" }, 404);
+    const ws = db
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, user.workspaceId))
+      .get();
+    if (!ws) return c.json({ error: "Команда не найдена" }, 404);
+    return c.json({
+      id: ws.id,
+      name: ws.name,
+      slug: ws.slug,
+      createdAt: ws.createdAt.getTime(),
+      updatedAt: ws.updatedAt.getTime(),
+      role: user.workspaceRole,
+      members: listMembers(db, ws.id, user.id),
+    });
+  });
+
+  app.patch("/me", async (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (user.workspaceRole !== "owner")
+      return c.json({ error: "Только владелец может изменять команду" }, 403);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { name?: unknown; slug?: unknown };
+
+    const patch: Partial<typeof workspaces.$inferInsert> = {};
+    if (r.name !== undefined) {
+      if (typeof r.name !== "string" || !r.name.trim())
+        return c.json({ error: "Имя команды не может быть пустым" }, 400);
+      if (r.name.trim().length > 80)
+        return c.json({ error: "Имя команды не длиннее 80 символов" }, 400);
+      patch.name = r.name.trim();
+    }
+    if (r.slug !== undefined) {
+      if (typeof r.slug !== "string")
+        return c.json({ error: "Некорректный slug" }, 400);
+      const slug = r.slug.trim().toLowerCase();
+      if (slug.length < 3 || slug.length > 40 || !SLUG_RE.test(slug))
+        return c.json(
+          {
+            error:
+              "Slug: 3–40 символов, латиница/цифры/дефис, не начинается и не заканчивается дефисом",
+          },
+          400,
+        );
+      const clash = db
+        .select({ id: workspaces.id })
+        .from(workspaces)
+        .where(and(eq(workspaces.slug, slug), sql`${workspaces.id} != ${user.workspaceId}`))
+        .get();
+      if (clash) return c.json({ error: "Такой slug уже занят" }, 409);
+      patch.slug = slug;
+    }
+
+    if (Object.keys(patch).length === 0)
+      return c.json({ error: "Нечего обновлять" }, 400);
+    patch.updatedAt = new Date();
+    db.update(workspaces).set(patch).where(eq(workspaces.id, user.workspaceId)).run();
+
+    const ws = db
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, user.workspaceId))
+      .get()!;
+    return c.json({
+      id: ws.id,
+      name: ws.name,
+      slug: ws.slug,
+      createdAt: ws.createdAt.getTime(),
+      updatedAt: ws.updatedAt.getTime(),
+    });
+  });
+
+  // === Invites ===
+
+  app.get("/me/invites", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    return c.json(listPendingInvites(db, user.workspaceId));
+  });
+
+  app.post("/me/invites", async (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (!canManageWorkspace(user.workspaceRole))
+      return c.json({ error: "Только владелец или менеджер" }, 403);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { email?: unknown; role?: unknown };
+    if (typeof r.email !== "string" || !EMAIL_RE.test(r.email))
+      return c.json({ error: "Некорректный email" }, 400);
+    if (
+      typeof r.role !== "string" ||
+      !(ALLOWED_ROLES as readonly string[]).includes(r.role)
+    )
+      return c.json({ error: "Роль должна быть owner, manager или member" }, 400);
+
+    const role = r.role as WorkspaceRole;
+    if (role === "owner" && user.workspaceRole !== "owner")
+      return c.json({ error: "Только владелец может приглашать владельца" }, 403);
+
+    const email = r.email.trim().toLowerCase();
+
+    // Already a member of THIS workspace?
+    const existingMember = db
+      .select({ userId: workspaceMembers.userId })
+      .from(workspaceMembers)
+      .innerJoin(users, eq(users.id, workspaceMembers.userId))
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(users.email, email),
+        ),
+      )
+      .get();
+    if (existingMember)
+      return c.json({ error: "Этот пользователь уже в вашей команде" }, 409);
+
+    // Pending invite for the same email? Replace it.
+    db.delete(workspaceInvites)
+      .where(
+        and(
+          eq(workspaceInvites.workspaceId, user.workspaceId),
+          eq(workspaceInvites.email, email),
+          isNull(workspaceInvites.usedAt),
+        ),
+      )
+      .run();
+
+    const now = new Date();
+    const token = newToken();
+    const expiresAt = new Date(now.getTime() + INVITE_TTL_MS);
+    db.insert(workspaceInvites)
+      .values({
+        token,
+        workspaceId: user.workspaceId,
+        email,
+        role,
+        invitedBy: user.id,
+        expiresAt,
+        usedAt: null,
+        createdAt: now,
+      })
+      .run();
+
+    const ws = db
+      .select({ name: workspaces.name })
+      .from(workspaces)
+      .where(eq(workspaces.id, user.workspaceId))
+      .get();
+
+    try {
+      await getEmailClient().send(
+        generateInviteEmail({
+          to: email,
+          workspaceName: ws?.name ?? "Команда",
+          inviterEmail: user.email,
+          role,
+          link: inviteLink(token),
+        }),
+      );
+    } catch (e) {
+      console.error("[workspace] failed to send invite email:", e);
+    }
+
+    return c.json(
+      {
+        token,
+        email,
+        role,
+        invitedBy: { id: user.id, email: user.email },
+        expiresAt: expiresAt.getTime(),
+        createdAt: now.getTime(),
+      },
+      201,
+    );
+  });
+
+  app.delete("/me/invites/:token", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (!canManageWorkspace(user.workspaceRole))
+      return c.json({ error: "Только владелец или менеджер" }, 403);
+
+    const token = c.req.param("token");
+    const result = db
+      .delete(workspaceInvites)
+      .where(
+        and(
+          eq(workspaceInvites.token, token),
+          eq(workspaceInvites.workspaceId, user.workspaceId),
+        ),
+      )
+      .run();
+    if (result.changes === 0)
+      return c.json({ error: "Приглашение не найдено" }, 404);
+    return c.json({ ok: true });
+  });
+
+  // === Members ===
+
+  app.patch("/me/members/:userId", async (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (user.workspaceRole !== "owner")
+      return c.json({ error: "Только владелец может менять роли" }, 403);
+
+    const targetId = Number(c.req.param("userId"));
+    if (!Number.isInteger(targetId) || targetId <= 0)
+      return c.json({ error: "invalid id" }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { role?: unknown };
+    if (
+      typeof r.role !== "string" ||
+      !(ALLOWED_ROLES as readonly string[]).includes(r.role)
+    )
+      return c.json({ error: "Роль должна быть owner, manager или member" }, 400);
+    const nextRole = r.role as WorkspaceRole;
+
+    const target = db
+      .select()
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .get();
+    if (!target) return c.json({ error: "Участник не найден" }, 404);
+
+    if (
+      target.role === "owner" &&
+      nextRole !== "owner" &&
+      ownerCount(db, user.workspaceId) <= 1
+    )
+      return c.json(
+        { error: "Нельзя понизить последнего владельца команды" },
+        400,
+      );
+
+    db.update(workspaceMembers)
+      .set({ role: nextRole })
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .run();
+    return c.json({ ok: true, userId: targetId, role: nextRole });
+  });
+
+  app.delete("/me/members/:userId", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (!canManageWorkspace(user.workspaceRole))
+      return c.json({ error: "Только владелец или менеджер" }, 403);
+
+    const targetId = Number(c.req.param("userId"));
+    if (!Number.isInteger(targetId) || targetId <= 0)
+      return c.json({ error: "invalid id" }, 400);
+
+    const target = db
+      .select()
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .get();
+    if (!target) return c.json({ error: "Участник не найден" }, 404);
+
+    if (targetId === user.id)
+      return c.json(
+        {
+          error:
+            "Нельзя удалить самого себя. Передайте права владельцу или удалите команду.",
+        },
+        400,
+      );
+
+    if (
+      target.role === "owner" &&
+      ownerCount(db, user.workspaceId) <= 1
+    )
+      return c.json(
+        { error: "Нельзя удалить последнего владельца команды" },
+        400,
+      );
+
+    if (target.role === "owner" && user.workspaceRole !== "owner")
+      return c.json({ error: "Только владелец может удалить владельца" }, 403);
+
+    db.delete(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .run();
+
+    // Reset their active_shop_id pointer if it referenced a shop in this ws.
+    db.update(userSettings)
+      .set({ activeShopId: null, updatedAt: new Date() })
+      .where(eq(userSettings.userId, targetId))
+      .run();
+
+    return c.json({ ok: true });
+  });
+
+  return app;
+}
+
+/** Public-ish invite routes:
+ *  - GET  /api/invites/:token       — public lookup (no auth)
+ *  - POST /api/invites/:token/accept — requires session, joins workspace
+ * Mount BEFORE the global requireAuth gate so the GET works for anonymous
+ * users coming from an email link. accept() does its own auth check. */
+export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }> {
+  const app = new Hono<{ Variables: { user?: SessionUser } }>();
+
+  app.get("/:token", (c) => {
+    const token = c.req.param("token");
+    const inv = db
+      .select({
+        token: workspaceInvites.token,
+        email: workspaceInvites.email,
+        role: workspaceInvites.role,
+        expiresAt: workspaceInvites.expiresAt,
+        usedAt: workspaceInvites.usedAt,
+        workspaceId: workspaceInvites.workspaceId,
+        workspaceName: workspaces.name,
+        inviterEmail: users.email,
+      })
+      .from(workspaceInvites)
+      .innerJoin(workspaces, eq(workspaces.id, workspaceInvites.workspaceId))
+      .innerJoin(users, eq(users.id, workspaceInvites.invitedBy))
+      .where(eq(workspaceInvites.token, token))
+      .get();
+    if (!inv) return c.json({ error: "Приглашение не найдено" }, 404);
+    if (inv.usedAt)
+      return c.json({ error: "Приглашение уже использовано" }, 410);
+    if (inv.expiresAt.getTime() < Date.now())
+      return c.json({ error: "Приглашение просрочено" }, 410);
+    return c.json({
+      workspaceName: inv.workspaceName,
+      email: inv.email,
+      role: inv.role,
+      inviterEmail: inv.inviterEmail,
+      expiresAt: inv.expiresAt.getTime(),
+    });
+  });
+
+  app.post("/:token/accept", requireAuth, (c) => {
+    const user = c.get("user")!;
+    const token = c.req.param("token");
+
+    const inv = db
+      .select()
+      .from(workspaceInvites)
+      .where(eq(workspaceInvites.token, token))
+      .get();
+    if (!inv) return c.json({ error: "Приглашение не найдено" }, 404);
+    if (inv.usedAt)
+      return c.json({ error: "Приглашение уже использовано" }, 410);
+    if (inv.expiresAt.getTime() < Date.now())
+      return c.json({ error: "Приглашение просрочено" }, 410);
+
+    // Already in a workspace?
+    const existing = db
+      .select({ workspaceId: workspaceMembers.workspaceId })
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.userId, user.id))
+      .get();
+    if (existing) {
+      if (existing.workspaceId === inv.workspaceId) {
+        // Idempotent: same workspace → just consume the invite.
+        db.update(workspaceInvites)
+          .set({ usedAt: new Date() })
+          .where(eq(workspaceInvites.token, token))
+          .run();
+        return c.json({ ok: true, workspaceId: inv.workspaceId });
+      }
+      return c.json(
+        {
+          error:
+            "Вы уже состоите в другой команде. Покиньте её, прежде чем принять это приглашение.",
+        },
+        409,
+      );
+    }
+
+    const now = new Date();
+    db.transaction((tx) => {
+      tx.insert(workspaceMembers)
+        .values({
+          workspaceId: inv.workspaceId,
+          userId: user.id,
+          role: inv.role,
+          status: "active",
+          createdAt: now,
+        })
+        .run();
+      tx.update(workspaceInvites)
+        .set({ usedAt: now })
+        .where(eq(workspaceInvites.token, token))
+        .run();
+
+      // Set active shop to first one of the workspace, if any.
+      const firstShop = tx
+        .select({ id: shops.id })
+        .from(shops)
+        .where(eq(shops.workspaceId, inv.workspaceId))
+        .get();
+      const settings = tx
+        .select({ id: userSettings.id })
+        .from(userSettings)
+        .where(eq(userSettings.userId, user.id))
+        .get();
+      if (settings) {
+        tx.update(userSettings)
+          .set({ activeShopId: firstShop?.id ?? null, updatedAt: now })
+          .where(eq(userSettings.userId, user.id))
+          .run();
+      } else {
+        tx.insert(userSettings)
+          .values({
+            userId: user.id,
+            activeShopId: firstShop?.id ?? null,
+            updatedAt: now,
+          })
+          .run();
+      }
+    });
+
+    return c.json({ ok: true, workspaceId: inv.workspaceId, role: inv.role });
+  });
+
+  return app;
+}

@@ -110,7 +110,7 @@ describe("auth routes", () => {
       expect(res.status).toBe(400);
     });
 
-    it("inviteToken is reserved for Stage 4 → 501", async () => {
+    it("unknown inviteToken → 404", async () => {
       const res = await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -120,7 +120,7 @@ describe("auth routes", () => {
           inviteToken: "deadbeef",
         }),
       });
-      expect(res.status).toBe(501);
+      expect(res.status).toBe(404);
     });
 
     it("rejects invalid email", async () => {

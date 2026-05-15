@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import App from "./App";
+import InvitePage from "./components/auth/InvitePage";
 import LoginPage from "./components/auth/LoginPage";
 import RegisterPage from "./components/auth/RegisterPage";
 import VerifyEmailPage from "./components/auth/VerifyEmailPage";
@@ -7,14 +8,18 @@ import { useAuth } from "./contexts/useAuth";
 import { navigate, usePathname } from "./lib/router";
 
 const PUBLIC_PATHS = new Set(["/login", "/register", "/verify-email"]);
+const INVITE_PREFIX = "/invite/";
 
 export default function RootRouter() {
   const { user, loading, logout } = useAuth();
   const path = usePathname();
+  const inviteToken = path.startsWith(INVITE_PREFIX)
+    ? decodeURIComponent(path.slice(INVITE_PREFIX.length))
+    : null;
 
   useEffect(() => {
     if (loading) return;
-    const isPublic = PUBLIC_PATHS.has(path);
+    const isPublic = PUBLIC_PATHS.has(path) || inviteToken !== null;
     if (!user && !isPublic) {
       navigate("/login");
       return;
@@ -22,7 +27,7 @@ export default function RootRouter() {
     if (user && (path === "/login" || path === "/register")) {
       navigate("/");
     }
-  }, [user, loading, path]);
+  }, [user, loading, path, inviteToken]);
 
   if (loading) {
     return (
@@ -39,6 +44,7 @@ export default function RootRouter() {
     );
   }
 
+  if (inviteToken) return <InvitePage token={inviteToken} />;
   if (path === "/verify-email") return <VerifyEmailPage />;
   if (path === "/login") return <LoginPage />;
   if (path === "/register") return <RegisterPage />;

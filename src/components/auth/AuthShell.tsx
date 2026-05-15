@@ -98,6 +98,7 @@ interface FieldProps {
   required?: boolean;
   minLength?: number;
   maxLength?: number;
+  disabled?: boolean;
 }
 
 export function Field({
@@ -109,6 +110,7 @@ export function Field({
   required,
   minLength,
   maxLength,
+  disabled,
 }: FieldProps) {
   const [revealed, setRevealed] = useState(false);
   const isPassword = type === "password";
@@ -127,6 +129,7 @@ export function Field({
           required={required}
           minLength={minLength}
           maxLength={maxLength}
+          disabled={disabled}
           style={{
             padding: "8px 12px",
             paddingRight: isPassword ? 40 : 12,
@@ -134,7 +137,8 @@ export function Field({
             borderRadius: 8,
             fontSize: 14,
             fontFamily: "inherit",
-            background: "#fff",
+            background: disabled ? "var(--bg, #f5f5f7)" : "#fff",
+            color: disabled ? "var(--muted)" : "inherit",
             width: "100%",
             boxSizing: "border-box",
           }}
