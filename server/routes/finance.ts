@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-or
 import { financeTransactions } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, workspaceShopIds } from "../middleware/session";
+import { resolveShopId, visibleShopIds } from "../middleware/session";
 
 const TYPES = new Set([
   "sale",
@@ -39,7 +39,7 @@ const scopeShopIds = async (
       };
     }
   }
-  return await workspaceShopIds(db, user.workspaceId);
+  return await visibleShopIds(db, user);
 };
 
 export function financeRoutes(db: DB): Hono<FinanceEnv> {
@@ -61,6 +61,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
     const filters: SQL[] = [
       inArray(financeTransactions.shopId, scope),
       eq(financeTransactions.workspaceId, user.workspaceId),
+      eq(financeTransactions.userId, user.id),
     ];
     if (fromRaw) {
       const from = new Date(fromRaw);
@@ -134,6 +135,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
     const filters: SQL[] = [
       inArray(financeTransactions.shopId, scope),
       eq(financeTransactions.workspaceId, user.workspaceId),
+      eq(financeTransactions.userId, user.id),
     ];
     if (fromRaw) {
       const from = new Date(fromRaw);
@@ -176,6 +178,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
         and(
           inArray(financeTransactions.shopId, scope),
           eq(financeTransactions.workspaceId, user.workspaceId),
+          eq(financeTransactions.userId, user.id),
         ),
       );
     return c.json({ deleted: result.changes });

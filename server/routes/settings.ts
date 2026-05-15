@@ -1,10 +1,14 @@
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { shops } from "../db/schema";
 import type { DB } from "../db/client";
 import type { TaxSettings } from "../../src/types";
 import type { SessionUser } from "../auth/utils";
-import { canManageWorkspace, resolveShopId } from "../middleware/session";
+import { resolveShopId } from "../middleware/session";
+import {
+  resolveShopSettings,
+  upsertShopUserSettings,
+} from "../settings/shopSettings";
 
 type SettingsEnv = { Variables: { user: SessionUser } };
 
@@ -62,7 +66,30 @@ const validate = (raw: unknown): TaxSettings => {
     typeof r.useClusterLogistics !== "boolean"
   )
     throw new Error("invalid useClusterLogistics");
-  return r as TaxSettings;
+  // Build a clean object: stripping `shopId` and any other request-only keys
+  // is required so the override-vs-default comparison below isn't fooled by
+  // the wrapper field the client adds.
+  const clean: TaxSettings = {
+    taxSystem: r.taxSystem,
+    damageRate: r.damageRate as number,
+    usnIncomeRate: r.usnIncomeRate as number,
+    usnIncomeMinusRate: r.usnIncomeMinusRate as number,
+    ausnIncomeRate: r.ausnIncomeRate as number,
+    ausnIncomeMinusRate: r.ausnIncomeMinusRate as number,
+    osnoOooRate: r.osnoOooRate as number,
+    osnoIpAnnualIncome: r.osnoIpAnnualIncome as number,
+    npdRate: r.npdRate as number,
+    partyExtraExpenses: r.partyExtraExpenses as number,
+    ...(r.calcMode !== undefined ? { calcMode: r.calcMode } : {}),
+    ...(r.usnVatRate !== undefined ? { usnVatRate: r.usnVatRate } : {}),
+    ...(r.defaultWhitePurchase !== undefined
+      ? { defaultWhitePurchase: r.defaultWhitePurchase }
+      : {}),
+    ...(r.useClusterLogistics !== undefined
+      ? { useClusterLogistics: r.useClusterLogistics }
+      : {}),
+  };
+  return clean;
 };
 
 const resolveShop = async (
@@ -80,32 +107,39 @@ const resolveShop = async (
   }
 };
 
-const loadShop = async (db: DB, shopId: number) => {
-  const [row] = await db
-    .select()
-    .from(shops)
-    .where(eq(shops.id, shopId));
-  return row ?? null;
+const taxSettingsEqual = (a: TaxSettings, b: TaxSettings): boolean => {
+  const norm = (x: TaxSettings) => {
+    const obj = x as unknown as Record<string, unknown>;
+    return JSON.stringify(
+      Object.keys(obj)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = obj[k];
+          return acc;
+        }, {}),
+    );
+  };
+  return norm(a) === norm(b);
 };
 
 export function settingsRoutes(db: DB): Hono<SettingsEnv> {
   const app = new Hono<SettingsEnv>();
 
-  // Shop's TaxSettings (workspace-shared — single source of truth).
+  // Effective taxSettings (user override → shop default).
   app.get("/", async (c) => {
     const user = c.get("user");
     const shop = await resolveShop(db, user, c.req.query("shopId"));
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    const row = await loadShop(db, shop);
-    if (!row) return c.json({ error: "shop not found" }, 404);
-    return c.json(row.taxSettings);
+    const eff = await resolveShopSettings(db, shop, user.id);
+    if (!eff) return c.json({ error: "shop not found" }, 404);
+    return c.json(eff.taxSettings);
   });
 
+  // PUT writes the user's per-shop override. If the incoming settings match
+  // the shop default exactly, the override is cleared (null) instead of
+  // duplicating the defaults.
   app.put("/", async (c) => {
     const user = c.get("user");
-    if (!canManageWorkspace(user.workspaceRole)) {
-      return c.json({ error: "Только owner или manager меняет настройки" }, 403);
-    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -125,34 +159,37 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
-    const now = new Date();
-    await db
-      .update(shops)
-      .set({ taxSettings: next, updatedAt: now })
-      .where(
-        and(eq(shops.id, shop), eq(shops.workspaceId, user.workspaceId)),
-      );
+    const [shopRow] = await db
+      .select({ taxSettings: shops.taxSettings })
+      .from(shops)
+      .where(eq(shops.id, shop));
+    if (!shopRow) return c.json({ error: "shop not found" }, 404);
+
+    const matchesDefault = taxSettingsEqual(next, shopRow.taxSettings);
+    await upsertShopUserSettings(db, shop, user.id, {
+      taxSettings: matchesDefault ? null : next,
+    });
     return c.json(next);
   });
 
+  // Effective auto-refresh (override → default).
   app.get("/auto-refresh", async (c) => {
     const user = c.get("user");
     const shop = await resolveShop(db, user, c.req.query("shopId"));
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
-    const row = await loadShop(db, shop);
-    if (!row) return c.json({ error: "shop not found" }, 404);
+    const eff = await resolveShopSettings(db, shop, user.id);
+    if (!eff) return c.json({ error: "shop not found" }, 404);
     return c.json({
       shopId: shop,
-      enabled: row.autoRefreshEnabled,
-      intervalMin: row.autoRefreshIntervalMin,
+      enabled: eff.autoRefreshEnabled,
+      intervalMin: eff.autoRefreshIntervalMin,
     });
   });
 
+  // Writes per-user override for auto-refresh; clears overrides when they
+  // match shop defaults (same pattern as taxSettings above).
   app.put("/auto-refresh", async (c) => {
     const user = c.get("user");
-    if (!canManageWorkspace(user.workspaceRole)) {
-      return c.json({ error: "Только owner или manager меняет настройки" }, 403);
-    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -175,17 +212,22 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
       typeof r.intervalMin === "number" && Number.isFinite(r.intervalMin)
         ? Math.max(1, Math.min(1440, Math.round(r.intervalMin)))
         : 30;
-    const now = new Date();
-    await db
-      .update(shops)
-      .set({
-        autoRefreshEnabled: r.enabled,
-        autoRefreshIntervalMin: min,
-        updatedAt: now,
+    const [shopRow] = await db
+      .select({
+        autoRefreshEnabled: shops.autoRefreshEnabled,
+        autoRefreshIntervalMin: shops.autoRefreshIntervalMin,
       })
-      .where(
-        and(eq(shops.id, shop), eq(shops.workspaceId, user.workspaceId)),
-      );
+      .from(shops)
+      .where(eq(shops.id, shop));
+    if (!shopRow) return c.json({ error: "shop not found" }, 404);
+
+    const matchesDefault =
+      r.enabled === shopRow.autoRefreshEnabled &&
+      min === shopRow.autoRefreshIntervalMin;
+    await upsertShopUserSettings(db, shop, user.id, {
+      autoRefreshEnabled: matchesDefault ? null : r.enabled,
+      autoRefreshIntervalMin: matchesDefault ? null : min,
+    });
     return c.json({ shopId: shop, enabled: r.enabled, intervalMin: min });
   });
 

@@ -183,8 +183,12 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     }> = [];
     let activeTariffSetId: number | null = null;
     if (typeof shopResult === "number") {
-      logisticsClusterTariffsRows = await loadActiveTariffRows(db, shopResult);
-      activeTariffSetId = await resolveTariffSetId(db, shopResult);
+      logisticsClusterTariffsRows = await loadActiveTariffRows(
+        db,
+        shopResult,
+        user.id,
+      );
+      activeTariffSetId = await resolveTariffSetId(db, shopResult, user.id);
     }
 
     return c.json({
@@ -377,7 +381,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     if (typeof shopResult !== "number") {
       return c.json({ count: 0, fromClusters: [], toClusters: [] });
     }
-    const rows = await loadActiveTariffRows(db, shopResult);
+    const rows = await loadActiveTariffRows(db, shopResult, user.id);
     const fromSet = new Set<string>();
     const toSet = new Set<string>();
     for (const r of rows) {

@@ -19,6 +19,8 @@ data/*.db-shm
 data/*.db-wal
 data/*.db.bak
 data/*.bak
+data/*.bak-shm
+data/*.bak-wal
 .env
 .env.local
 

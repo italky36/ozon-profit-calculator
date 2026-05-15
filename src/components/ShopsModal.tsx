@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Plus, Trash2, X } from "lucide-react";
+import { Plus, Trash2, Users, X } from "lucide-react";
 import type { Shop } from "../api";
 import { api } from "../api";
 import ShopBadge from "./ShopBadge";
+import ShopMembersModal from "./ShopMembersModal";
 
 interface Props {
   shops: Shop[];
@@ -37,6 +38,7 @@ export default function ShopsModal({
   const [drafts, setDrafts] = useState<Record<number, DraftPatch>>({});
   const [busy, setBusy] = useState<number | "new" | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [membersFor, setMembersFor] = useState<Shop | null>(null);
 
   // New-shop form.
   const [newName, setNewName] = useState("");
@@ -249,12 +251,25 @@ export default function ShopsModal({
                   <button
                     type="button"
                     className="btn-icon"
+                    disabled={!editable || busy === s.id}
+                    onClick={() => setMembersFor(s)}
+                    title={
+                      editable
+                        ? "Управлять доступом сотрудников"
+                        : "Только owner/manager управляет доступом"
+                    }
+                  >
+                    <Users size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-icon"
                     disabled={!canDelete || busy === s.id}
                     onClick={() => void deleteShop(s)}
                     title={
                       s.isOwner
                         ? "Удалить магазин"
-                        : "Удалить может только админ — владелец магазина"
+                        : "Удалить может только owner/manager команды"
                     }
                   >
                     <Trash2 size={14} />
@@ -268,9 +283,8 @@ export default function ShopsModal({
                       paddingLeft: 32,
                     }}
                   >
-                    Общий магазин — настройки задаёт администратор
-                    {s.ownerEmail ? ` (${s.ownerEmail})` : ""}. У вас личный
-                    каталог и финансы в нём.
+                    Общий магазин команды — настройки задаёт owner/manager. У
+                    вас личный каталог и финансы в нём.
                   </div>
                 )}
               </div>
@@ -355,6 +369,13 @@ export default function ShopsModal({
           </p>
         </div>
       </div>
+      {membersFor && (
+        <ShopMembersModal
+          shopId={membersFor.id}
+          shopName={membersFor.name}
+          onClose={() => setMembersFor(null)}
+        />
+      )}
     </div>
   );
 }

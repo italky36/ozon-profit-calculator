@@ -433,6 +433,28 @@ export const api = {
     /** Clear per-user overrides for this shop (revert to shop defaults). */
     resetOverrides: (id: number) =>
       apiFetch<Shop>(`/shops/${id}/reset-overrides`, { method: "POST" }),
+    members: {
+      list: (id: number) =>
+        apiFetch<{
+          assigned: Array<{
+            userId: number;
+            email: string;
+            role: WorkspaceRole;
+          }>;
+          candidates: Array<{
+            userId: number;
+            email: string;
+            role: WorkspaceRole;
+          }>;
+        }>(`/shops/${id}/members`),
+      add: (id: number, userId: number) =>
+        apiFetch<{ ok: true; alreadyVisible?: boolean }>(
+          `/shops/${id}/members`,
+          { method: "POST", body: JSON.stringify({ userId }) },
+        ),
+      remove: (id: number, userId: number) =>
+        apiFetch<void>(`/shops/${id}/members/${userId}`, { method: "DELETE" }),
+    },
   },
   products: {
     /** When shopId is provided — returns products of that shop only.

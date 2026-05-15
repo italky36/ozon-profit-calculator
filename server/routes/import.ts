@@ -4,11 +4,15 @@ import {
   financeTransactions,
   importRuns,
   products,
+  shopMember,
 } from "../db/schema";
 import type { OzonCommissions } from "../../src/types";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, workspaceShopIds } from "../middleware/session";
+import {
+  resolveShopId,
+  visibleShopIds,
+} from "../middleware/session";
 import { createOzonClient, resolveCredentials, type OzonClient } from "../ozon/client";
 import {
   getCategoryLookup,
@@ -41,7 +45,15 @@ interface RunCounters {
   unmatched: number;
 }
 
-/** Pure orchestrator — exported for tests. */
+/** Pure orchestrator — exported for tests.
+ *
+ * Catalog fields (productName/category/price/Ozon-metadata) are fanned out to
+ * EVERY user with shop_member access to the shop, so all assignees see the
+ * same catalog without each having to import themselves. The importing user
+ * additionally gets `cost_price` updated from Ozon's `net_price`; for other
+ * assignees, cost_price is left untouched on existing rows and defaulted to 0
+ * on new rows. Manual fields (sales_plan, marketing_percent, redemption,
+ * white_purchase, …) are never modified by catalog sync. */
 export async function runCatalogImport(
   db: DB,
   client: OzonClient,
@@ -56,6 +68,17 @@ export async function runCatalogImport(
     updated: 0,
     unmatched: 0,
   };
+
+  // Snapshot assignees once at the start of the run. Ensures consistent
+  // fan-out even if owner grants/revokes mid-import.
+  const assigneeRows = await db
+    .select({ userId: shopMember.userId })
+    .from(shopMember)
+    .where(eq(shopMember.shopId, shopId));
+  const assignees = new Set(assigneeRows.map((r) => r.userId));
+  // Defensive: the importer themselves must always end up with a row, even
+  // if shop_member is stale (would only happen via direct DB write).
+  assignees.add(userId);
 
   const categories = await getCategoryLookup(client);
 
@@ -72,119 +95,138 @@ export async function runCatalogImport(
 
     db.transaction((tx) => {
       for (const entry of mapped) {
-        const [existing] = tx
-          .select()
-          .from(products)
-          .where(
-            and(
-              eq(products.articleId, entry.articleId),
-              eq(products.shopId, shopId),
-            ),
-          )
-          .all();
+        const catalogIncomplete =
+          !entry.patch.category || !entry.patch.productType;
+        if (catalogIncomplete) counters.unmatched++;
 
-        if (existing) {
-          // Update only catalog fields. Local fields remain.
-          const patch: CatalogPatch & { updatedAt: Date } = {
-            ...entry.patch,
-            updatedAt: new Date(),
-          };
-          const commissionsUpdate: {
-            ozonCommissions?: OzonCommissions | null;
-            ozonCommissionsUpdatedAt?: Date | null;
-          } = entry.ozonCommissions
-            ? {
-                ozonCommissions: entry.ozonCommissions,
-                ozonCommissionsUpdatedAt: patch.updatedAt,
-              }
-            : {};
-          const costPriceUpdate =
-            entry.costPrice != null ? { costPrice: entry.costPrice } : {};
-          const skuUpdate =
-            entry.ozonSku != null ? { ozonSku: entry.ozonSku } : {};
-          const statusUpdate = {
-            ozonArchived: entry.status.archived,
-            ozonVisible: entry.status.visible,
-            ozonStatusName: entry.status.statusName,
-            ozonStatusDescription: entry.status.statusDescription,
-          };
-          tx.update(products)
-            .set({
-              productName: patch.productName,
-              category: patch.category,
-              productType: patch.productType,
-              volumeL: patch.volumeL,
-              depthMm: patch.depthMm,
-              widthMm: patch.widthMm,
-              heightMm: patch.heightMm,
-              weightG: patch.weightG,
-              vatRate: String(patch.vatRate),
-              isKgt: patch.isKgt,
-              currentPrice: patch.currentPrice,
-              regularPrice: patch.regularPrice,
-              discountPercent: patch.discountPercent,
-              ozonProductId: patch.ozonProductId,
-              updatedAt: patch.updatedAt,
-              ...costPriceUpdate,
-              ...skuUpdate,
-              ...commissionsUpdate,
-              ...statusUpdate,
-            })
+        // Track importer's view for counters (added/updated semantics).
+        let importerHadRow = false;
+
+        for (const assigneeId of assignees) {
+          const [existing] = tx
+            .select()
+            .from(products)
             .where(
               and(
                 eq(products.articleId, entry.articleId),
                 eq(products.shopId, shopId),
+                eq(products.userId, assigneeId),
               ),
             )
-            .run();
-          if (!entry.patch.category || !entry.patch.productType) {
-            counters.unmatched++;
-          }
-          counters.updated++;
-        } else {
-          if (!entry.patch.category || !entry.patch.productType) {
-            // Skip insert when category resolution failed — would later fail
-            // calc lookups and confuse the user. Log via counter.
-            counters.unmatched++;
-            continue;
-          }
-          const now = new Date();
-          tx.insert(products)
-            .values({
-              ...NEW_PRODUCT_DEFAULTS,
-              clustersCount: String(NEW_PRODUCT_DEFAULTS.clustersCount),
-              id: randomUUID(),
-              shopId,
-              workspaceId,
-              userId,
-              articleId: entry.articleId,
-              productName: entry.patch.productName,
-              category: entry.patch.category,
-              productType: entry.patch.productType,
-              volumeL: entry.patch.volumeL,
-              depthMm: entry.patch.depthMm,
-              widthMm: entry.patch.widthMm,
-              heightMm: entry.patch.heightMm,
-              weightG: entry.patch.weightG,
-              vatRate: String(entry.patch.vatRate),
-              isKgt: entry.patch.isKgt,
-              currentPrice: entry.patch.currentPrice,
-              regularPrice: entry.patch.regularPrice,
-              discountPercent: entry.patch.discountPercent,
-              ozonProductId: entry.patch.ozonProductId,
-              ozonSku: entry.ozonSku,
-              costPrice: entry.costPrice ?? NEW_PRODUCT_DEFAULTS.costPrice,
-              createdAt: now,
-              updatedAt: now,
-              ozonCommissions: entry.ozonCommissions,
-              ozonCommissionsUpdatedAt: entry.ozonCommissions ? now : null,
+            .all();
+
+          if (existing) {
+            if (assigneeId === userId) importerHadRow = true;
+            const patch: CatalogPatch & { updatedAt: Date } = {
+              ...entry.patch,
+              updatedAt: new Date(),
+            };
+            const commissionsUpdate: {
+              ozonCommissions?: OzonCommissions | null;
+              ozonCommissionsUpdatedAt?: Date | null;
+            } = entry.ozonCommissions
+              ? {
+                  ozonCommissions: entry.ozonCommissions,
+                  ozonCommissionsUpdatedAt: patch.updatedAt,
+                }
+              : {};
+            // cost_price syncs only to the importer's row, and only when
+            // Ozon returned a non-null net_price (mapToProduct already drops
+            // zero/missing values to null upstream).
+            const costPriceUpdate =
+              assigneeId === userId && entry.costPrice != null
+                ? { costPrice: entry.costPrice }
+                : {};
+            const skuUpdate =
+              entry.ozonSku != null ? { ozonSku: entry.ozonSku } : {};
+            const statusUpdate = {
               ozonArchived: entry.status.archived,
               ozonVisible: entry.status.visible,
               ozonStatusName: entry.status.statusName,
               ozonStatusDescription: entry.status.statusDescription,
-            })
-            .run();
-          counters.added++;
+            };
+            tx.update(products)
+              .set({
+                productName: patch.productName,
+                category: patch.category,
+                productType: patch.productType,
+                volumeL: patch.volumeL,
+                depthMm: patch.depthMm,
+                widthMm: patch.widthMm,
+                heightMm: patch.heightMm,
+                weightG: patch.weightG,
+                vatRate: String(patch.vatRate),
+                isKgt: patch.isKgt,
+                currentPrice: patch.currentPrice,
+                regularPrice: patch.regularPrice,
+                discountPercent: patch.discountPercent,
+                ozonProductId: patch.ozonProductId,
+                updatedAt: patch.updatedAt,
+                ...costPriceUpdate,
+                ...skuUpdate,
+                ...commissionsUpdate,
+                ...statusUpdate,
+              })
+              .where(
+                and(
+                  eq(products.articleId, entry.articleId),
+                  eq(products.shopId, shopId),
+                  eq(products.userId, assigneeId),
+                ),
+              )
+              .run();
+          } else {
+            if (catalogIncomplete) continue;
+            const now = new Date();
+            // New row gets defaults for manual fields. cost_price = Ozon's
+            // net_price only for the importer; other assignees start at 0
+            // (they're free to enter their own assumption later).
+            const initialCostPrice =
+              assigneeId === userId && entry.costPrice != null
+                ? entry.costPrice
+                : NEW_PRODUCT_DEFAULTS.costPrice;
+            tx.insert(products)
+              .values({
+                ...NEW_PRODUCT_DEFAULTS,
+                clustersCount: String(NEW_PRODUCT_DEFAULTS.clustersCount),
+                id: randomUUID(),
+                shopId,
+                workspaceId,
+                userId: assigneeId,
+                articleId: entry.articleId,
+                productName: entry.patch.productName,
+                category: entry.patch.category,
+                productType: entry.patch.productType,
+                volumeL: entry.patch.volumeL,
+                depthMm: entry.patch.depthMm,
+                widthMm: entry.patch.widthMm,
+                heightMm: entry.patch.heightMm,
+                weightG: entry.patch.weightG,
+                vatRate: String(entry.patch.vatRate),
+                isKgt: entry.patch.isKgt,
+                currentPrice: entry.patch.currentPrice,
+                regularPrice: entry.patch.regularPrice,
+                discountPercent: entry.patch.discountPercent,
+                ozonProductId: entry.patch.ozonProductId,
+                ozonSku: entry.ozonSku,
+                costPrice: initialCostPrice,
+                createdAt: now,
+                updatedAt: now,
+                ozonCommissions: entry.ozonCommissions,
+                ozonCommissionsUpdatedAt: entry.ozonCommissions ? now : null,
+                ozonArchived: entry.status.archived,
+                ozonVisible: entry.status.visible,
+                ozonStatusName: entry.status.statusName,
+                ozonStatusDescription: entry.status.statusDescription,
+              })
+              .run();
+          }
+        }
+
+        // Counters reflect the importer's perspective only.
+        if (!catalogIncomplete) {
+          if (importerHadRow) counters.updated++;
+          else counters.added++;
         }
         counters.itemsProcessed++;
       }
@@ -236,11 +278,17 @@ function splitFinanceRange(
 const buildSkuMap = async (
   db: DB,
   workspaceId: number,
+  userId: number,
 ): Promise<Map<number, string>> => {
   const rows = await db
     .select({ sku: products.ozonSku, articleId: products.articleId })
     .from(products)
-    .where(eq(products.workspaceId, workspaceId));
+    .where(
+      and(
+        eq(products.workspaceId, workspaceId),
+        eq(products.userId, userId),
+      ),
+    );
   const map = new Map<number, string>();
   for (const r of rows) {
     if (r.sku != null) map.set(r.sku, r.articleId);
@@ -264,7 +312,7 @@ export async function runFinanceImport(
     skipped: 0,
   };
 
-  const skuMap = await buildSkuMap(db, workspaceId);
+  const skuMap = await buildSkuMap(db, workspaceId, userId);
 
   const resolveArticle = (op: {
     items?: Array<{ sku?: number; offer_id?: string }>;
@@ -552,7 +600,11 @@ export function importRoutes(
       .select()
       .from(importRuns)
       .where(
-        and(eq(importRuns.id, id), eq(importRuns.workspaceId, user.workspaceId)),
+        and(
+          eq(importRuns.id, id),
+          eq(importRuns.workspaceId, user.workspaceId),
+          eq(importRuns.userId, user.id),
+        ),
       );
     if (!row) return c.json({ error: "not found" }, 404);
     return c.json(row);
@@ -575,7 +627,7 @@ export function importRoutes(
         );
       }
     } else {
-      scope = await workspaceShopIds(db, user.workspaceId);
+      scope = await visibleShopIds(db, user);
     }
     if (scope.length === 0) return c.json([]);
     const rows = await db
@@ -585,6 +637,7 @@ export function importRoutes(
         and(
           inArray(importRuns.shopId, scope),
           eq(importRuns.workspaceId, user.workspaceId),
+          eq(importRuns.userId, user.id),
         ),
       )
       .orderBy(desc(importRuns.startedAt))
@@ -615,6 +668,7 @@ export function importRoutes(
           eq(products.articleId, articleId),
           eq(products.shopId, shopId),
           eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
         ),
       );
     if (!productRow) return c.json({ error: "product not found" }, 404);
@@ -679,8 +733,6 @@ export function importRoutes(
             ozonCommissionsUpdatedAt: now,
           }
         : {};
-      const costPriceUpdate =
-        entry.costPrice != null ? { costPrice: entry.costPrice } : {};
       const skuUpdate =
         entry.ozonSku != null ? { ozonSku: entry.ozonSku } : {};
       const statusUpdate = {
@@ -689,6 +741,8 @@ export function importRoutes(
         ozonStatusName: entry.status.statusName,
         ozonStatusDescription: entry.status.statusDescription,
       };
+      // Catalog fields fan out to every assignee's row for this shop+article;
+      // cost_price syncs only to the importing user.
       db.update(products)
         .set({
           productName: entry.patch.productName,
@@ -706,13 +760,24 @@ export function importRoutes(
           discountPercent: entry.patch.discountPercent,
           ozonProductId: entry.patch.ozonProductId,
           updatedAt: now,
-          ...costPriceUpdate,
           ...skuUpdate,
           ...commissionsUpdate,
           ...statusUpdate,
         })
-        .where(eq(products.id, productRow.id))
+        .where(
+          and(
+            eq(products.shopId, shopId),
+            eq(products.articleId, articleId),
+            eq(products.workspaceId, user.workspaceId),
+          ),
+        )
         .run();
+      if (entry.costPrice != null) {
+        db.update(products)
+          .set({ costPrice: entry.costPrice })
+          .where(eq(products.id, productRow.id))
+          .run();
+      }
 
       return c.json({
         ok: true,
@@ -734,11 +799,11 @@ export function importRoutes(
   // items[].sku but no items[].offer_id (Ozon's API quirk on older ops).
   app.post("/finance/relink", async (c) => {
     const user = c.get("user");
-    const shopIds = await workspaceShopIds(db, user.workspaceId);
+    const shopIds = await visibleShopIds(db, user);
     if (shopIds.length === 0)
       return c.json({ ok: true, scanned: 0, linked: 0 });
 
-    const skuMap = await buildSkuMap(db, user.workspaceId);
+    const skuMap = await buildSkuMap(db, user.workspaceId, user.id);
     if (skuMap.size === 0) {
       return c.json({ ok: true, scanned: 0, linked: 0, note: "no SKU data" });
     }
@@ -750,6 +815,7 @@ export function importRoutes(
         and(
           isNull(financeTransactions.articleId),
           eq(financeTransactions.workspaceId, user.workspaceId),
+          eq(financeTransactions.userId, user.id),
         ),
       );
 
@@ -819,7 +885,7 @@ export function importRoutes(
         );
       }
     } else {
-      scope = await workspaceShopIds(db, user.workspaceId);
+      scope = await visibleShopIds(db, user);
     }
     if (scope.length === 0)
       return c.json({
@@ -838,6 +904,7 @@ export function importRoutes(
           eq(financeTransactions.articleId, articleId),
           inArray(financeTransactions.shopId, scope),
           eq(financeTransactions.workspaceId, user.workspaceId),
+          eq(financeTransactions.userId, user.id),
         ),
       );
 

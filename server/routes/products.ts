@@ -3,7 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { products, type ProductRow as DbProduct } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
-import { resolveShopId, workspaceShopIds } from "../middleware/session";
+import { resolveShopId, visibleShopIds } from "../middleware/session";
 import type {
   ClustersCount,
   IncomingVatRate,
@@ -180,7 +180,7 @@ const scopeShopIds = async (
       };
     }
   }
-  return await workspaceShopIds(db, user.workspaceId);
+  return await visibleShopIds(db, user);
 };
 
 export function productsRoutes(db: DB): Hono<ProductsEnv> {
@@ -198,6 +198,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         and(
           inArray(products.shopId, scope),
           eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
         ),
       )
       .orderBy(products.createdAt);
@@ -251,8 +252,9 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
     return c.json(dbToRow(row), 201);
   });
 
-  /** Verifies that product `id` exists in the current workspace. Returns
-   * shopId on success. */
+  /** Verifies that product `id` exists for the current user. Returns shopId
+   * on success. The `(workspace_id, user_id)` filter is essential — without
+   * user_id another assignee's row with the same UUID would be hit. */
   const requireOwnership = async (
     user: SessionUser,
     id: string,
@@ -261,7 +263,11 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
       .select({ shopId: products.shopId })
       .from(products)
       .where(
-        and(eq(products.id, id), eq(products.workspaceId, user.workspaceId)),
+        and(
+          eq(products.id, id),
+          eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
+        ),
       );
     return row?.shopId ?? null;
   };
@@ -323,6 +329,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         and(
           inArray(products.shopId, scope),
           eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
         ),
       );
     return c.json({ updated: result.changes });
@@ -381,6 +388,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
           inArray(products.id, ids),
           inArray(products.shopId, scope),
           eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
         ),
       );
     return c.json({ updated: result.changes });
@@ -406,6 +414,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
           inArray(products.id, ids),
           inArray(products.shopId, scope),
           eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
         ),
       );
     return c.json({ deleted: result.changes });
