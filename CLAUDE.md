@@ -9,21 +9,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Dev: vite + backend разом через concurrently
-npm run dev               # http://localhost:5173 (vite) + http://localhost:3001 (api)
-npm run dev:web           # только vite
+# Dev: vite (web) + backend (api) + vite (sysadmin SPA) разом через concurrently
+npm run dev               # http://localhost:5173 (web) + 3001 (api) + 5174 (sysadmin)
+npm run dev:web           # только основной vite (workspace SPA)
 npm run dev:api           # только tsx watch server/index.ts
+npm run dev:sysadmin      # только sysadmin vite (отдельный SPA, port 5174)
 
 # Build + проверки
-npm run build             # tsc -b (3 проекта: app/node/server) → vite build
+npm run build             # tsc -b → vite build (web) → vite build (sysadmin)
+npm run build:web         # только основной SPA
+npm run build:sysadmin    # только sysadmin SPA
 npm run lint              # eslint .
-npm test                  # vitest run (один прогон, 64+ тестов)
+npm test                  # vitest run (180 тестов)
 npm run test:watch        # vitest в watch-режиме
 
 # DB (Drizzle + better-sqlite3, файл data/app.db)
 npm run db:generate       # drizzle-kit generate (после правки server/db/schema.ts)
 npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует)
-npm run db:seed           # первый админ + его default shop «Мой магазин (M1)»
+npm run db:seed           # первый sysadmin + его workspace + дефолтный shop (M1)
 npm run db:extract        # Excel → SQLite ref_* таблицы
                           # путь к Excel: EXTRACT_SOURCE=… npm run db:extract
 
@@ -35,10 +38,10 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ## Запуск с нуля
 
-1. `cp .env.example .env`. Настроить SMTP-параметры (или оставить пустыми — письма пойдут в stdout) и `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого админа.
-2. `npm run db:seed` — создаст `data/app.db`, засеет первого админа (если таблица `users` пуста) и его дефолтный магазин «Мой магазин» с кодом `M1`.
+1. `cp .env.example .env`. Настроить SMTP-параметры (или оставить пустыми — письма пойдут в stdout) и `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого sysadmin.
+2. `npm run db:seed` — создаст `data/app.db`, засеет первого **sysadmin** (если таблица `users` пуста) + его workspace («Admin workspace») + дефолтный shop «Мой магазин (M1)». Sysadmin живёт без рабочей команды; обычные юзеры регистрируются через `/register` и сами создают workspace.
 3. `npm run db:extract` — наполнит `ref_*` справочники из Excel (требуется `C:/Users/admin/Downloads/Техника — копия2.xlsx` или `EXTRACT_SOURCE=…`).
-4. `npm run dev`. Фронт ходит в `/api/*` через Vite-прокси (`SERVER_URL`, по умолчанию `http://localhost:3001`). Войти на `/login` с теми creds, что в `.env`.
+4. `npm run dev`. Workspace-SPA на `localhost:5173`, API на `3001`, **sysadmin-консоль на `localhost:5174` отдельно** (sysadmin-юзера в основной SPA не пускает — там redirect-экран). Войти sysadmin'у на `localhost:5174/`, остальным — на `localhost:5173/login`.
 
 ## Architecture
 
@@ -50,7 +53,7 @@ npx vitest run __tests__/server/         # все backend-тесты
 | Бэкенд | Hono 4 + @hono/node-server |
 | ORM | Drizzle 0.45 + drizzle-kit 0.31 |
 | БД | SQLite через better-sqlite3 12 (файл `data/app.db`) |
-| Auth | Session cookies (HTTP-only) + `sessions` таблица; bcrypt-пароли, email-верификация, роли admin/user |
+| Auth | Session cookies (HTTP-only) + `sessions` таблица; bcrypt-пароли, email-верификация, `users.is_sysadmin` для платформенных операторов + `workspace_members.role` (owner/manager/member) для команд |
 | Тесты | Vitest 4 (calc unit + Hono integration через `app.request()`) |
 
 ### Поток данных (frontend)
@@ -78,68 +81,94 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 **Изменения формул** всегда начинай с того, что найди соответствующий шаг в `index.ts` (комментарии секций совпадают с нумерацией §3 в `README.md` / ТЗ), потом правь нужный модуль.
 
-### Multi-shop архитектура (миграции 0015 + 0017)
+### Multi-tenant + per-shop assignment (миграции 0019–0021)
 
-Каждый пользователь ведёт N **магазинов** (`shops` таблица): свой набор товаров, финансов, импортов, налогов, auto-refresh и Ozon-кредов. Магазин принадлежит одному owner'у (`shops.user_id`), но админ может **раздать доступ** другим пользователям через таблицу `shop_access(shop_id, user_id)` (миграция 0017). Назначенный viewer видит магазин как «общий» и работает с ним в своём отдельном namespace — данные товаров/финансов/импортов **per-user**, не пересекаются с owner'ом и другими viewer'ами.
+Двухуровневая модель: **workspace** (команда) → **shops** + **shop_member** (assignment).
 
-- `products`: `(shop_id, user_id)` оба NOT NULL; `UNIQUE(shop_id, user_id, article_id)` — один артикул в одном shared shop может существовать одновременно у нескольких юзеров.
-- `finance_transactions`: PK `(shop_id, user_id, operation_id)` — `operation_id` Ozon-аккаунта повторяется в выписках разных viewer'ов.
-- `import_runs.user_id` — у каждого юзера своя история импортов в shared shop.
-- `shop_access(shop_id, user_id)` — список viewer'ов. Owner всегда в `shops.user_id` (запись в shop_access ему не нужна).
-- `shop_user_settings(shop_id, user_id)` — per-user overrides: `tax_settings` (json), `tariff_set_id`, `auto_refresh_enabled`, `auto_refresh_interval_min`. NULL во всех полях = «наследовать с shops». Это позволяет viewer'у иметь свою СНО и свой выбор тарифного набора, не трогая дефолты, заданные админом.
+- **Workspace** = команда. Один user → один workspace через `workspace_members` (UNIQUE на `user_id`). Регистрация через `/register` транзакционно создаёт user → workspace → owner-membership → дефолтный shop. Роли в команде: `owner` / `manager` / `member` (`workspace_members.role`).
+- **Sysadmin** — платформенная роль, **не часть workspace'ов**. `users.is_sysadmin = true`. Работает только через отдельный SPA в `src/sysadmin/` (port 5174 в dev, `dist/sysadmin/` → admin-домен в prod). Регистрация `/register` sysadmin'ов не создаёт — только seed или promote.
+- **Shop** принадлежит workspace (`shops.workspace_id NOT NULL`), а не user'у. Owner/manager создаёт; member работает с уже существующими.
+- **`shop_member(shop_id, user_id, created_at, created_by)`** — hard-gate ассайнмент. Owner workspace'а видит **все** shops безусловно; manager/member — только те, где есть запись в `shop_member`. Owner/manager раздаёт через `POST /api/shops/:id/members`.
+- **`shop_user_settings(shop_id, user_id, tax_settings, tariff_set_id, auto_refresh_enabled, auto_refresh_interval_min)`** — per-user overrides поверх shop default. NULL в поле = «наследовать с shops». Позволяет member'у иметь свою СНО / свой тарифный набор / свой авто-импорт без изменения дефолтов команды.
 
-`shops` содержит inline: `name`, `shortName` (ровно 2 символа, UNIQUE per user), `color` (HEX опц.), `taxSettings` (json), `autoRefreshEnabled/Min`, `ozonClientId/ApiKey`, `tariffSetId`. `user_settings.activeShopId` — выбранный по умолчанию магазин (для импорта/создания товара).
+**Catalog vs manual поля в `products`** (UNIQUE `(shop_id, user_id, article_id)`):
+- **Catalog-поля** (`productName`, `category`, `productType`, `volumeL`, `vatRate`, `isKgt`, `currentPrice`, `regularPrice`, `discountPercent`, `ozonProductId`, `ozonSku`, `ozonCommissions`) — синкаются у **всех assignee** shop'а при импорте каталога.
+- **Manual / financial-поля** (`costPrice`, `salesPlan`, `marketingPercent`, `redemptionPercent`, `whitePurchase`, `partyVolume`, ...) — per-user, обновляются только у current user'а.
+
+**`finance_transactions`** — PK `(shop_id, user_id, operation_id)`. `operation_id` Ozon'а одинаковый у всех assignee, но каждый импортирует свой период независимо. **`import_runs.user_id`** — у каждого юзера своя история импортов в shared shop.
+
+**Ozon credentials** — shop-уровень. `shops.ozonClientId/ozonApiKey`. Owner/manager задаёт через `PATCH /api/shops/:id`; member видит read-only баннер «ключи задаёт owner/manager команды». Глобальный fallback и env-vars удалены в миграции 0018 (см. ниже).
 
 **Видимость и владение** (`server/middleware/session.ts`):
-- `visibleShopIds(db, userId)` — union owned ∪ shop_access. Используется во всех scoped reads без явного `?shopId=`.
-- `userCanSeeShop(db, userId, shopId)` — видим ли (owned ИЛИ access)? Заменил старую проверку через JOIN.
-- `userOwnsShop(db, userId, shopId)` — только owner; гейтит credentials и owner-fields.
-- `resolveShopId(c, opts)` теперь валидирует видимость, а не владение.
+- `visibleShopIds(db, user)` — owner workspace'а: все workspace shops; manager/member: только через `shop_member`.
+- `userCanAccessShop(db, user, shopId)` — gate для всех scoped reads/mutations.
+- `canManageWorkspace(role)` — true для `owner`/`manager`. Гейтит создание/удаление shops, изменение owner-fields (`name/shortName/color/ozonClientId/ozonApiKey/tariffSetId`), assignment `shop_member`, приглашения в команду.
+- `requireSysadmin` (отдельно от workspace-ролей) — гейтит `/api/admin/*`.
+- `resolveShopId(c, opts)` валидирует доступ через `userCanAccessShop`.
 
-Все scoped роуты (products/finance/analytics/import/credentials/settings) принимают необязательный `?shopId=`:
-- передан → фильтр по магазину (валидация: visible);
-- не передан → возвращает данные **всех видимых магазинов** (для UI-фильтра «Все»).
+Все scoped роуты (products/finance/analytics/import/credentials/settings/refs) принимают необязательный `?shopId=`:
+- передан → фильтр по shop'у (с проверкой visibility);
+- не передан → данные **всех visible shops** (для UI «Все»).
 
-В SQL для products/finance/import_runs всегда добавляется `eq(table.userId, currentUser.id)` — изоляция per-user.
+В SQL для `products`/`finance_transactions`/`import_runs` всегда добавляется `eq(table.userId, currentUser.id)` — изоляция per-user.
 
 **Эффективные настройки** (`server/settings/shopSettings.ts:resolveShopSettings(db, shopId, userId)`):
 - `taxSettings = override.taxSettings ?? shop.taxSettings`
-- `tariffSetId = override.tariffSetId ?? shop.tariffSetId` (с дальнейшим fallback на global через `resolveTariffSetId(db, shopId, userId)`)
+- `tariffSetId = override.tariffSetId ?? shop.tariffSetId` (с дальнейшим fallback на global через `resolveTariffSetId`)
 - `autoRefreshEnabled / IntervalMin` — аналогично
 
-`PUT /api/settings` и `PATCH /api/shops/:id` маршрутизируют запись: owner пишет в `shops.*`, viewer — в `shop_user_settings` через `upsertShopUserSettings`. PATCH owner-fields (`name/shortName/color/ozonClientId/ozonApiKey`) для viewer'а → 403.
+`userHasShopOverrides(db, shopId, userId)` → `Shop.hasOverrides` для UI-флага кнопки «Сбросить к дефолтам команды» (вызывает `POST /api/shops/:id/reset-overrides` → `clearShopUserSettings`).
 
-**Ozon credentials** (миграция 0018) — только shop-уровень. `server/ozon/client.ts:resolveCredentials(db, shopId)` возвращает `shop.ozonClientId/ozonApiKey` или `null`. Глобальный fallback (бывшая таблица `api_credentials`) и `OZON_CLIENT_ID/API_KEY` env-vars **удалены** — иначе магазин без своих ключей тащил бы каталог чужого Ozon-аккаунта. Магазин без ключей → импорт возвращает 400 `ozon credentials not configured`. Viewer импортирует под ключами owner'а shared shop.
+**Маршрутизация записи** (зависит от роли):
+- `PATCH /api/shops/:id` — owner/manager only. Пишет в `shops.*` (shop default).
+- `PUT /api/settings` (taxSettings) — пишет в `shop_user_settings.tax_settings` (override). Если совпадает с shop default — override обнуляется.
+- `PUT /api/settings/auto-refresh` — аналогично для `autoRefreshEnabled/IntervalMin`.
+- `PUT /api/settings/tariff-set` — per-user override `tariff_set_id`. Member пользуется этим маршрутом вместо `PATCH /shops/:id` (который ему 403).
+- На фронте `TariffSetsControl` принимает `isOwner` prop и сам выбирает endpoint.
 
-**Auto-refresh** (`src/lib/autoRefresh.ts`) — `Map<shopId, NodeJS.Timeout>`, независимые таймеры на каждый магазин. При смене состава магазинов App вызывает `initAutoRefresh(shopIds)`, который сносит старые таймеры и поднимает новые из effective settings (`shop_user_settings` если задано, иначе `shops`).
+**Auto-refresh** (`src/lib/autoRefresh.ts`) — `Map<shopId, NodeJS.Timeout>`, независимые таймеры на каждый shop. При смене состава shops App вызывает `initAutoRefresh(shopIds)`, который сносит старые и поднимает новые из effective settings (override member'а имеет приоритет).
 
-**Admin endpoints** (`server/routes/admin.ts`):
-- `GET /api/admin/shops` — admin-owned магазины + счётчик viewer'ов.
-- `GET /api/admin/shops/:id/access` — список юзеров с доступом.
-- `GET /api/admin/shops/:id/access/candidates` — юзеры, которым ещё можно дать доступ.
-- `POST /api/admin/shops/:id/access` body `{userId}` — назначить viewer'а.
-- `DELETE /api/admin/shops/:id/access/:userId` — отозвать + `cascade-delete` per-user `products`/`finance_transactions`/`import_runs`/`shop_user_settings` этого юзера в shop'е (orphans не остаются).
+**Assignment endpoints** (`server/routes/shops.ts`, owner/manager only):
+- `GET /api/shops/:id/members` — `{ assigned: [...], candidates: [...] }`.
+- `POST /api/shops/:id/members` body `{userId}` — назначить.
+- `DELETE /api/shops/:id/members/:userId` — отозвать + cascade-delete per-user `products`/`finance_transactions`/`import_runs`/`shop_user_settings` этого юзера в этом shop'е.
 
-**При добавлении новой scoped-фичи** — следуй паттерну: в schema FK на `shops.id` ON DELETE CASCADE + колонка `user_id` NOT NULL FK; в роуте используй `resolveShopId` + `visibleShopIds` для reads, `eq(table.userId, currentUser.id)` всегда. В тестах создавай user + дефолтный shop через `loginAs(env, email, password)`; для шаринг-кейсов — `POST /api/admin/shops/:id/access` (см. `__tests__/server/sharing.test.ts`).
+**Workspace endpoints** (`server/routes/workspace.ts`):
+- `GET /api/workspace/me` — текущая команда + members (любому участнику).
+- `PATCH /api/workspace/me` — name/slug (owner only).
+- `POST/GET/DELETE /api/workspace/me/invites` — приглашения (owner/manager). Email-токен TTL 7 дней; `inviteEmail` шаблон в `server/email/templates.ts`.
+- `PATCH /api/workspace/me/members/:userId` — смена роли (owner only для owner-promote/demote).
+- `DELETE /api/workspace/me/members/:userId` — удалить участника (owner/manager; нельзя удалить последнего owner'а).
+- `GET /api/invites/:token` (public) → `{workspaceName, role, email, expiresAt}`. `POST /api/invites/:token/accept` (auth) — присоединение.
+
+**Sysadmin endpoints** (`server/routes/admin.ts`, под `requireSysadmin`):
+- `/api/admin/users/*` — CRUD юзеров платформы, блокировка, sysadmin-флаг.
+- `/api/admin/workspaces` GET/DELETE — список команд + cascade-удаление.
+- `/api/admin/smtp/*` — SMTP-настройки сервиса.
+
+**При добавлении новой scoped-фичи**:
+1. В `server/db/schema.ts`: FK `shop_id` ON DELETE CASCADE + колонка `user_id NOT NULL` FK на users.
+2. В роуте: `userCanAccessShop` для reads/mutations, `eq(table.userId, currentUser.id)` всегда. Owner-only мутации — `canManageWorkspace(role)`. Sysadmin-only — `requireSysadmin`.
+3. В тестах создавай юзера + workspace + дефолтный shop через `loginAs(env, email, password)` (helper в `__tests__/server/_helpers.ts`); для assignment-кейсов — `POST /api/shops/:id/members`. См. `__tests__/server/shop-assignment.test.ts` и `multitenant.test.ts`.
 
 ### Версионирование тарифов логистики (миграция 0016)
 
 Точная матрица per-cluster-pair (`Москва ↔ Урал` и т.д.) живёт в **именованных наборах** `logistics_cluster_tariff_sets` — несколько версий могут сосуществовать, чтобы считать факт за прошлый период по тарифам, которые тогда действовали.
 
-- `logistics_cluster_tariff_sets`: id, `shop_id` (nullable), `name`, `uploaded_at`, `created_at`. `shop_id IS NULL` → **глобальный** набор (виден всем, грузит только админ). Иначе — **персональный** магазина (виден только владельцу).
+- `logistics_cluster_tariff_sets`: id, `workspace_id` (nullable), `name`, `uploaded_at`, `created_at`. `workspace_id IS NULL` → **глобальный** набор (виден всем, грузит только sysadmin). Иначе — **workspace-owned** (виден участникам этой команды).
 - `logistics_cluster_tariffs.set_id` (FK NOT NULL, ON DELETE CASCADE) — каждая строка тарифа принадлежит одному набору.
-- `shops.tariff_set_id` (nullable) — какой набор использует магазин. NULL → последний глобальный по `uploaded_at`.
+- `shops.tariff_set_id` (nullable) — какой набор использует магазин по умолчанию. NULL → последний глобальный по `uploaded_at`. Member может override per-user через `shop_user_settings.tariff_set_id`.
 
-**Helper `resolveTariffSetId(db, shopId)`** в `server/settings/tariffSets.ts`: shop.tariffSetId → последний global → null. Защита: если магазин ссылается на чужой персональный набор (некорректный API-call), резолвер падает на global.
+**Helper `resolveTariffSetId(db, shopId, userId?)`** в `server/settings/tariffSets.ts`: user override → shop.tariffSetId → последний global → null.
 
 **API:**
-- `GET /api/refs/cluster-logistics/sets` — список доступных юзеру наборов (глобальные + свои).
-- `POST /api/refs/cluster-logistics/sets` (multipart `file/name/scope/shopId`): `scope=global` требует `role=admin`, `scope=shop` требует владения shopId.
-- `DELETE /api/refs/cluster-logistics/sets/:id` — admin для global, owner для personal.
-- `GET /api/refs?shopId=…` отдаёт `logisticsClusterTariffs` (тарифы активного набора) + `activeTariffSetId`.
-- Legacy `/refs/cluster-logistics/upload` теперь под `requireAdmin` — создаёт **новый** глобальный набор с автоименем «Глобальный набор от YYYY-MM-DD», старые наборы не трогаются.
+- `GET /api/refs/cluster-logistics/sets` — список доступных юзеру наборов (глобальные + workspace-owned).
+- `POST /api/refs/cluster-logistics/sets` (multipart `file/name/scope/shopId`): `scope=global` требует sysadmin, `scope=shop` — owner/manager workspace'а.
+- `DELETE /api/refs/cluster-logistics/sets/:id` — sysadmin для global, owner/manager для workspace.
+- `GET /api/refs?shopId=…` отдаёт `logisticsClusterTariffs` (тарифы активного для пары (shop, user) набора) + `activeTariffSetId`.
+- Legacy `/refs/cluster-logistics/upload` под `requireSysadmin` — создаёт **новый** глобальный набор с автоименем «Глобальный набор от YYYY-MM-DD».
 
-UI: компонент `src/components/TariffSetsControl.tsx` рендерится внутри секции «Логистика» в `ShopSettings` — селектор активного набора + кнопка «Загрузить новый» (inline-форма с выбором scope: «мой» / «общий» — последнее только для админа) + удаление.
+UI: `src/components/TariffSetsControl.tsx` рендерится в секции «Логистика» в `ShopSettings` — селектор + загрузка (scope «мой» / «общий» — последнее только для sysadmin) + удаление. Принимает `isOwner` prop: owner/manager пишет выбор в `shops.tariffSetId` (PATCH /shops/:id), member — через `PUT /api/settings/tariff-set` (override).
 
 ### Конвенции значений
 
@@ -172,15 +201,17 @@ UI: компонент `src/components/TariffSetsControl.tsx` рендеритс
 
 ### Backend-структура
 
-- `server/db/schema.ts` — Drizzle-схема (17 таблиц: `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`, `logistics_cluster_tariff_sets`, `logistics_cluster_tariffs`, `shops`, `shop_access`, `shop_user_settings`, `products`, `user_settings`, `users`, `sessions`, `email_verification_tokens`, `smtp_settings`, `finance_transactions`, `import_runs`). `api_credentials` удалена в миграции 0018.
+- `server/db/schema.ts` — Drizzle-схема. Ключевые таблицы: `workspaces`, `workspace_members`, `workspace_invites`, `users` (с `is_sysadmin`, без `role`), `sessions`, `email_verification_tokens`, `smtp_settings`, `shops` (со `workspace_id`, без `user_id`), `shop_member`, `shop_user_settings`, `products` (PK/UNIQUE `(shop_id, user_id, article_id)`), `finance_transactions` (PK `(shop_id, user_id, operation_id)`), `import_runs` (с audit `user_id` + scope), `user_settings`, `logistics_cluster_tariff_sets` (со `workspace_id`), `logistics_cluster_tariffs`, `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`. Удалены в ходе SaaS-миграций: `shop_access` (0020), `api_credentials` (0018), `users.role` (0019).
 - `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
-- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
-- `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireAdmin` — гейты для роутов.
-- `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout.
-- `server/routes/{auth,admin,refs,shops,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов. `shops.ts` — CRUD магазинов (`GET/POST /api/shops`, `PATCH/DELETE /api/shops/:id`, `PUT /api/shops/active` для смены `user_settings.active_shop_id`).
-- `server/settings/tariffSets.ts` — `resolveTariffSetId(db, shopId, userId?)`: какой набор тарифов логистики использует пара (shop, user): override → shop.tariffSetId → последний global → null.
-- `server/settings/shopSettings.ts` — `resolveShopSettings(db, shopId, userId)` / `upsertShopUserSettings` / `clearShopUserSettings`. Per-user overrides поверх shops.
-- `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`).
+- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations`). SaaS-миграции: `0019_workspaces`, `0020_workspace_cutover`, `0021_shop_assignment_and_overrides`.
+- `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireSysadmin` — гейты для роутов; `canManageWorkspace(role)` для owner/manager-only мутаций; `userCanAccessShop` / `visibleShopIds` для scoped reads.
+- `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout (шаблоны `verifyEmail`, `inviteEmail`).
+- `server/routes/{auth,admin,workspace,refs,shops,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов. `shops.ts` — CRUD магазинов + assignment endpoints. `workspace.ts` — управление командой и invite-флоу.
+- `server/settings/tariffSets.ts` — `resolveTariffSetId(db, shopId, userId?)`: override → shop default → последний global → null.
+- `server/settings/shopSettings.ts` — `resolveShopSettings(db, shopId, userId)` / `upsertShopUserSettings` / `clearShopUserSettings` / `userHasShopOverrides`. Per-user overrides поверх shops.
+- `server/settings/defaults.ts` — `readDefaultTaxSettings(db)` для seed/новых shops.
+- `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`). `resolveCredentials(db, shopId)` — только shop-уровень (глобальный fallback удалён в 0018).
+- `src/sysadmin/` — отдельный SPA для платформенных админов. Свой `vite.config.sysadmin.ts`, dev-port 5174, build → `dist/sysadmin/`. Не имеет доступа к workspace-функционалу (calc/finance/import); только users, workspaces, SMTP, system.
 
 ### Импорт из Ozon (Фазы 2–3)
 
@@ -218,7 +249,7 @@ UI: компонент `src/components/TariffSetsControl.tsx` рендеритс
   - `POST /api/auth/login` отклоняет заблокированного юзера с `403` **до** проверки `isVerified` — иначе сообщение «email не подтверждён» сбивало бы с толку.
   - `validateSession` в `server/auth/utils.ts` возвращает `null` для заблокированных юзеров — defence-in-depth, чтобы они не прошли по существующим cookie, если revoke сессий не сработал.
   - `PUT /api/admin/users/:id/blocked` body `{ blocked: boolean }` — при `blocked=true` атомарно удаляет все сессии юзера, его выкидывает со всех устройств. Нельзя заблокировать самого себя (400). Разблокировка сессии не восстанавливает.
-  - UI в `src/components/admin/AdminPage.tsx` — колонка «Статус» + кнопка-замок (`Ban` / `CircleCheck` из lucide). Заблокированная строка отрисовывается с `opacity: 0.55`, селект роли отключён.
+  - UI в `src/sysadmin/sections/UsersSection.tsx` — колонка «Статус» + кнопка-замок (`Ban` / `CircleCheck` из lucide). Заблокированная строка с `opacity: 0.55`, чекбокс sysadmin отключён.
 - **SMTP-настройки админки** (миграция `0011` ввела таблицу `smtp_settings`, `0012` добавила колонку `secure`):
   - `secure: 'auto' | 'ssl' | 'starttls' | 'none'`. В `server/email/client.ts:resolveTlsOptions(mode, port)` маппится в nodemailer-флаги: `ssl` → `{ secure: true }`, `starttls` → `{ secure: false, requireTLS: true }`, `none` → `{ secure: false, ignoreTLS: true }`, `auto` → `{ secure: port === 465 }` (исторический дефолт).
   - Env-переменная `SMTP_SECURE` (опциональная) — поддержана `readSmtpFromEnv`.
@@ -226,7 +257,7 @@ UI: компонент `src/components/TariffSetsControl.tsx` рендеритс
   - В UI: автозеркалирование `User → From` (пока `From` пустой или совпадает с предыдущим `User`); placeholder порта подстраивается под выбранный `secure`-режим. Mail.ru/Yandex/Gmail требуют, чтобы email в `From` совпадал с `User` — об этом подсказка прямо в форме.
 - **Email-шаблон** `server/email/templates.ts` уже на русском. При добавлении новых писем держи единообразный стиль (Noto-friendly inline CSS, кнопка `var(--accent)`-цвета, fallback ссылка для Plain text).
 - **Password reveal toggle** — компонент `Field` в `src/components/auth/AuthShell.tsx` для `type="password"` рендерит иконку-глазик внутри инпута (`Eye` / `EyeOff` из lucide). Каждое поле управляет своим состоянием независимо; кнопка `tabIndex={-1}`, чтобы Tab её пропускал.
-- **При добавлении пути в админке**: помни, что `requireAdmin` в `server/middleware/session.ts` уже отсеивает не-админов. Не дублируй проверку в роуте; вместо этого защищай через монтирование (`app.route('/admin', adminRoutes)` уже под `requireAdmin`).
+- **При добавлении пути в sysadmin-консоли**: `requireSysadmin` в `server/middleware/session.ts` уже отсеивает не-sysadmin'ов. Не дублируй проверку в роуте; защищай через монтирование (`app.route('/admin', adminRoutes)` уже под `requireSysadmin`). UI пиши в `src/sysadmin/`, не в основном SPA — у обычных юзеров доступа к админке нет.
 
 ### TypeScript-конфиг
 
@@ -238,5 +269,5 @@ UI: компонент `src/components/TariffSetsControl.tsx` рендеритс
 
 - При генерации новой миграции обязательно проверь, что и `extract-data.mjs`, и `seed.mjs`, и тестовые сэтап-функции (`__tests__/server/*.test.ts:setupDb`) применяют **все** SQL-файлы из `server/db/migrations/`.
 - При расширении `OzonCommissions` (новые поля API) обнови оба места: `src/types/index.ts` и `server/ozon/types.ts:OzonPriceItem.commissions` (последний импортирует из первого).
-- При добавлении новой схемы поставки или поля в `ProductInput` — синхронно правь `products` в `server/db/schema.ts`, валидацию в `server/routes/products.ts:validateInput`, маппер `dbToRow`/`inputToColumns` и `seed.mjs`.
+- При добавлении новой схемы поставки или поля в `ProductInput` — синхронно правь `products` в `server/db/schema.ts`, валидацию в `server/routes/products.ts:validateInput`, маппер `dbToRow`/`inputToColumns` и `seed.mjs`. Не забудь про `user_id` колонку в `products` — у каждого assignee свои manual-поля.
 - При работе с `MappedCatalogEntry` помни различие: **`patch` — поля, всегда обновляемые из Ozon**; **`costPrice` и `ozonSku` — отдельные опциональные поля рядом** (записываются только при `> 0` / `!= null` через условный спред). Не клади их в `patch`, иначе сломаешь логику «не затирать локальное значение, когда Ozon не отдал данных».
