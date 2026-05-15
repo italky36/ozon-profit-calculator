@@ -1,7 +1,9 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { products, type ProductRow as DbProduct } from "../db/schema";
 import type { DB } from "../db/client";
+import type { SessionUser } from "../auth/utils";
+import { resolveShopId, visibleShopIds } from "../middleware/session";
 import type {
   ClustersCount,
   IncomingVatRate,
@@ -33,6 +35,7 @@ const parseIncomingVatRate = (n: number): IncomingVatRate => {
 
 const dbToRow = (r: DbProduct): ProductRow => ({
   id: r.id,
+  shopId: r.shopId,
   ozonProductId: r.ozonProductId ?? null,
   ozonCommissions: r.ozonCommissions ?? null,
   ozonCommissionsUpdatedAt: r.ozonCommissionsUpdatedAt
@@ -154,21 +157,72 @@ const validateInput = (raw: unknown): ProductInput => {
   return i as ProductInput;
 };
 
-export function productsRoutes(db: DB): Hono {
-  const app = new Hono();
+type ProductsEnv = { Variables: { user: SessionUser } };
+
+/** Returns the shopId scope for the current request:
+ *   - explicit `?shopId=N` → that single shop (validated for visibility);
+ *   - missing → every shop visible to user (owned + granted).
+ * Per-user data scoping is applied separately via `products.userId`. */
+const scopeShopIds = async (
+  db: DB,
+  user: SessionUser,
+  explicit: string | undefined,
+): Promise<number[] | { error: string; status: 400 | 404 }> => {
+  if (explicit !== undefined && explicit !== "") {
+    try {
+      const id = await resolveShopId(db, user, { explicit });
+      if (!id) return { error: "no shop available", status: 400 };
+      return [id];
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return {
+        error: err.message,
+        status: (err.status as 400 | 404) ?? 400,
+      };
+    }
+  }
+  return await visibleShopIds(db, user.id);
+};
+
+export function productsRoutes(db: DB): Hono<ProductsEnv> {
+  const app = new Hono<ProductsEnv>();
 
   app.get("/", async (c) => {
-    const rows = await db.select().from(products).orderBy(products.createdAt);
+    const user = c.get("user");
+    const scope = await scopeShopIds(db, user, c.req.query("shopId"));
+    if (!Array.isArray(scope)) return c.json({ error: scope.error }, scope.status);
+    if (scope.length === 0) return c.json([]);
+    const rows = await db
+      .select()
+      .from(products)
+      .where(
+        and(
+          inArray(products.shopId, scope),
+          eq(products.userId, user.id),
+        ),
+      )
+      .orderBy(products.createdAt);
     return c.json(rows.map(dbToRow));
   });
 
   app.post("/", async (c) => {
+    const user = c.get("user");
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
+    const bodyShopId = (body as { shopId?: unknown } | null)?.shopId;
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: bodyShopId as never });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
+
     let input: ProductInput;
     try {
       input = validateInput(body);
@@ -180,6 +234,8 @@ export function productsRoutes(db: DB): Hono {
     try {
       await db.insert(products).values({
         id,
+        shopId,
+        userId: user.id,
         ...inputToColumns(input),
         createdAt: now,
         updatedAt: now,
@@ -195,7 +251,22 @@ export function productsRoutes(db: DB): Hono {
     return c.json(dbToRow(row), 201);
   });
 
+  /** Verifies that product `id` exists and was created by the current user.
+   * Per-user data isolation: products in shared shops belong to the user who
+   * imported them, not the shop owner. Returns shopId on success. */
+  const requireOwnership = async (
+    user: SessionUser,
+    id: string,
+  ): Promise<number | null> => {
+    const [row] = await db
+      .select({ shopId: products.shopId })
+      .from(products)
+      .where(and(eq(products.id, id), eq(products.userId, user.id)));
+    return row?.shopId ?? null;
+  };
+
   app.patch("/:id", async (c) => {
+    const user = c.get("user");
     const id = c.req.param("id");
     let body: unknown;
     try {
@@ -209,8 +280,8 @@ export function productsRoutes(db: DB): Hono {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
-    const existing = await db.select().from(products).where(eq(products.id, id));
-    if (existing.length === 0) return c.json({ error: "not found" }, 404);
+    const ownerShopId = await requireOwnership(user, id);
+    if (!ownerShopId) return c.json({ error: "not found" }, 404);
 
     try {
       await db
@@ -229,20 +300,115 @@ export function productsRoutes(db: DB): Hono {
   });
 
   app.delete("/:id", async (c) => {
+    const user = c.get("user");
     const id = c.req.param("id");
-    const result = await db.delete(products).where(eq(products.id, id));
-    if (result.changes === 0) return c.json({ error: "not found" }, 404);
+    const ownerShopId = await requireOwnership(user, id);
+    if (!ownerShopId) return c.json({ error: "not found" }, 404);
+    await db.delete(products).where(eq(products.id, id));
     return c.body(null, 204);
   });
 
-  // Bulk reset whitePurchase for all products to NULL ("По умолчанию").
-  // Useful right after enabling the global default — existing rows have
-  // explicit `false` from the old schema and won't inherit otherwise.
+  // Bulk reset whitePurchase to NULL ("По умолчанию"). Scope: либо
+  // ?shopId=N, либо все видимые магазины. Trogает только товары текущего юзера.
   app.post("/bulk/white-purchase-reset", async (c) => {
+    const user = c.get("user");
+    const scope = await scopeShopIds(db, user, c.req.query("shopId"));
+    if (!Array.isArray(scope)) return c.json({ error: scope.error }, scope.status);
+    if (scope.length === 0) return c.json({ updated: 0 });
     const result = await db
       .update(products)
-      .set({ whitePurchase: null });
+      .set({ whitePurchase: null })
+      .where(
+        and(
+          inArray(products.shopId, scope),
+          eq(products.userId, user.id),
+        ),
+      );
     return c.json({ updated: result.changes });
+  });
+
+  // Bulk-update arbitrary subset of products. Supported fields:
+  //   - whitePurchase: boolean | null  (Белая / Не белая / По умолчанию)
+  //   - vatRate: VatRate                (only OSNO uses per-product VAT;
+  //                                       client gates the action by taxSystem)
+  app.post("/bulk/update", async (c) => {
+    const user = c.get("user");
+    const body = (await c.req.json().catch(() => null)) as
+      | {
+          ids?: unknown;
+          patch?: {
+            whitePurchase?: unknown;
+            vatRate?: unknown;
+          };
+        }
+      | null;
+    if (!body || !Array.isArray(body.ids) || body.ids.length === 0) {
+      return c.json({ error: "ids[] required" }, 400);
+    }
+    const ids = body.ids.filter((x): x is string => typeof x === "string");
+    if (ids.length === 0) return c.json({ error: "ids[] empty" }, 400);
+
+    const patch: Record<string, unknown> = {};
+    const p = body.patch ?? {};
+    if ("whitePurchase" in p) {
+      const v = p.whitePurchase;
+      if (v === null || typeof v === "boolean") {
+        patch.whitePurchase = v;
+      } else {
+        return c.json({ error: "whitePurchase must be boolean | null" }, 400);
+      }
+    }
+    if ("vatRate" in p) {
+      try {
+        const parsed = parseVatRate(String(p.vatRate));
+        patch.vatRate = String(parsed);
+      } catch (e) {
+        return c.json({ error: (e as Error).message }, 400);
+      }
+    }
+    if (Object.keys(patch).length === 0) {
+      return c.json({ error: "patch is empty" }, 400);
+    }
+
+    const scope = await scopeShopIds(db, user, undefined);
+    if (!Array.isArray(scope) || scope.length === 0)
+      return c.json({ updated: 0 });
+    const result = await db
+      .update(products)
+      .set(patch)
+      .where(
+        and(
+          inArray(products.id, ids),
+          inArray(products.shopId, scope),
+          eq(products.userId, user.id),
+        ),
+      );
+    return c.json({ updated: result.changes });
+  });
+
+  app.post("/bulk/delete", async (c) => {
+    const user = c.get("user");
+    const body = (await c.req.json().catch(() => null)) as
+      | { ids?: unknown }
+      | null;
+    if (!body || !Array.isArray(body.ids) || body.ids.length === 0) {
+      return c.json({ error: "ids[] required" }, 400);
+    }
+    const ids = body.ids.filter((x): x is string => typeof x === "string");
+    if (ids.length === 0) return c.json({ error: "ids[] empty" }, 400);
+    const scope = await scopeShopIds(db, user, undefined);
+    if (!Array.isArray(scope) || scope.length === 0)
+      return c.json({ deleted: 0 });
+    const result = await db
+      .delete(products)
+      .where(
+        and(
+          inArray(products.id, ids),
+          inArray(products.shopId, scope),
+          eq(products.userId, user.id),
+        ),
+      );
+    return c.json({ deleted: result.changes });
   });
 
   return app;

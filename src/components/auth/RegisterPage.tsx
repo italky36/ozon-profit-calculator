@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useAuth } from "../../contexts/AuthContext";
+import { useAuth } from "../../contexts/useAuth";
 import { navigate } from "../../lib/router";
-import AuthShell, { Field, FormError, FormNotice, useSubmit } from "./AuthShell";
+import AuthShell, { Field, FormError, FormNotice } from "./AuthShell";
+import { useSubmit } from "./useSubmit";
 
 export default function RegisterPage() {
   const { register } = useAuth();

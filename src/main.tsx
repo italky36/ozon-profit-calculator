@@ -3,12 +3,15 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import './App.css'
 import RootRouter from './RootRouter'
-import { AuthProvider } from './contexts/AuthContext'
+import { AuthProvider } from './contexts/AuthProvider'
+import { ToastProvider } from './contexts/ToastProvider'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <AuthProvider>
-      <RootRouter />
+      <ToastProvider>
+        <RootRouter />
+      </ToastProvider>
     </AuthProvider>
   </StrictMode>,
 )

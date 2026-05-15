@@ -195,6 +195,8 @@ export interface OzonCommissions {
 
 export interface ProductRow {
   id: string;
+  /** Shop this product belongs to. Required (multi-shop mode). */
+  shopId: number;
   input: ProductInput;
   ozonProductId?: number | null;
   ozonCommissions?: OzonCommissions | null;

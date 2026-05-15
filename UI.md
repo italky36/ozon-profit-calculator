@@ -38,8 +38,8 @@
 
 Порядок секций сверху вниз:
 
-### 1. GlobalSettings
-`src/components/GlobalSettings.tsx` — панель `.panel` с настройками `taxSettings`. Все изменения идут через debounce 300мс → `PUT /api/settings`. Содержимое:
+### 1. ShopSettings
+`src/components/ShopSettings.tsx` — панель `.panel` с настройками `taxSettings` активного магазина. Все изменения идут через debounce 300мс → `PUT /api/settings?shopId=…`. Содержимое:
 - Селект `taxSystem` из `lists.taxSystems` (приходит из refs).
 - Числовые поля для ставок (`damageRate`, `usnIncomeRate`, `npdRate`, `partyExtraExpenses` и т.д.) с подписями.
 - При смене `taxSystem` визуально не скрываем неиспользуемые ставки — пользователь может переключаться без потери ввода.

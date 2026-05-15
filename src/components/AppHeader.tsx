@@ -1,5 +1,5 @@
 import { LogOut } from "lucide-react";
-import { useAuth } from "../contexts/AuthContext";
+import { useAuth } from "../contexts/useAuth";
 
 interface Props {
   accent: string;
@@ -24,8 +24,11 @@ export default function AppHeader({ accent }: Props) {
             Oz
           </text>
         </svg>
-        <div>
-          <div className="app-title">Калькулятор прибыли продавца Ozon</div>
+        <div className="app-header-text">
+          <div className="app-title">
+            <span className="app-title-full">Калькулятор прибыли продавца Ozon</span>
+            <span className="app-title-short">Калькулятор Ozon</span>
+          </div>
           <div className="app-subtitle">
             Сравнение{" "}
             <span style={{ color: "var(--ch-fbo-text)", fontWeight: 600 }}>FBO</span>
@@ -37,15 +40,8 @@ export default function AppHeader({ accent }: Props) {
           </div>
         </div>
         {user && (
-          <div
-            style={{
-              marginLeft: "auto",
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-            }}
-          >
-            <div style={{ textAlign: "right", lineHeight: 1.2 }}>
+          <div className="app-header-user">
+            <div className="app-header-user-text" style={{ textAlign: "right", lineHeight: 1.2 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>{user.email}</div>
               <div className="muted" style={{ fontSize: 11 }}>
                 {user.role === "admin" ? "администратор" : "пользователь"}

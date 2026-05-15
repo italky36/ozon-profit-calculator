@@ -1,11 +1,16 @@
 import { Hono } from "hono";
-import { and, eq, isNull } from "drizzle-orm";
-import { userSettings } from "../db/schema";
+import { and, eq } from "drizzle-orm";
+import { shops } from "../db/schema";
 import type { DB } from "../db/client";
 import type { TaxSettings } from "../../src/types";
 import type { SessionUser } from "../auth/utils";
+import { resolveShopId } from "../middleware/session";
+import {
+  resolveShopSettings,
+  upsertShopUserSettings,
+} from "../settings/shopSettings";
 
-type SettingsEnv = { Variables: { user?: SessionUser } };
+type SettingsEnv = { Variables: { user: SessionUser } };
 
 const TAX_SYSTEMS = new Set([
   "УСН Доходы",
@@ -64,117 +69,136 @@ const validate = (raw: unknown): TaxSettings => {
   return r as TaxSettings;
 };
 
-/** Lazy lookup + create for the current user's settings row. Defaults are
- * copied from the seed row (`id=1`, possibly `user_id=NULL`). */
-function ensureUserRow(
+const resolveShop = async (
   db: DB,
+  user: SessionUser,
+  explicit: string | undefined | null,
+): Promise<number | { status: 400 | 404; error: string }> => {
+  try {
+    const id = await resolveShopId(db, user, { explicit });
+    if (!id) return { status: 400, error: "no shop available" };
+    return id;
+  } catch (e) {
+    const err = e as Error & { status?: number };
+    return { status: (err.status as 400 | 404) ?? 400, error: err.message };
+  }
+};
+
+const isShopOwner = async (
+  db: DB,
+  shopId: number,
   userId: number,
-): typeof userSettings.$inferSelect | null {
-  const existing = db
-    .select()
-    .from(userSettings)
-    .where(eq(userSettings.userId, userId))
-    .get();
-  if (existing) return existing;
-
-  const seed =
-    db
-      .select()
-      .from(userSettings)
-      .where(and(eq(userSettings.id, 1), isNull(userSettings.userId)))
-      .get() ??
-    db.select().from(userSettings).where(eq(userSettings.id, 1)).get();
-  if (!seed) return null;
-
-  const now = new Date();
-  db.insert(userSettings)
-    .values({
-      userId,
-      taxSettings: seed.taxSettings,
-      autoRefreshEnabled: seed.autoRefreshEnabled,
-      autoRefreshIntervalMin: seed.autoRefreshIntervalMin,
-      updatedAt: now,
-    })
-    .run();
-  return (
-    db
-      .select()
-      .from(userSettings)
-      .where(eq(userSettings.userId, userId))
-      .get() ?? null
-  );
-}
+): Promise<boolean> => {
+  const [row] = await db
+    .select({ id: shops.id })
+    .from(shops)
+    .where(and(eq(shops.id, shopId), eq(shops.userId, userId)));
+  return !!row;
+};
 
 export function settingsRoutes(db: DB): Hono<SettingsEnv> {
   const app = new Hono<SettingsEnv>();
 
-  app.get("/", (c) => {
-    const user = c.get("user")!;
-    const row = ensureUserRow(db, user.id);
-    if (!row) return c.json({ error: "not seeded" }, 500);
-    return c.json(row.taxSettings);
+  // Effective TaxSettings for caller in shop. Combines shop defaults with
+  // per-user override (shop_user_settings).
+  app.get("/", async (c) => {
+    const user = c.get("user");
+    const shop = await resolveShop(db, user, c.req.query("shopId"));
+    if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+    const effective = await resolveShopSettings(db, shop, user.id);
+    if (!effective) return c.json({ error: "shop not found" }, 404);
+    return c.json(effective.taxSettings);
   });
 
   app.put("/", async (c) => {
-    const user = c.get("user")!;
+    const user = c.get("user");
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
+    const explicit =
+      (body as { shopId?: unknown } | null)?.shopId !== undefined
+        ? String((body as { shopId?: unknown }).shopId)
+        : c.req.query("shopId");
+    const shop = await resolveShop(db, user, explicit);
+    if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+
     let next: TaxSettings;
     try {
       next = validate(body);
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
-    const row = ensureUserRow(db, user.id);
-    if (!row) return c.json({ error: "not seeded" }, 500);
     const now = new Date();
-    db.update(userSettings)
-      .set({ taxSettings: next, updatedAt: now })
-      .where(eq(userSettings.userId, user.id))
-      .run();
+    const owner = await isShopOwner(db, shop, user.id);
+    if (owner) {
+      await db
+        .update(shops)
+        .set({ taxSettings: next, updatedAt: now })
+        .where(eq(shops.id, shop));
+    } else {
+      await upsertShopUserSettings(db, shop, user.id, { taxSettings: next });
+    }
     return c.json(next);
   });
 
-  app.get("/auto-refresh", (c) => {
-    const user = c.get("user")!;
-    const row = ensureUserRow(db, user.id);
+  app.get("/auto-refresh", async (c) => {
+    const user = c.get("user");
+    const shop = await resolveShop(db, user, c.req.query("shopId"));
+    if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+    const effective = await resolveShopSettings(db, shop, user.id);
+    if (!effective) return c.json({ error: "shop not found" }, 404);
     return c.json({
-      enabled: row?.autoRefreshEnabled ?? false,
-      intervalMin: row?.autoRefreshIntervalMin ?? 30,
+      shopId: shop,
+      enabled: effective.autoRefreshEnabled,
+      intervalMin: effective.autoRefreshIntervalMin,
     });
   });
 
   app.put("/auto-refresh", async (c) => {
-    const user = c.get("user")!;
+    const user = c.get("user");
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
-    const r = (body ?? {}) as { enabled?: unknown; intervalMin?: unknown };
+    const r = (body ?? {}) as {
+      enabled?: unknown;
+      intervalMin?: unknown;
+      shopId?: unknown;
+    };
+    const explicit =
+      r.shopId !== undefined ? String(r.shopId) : c.req.query("shopId");
+    const shop = await resolveShop(db, user, explicit);
+    if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+
     if (typeof r.enabled !== "boolean")
       return c.json({ error: "enabled must be boolean" }, 400);
     const min =
       typeof r.intervalMin === "number" && Number.isFinite(r.intervalMin)
         ? Math.max(1, Math.min(1440, Math.round(r.intervalMin)))
         : 30;
-    const row = ensureUserRow(db, user.id);
-    if (!row) return c.json({ error: "not seeded" }, 500);
     const now = new Date();
-    db.update(userSettings)
-      .set({
+    const owner = await isShopOwner(db, shop, user.id);
+    if (owner) {
+      await db
+        .update(shops)
+        .set({
+          autoRefreshEnabled: r.enabled,
+          autoRefreshIntervalMin: min,
+          updatedAt: now,
+        })
+        .where(eq(shops.id, shop));
+    } else {
+      await upsertShopUserSettings(db, shop, user.id, {
         autoRefreshEnabled: r.enabled,
         autoRefreshIntervalMin: min,
-        updatedAt: now,
-      })
-      .where(eq(userSettings.userId, user.id))
-      .run();
-    return c.json({ enabled: r.enabled, intervalMin: min });
+      });
+    }
+    return c.json({ shopId: shop, enabled: r.enabled, intervalMin: min });
   });
 
   return app;

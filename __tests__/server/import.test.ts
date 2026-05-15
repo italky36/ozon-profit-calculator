@@ -6,26 +6,12 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
 import * as schema from "../../server/db/schema";
-import { products, sessions, userSettings } from "../../server/db/schema";
+import { products, sessions } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { runCatalogImport } from "../../server/routes/import";
 import { getCategoryLookup } from "../../server/ozon/catalog";
 import type { OzonClient } from "../../server/ozon/client";
-import type { TaxSettings } from "../../src/types";
-import { createUserDirect } from "./_helpers";
-
-const SAMPLE_TAX: TaxSettings = {
-  damageRate: 0.01,
-  taxSystem: "УСН Доходы минус расходы",
-  usnIncomeRate: 0.06,
-  usnIncomeMinusRate: 0.07,
-  ausnIncomeRate: 0.08,
-  ausnIncomeMinusRate: 0.2,
-  osnoOooRate: 0.25,
-  osnoIpAnnualIncome: 2400000,
-  npdRate: 0.04,
-  partyExtraExpenses: 100,
-};
+import { createShopFor, createUserDirect } from "./_helpers";
 
 const TREE_RESPONSE = {
   result: [
@@ -135,6 +121,8 @@ interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
   cookie: string;
+  userId: number;
+  shopId: number;
 }
 
 const setupDb = (): TestEnv => {
@@ -149,10 +137,8 @@ const setupDb = (): TestEnv => {
     }
   }
   const db = drizzle(sqlite, { schema });
-  db.insert(userSettings)
-    .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
-    .run();
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const shopId = createShopFor(db, adminId);
   const sessionId = "test-import-session";
   db.insert(sessions)
     .values({
@@ -162,7 +148,13 @@ const setupDb = (): TestEnv => {
       createdAt: new Date(),
     })
     .run();
-  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
+  return {
+    db,
+    sqlite,
+    cookie: `ozon_calc_session=${sessionId}`,
+    userId: adminId,
+    shopId,
+  };
 };
 
 describe("getCategoryLookup", () => {
@@ -188,7 +180,7 @@ describe("runCatalogImport", () => {
   afterEach(() => env.sqlite.close());
 
   it("inserts new products with safe defaults", async () => {
-    const counters = await runCatalogImport(env.db, makeMockClient());
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
     expect(counters.added).toBe(2);
     expect(counters.updated).toBe(0);
     expect(counters.itemsProcessed).toBe(2);
@@ -235,6 +227,8 @@ describe("runCatalogImport", () => {
       .insert(products)
       .values({
         id: randomUUID(),
+        shopId: env.shopId,
+        userId: env.userId,
         articleId: "OFFER-1",
         productName: "Стартовое имя",
         category: "Кофеварки и кофемашины",
@@ -266,7 +260,7 @@ describe("runCatalogImport", () => {
       })
       .run();
 
-    const counters = await runCatalogImport(env.db, makeMockClient());
+    const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
     expect(counters.updated).toBe(1);
     expect(counters.added).toBe(1);
 
@@ -288,9 +282,9 @@ describe("runCatalogImport", () => {
   });
 
   it("is idempotent across repeat runs", async () => {
-    await runCatalogImport(env.db, makeMockClient());
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
     const before = env.db.select().from(products).all();
-    await runCatalogImport(env.db, makeMockClient());
+    await runCatalogImport(env.db, makeMockClient(), env.shopId, env.userId);
     const after = env.db.select().from(products).all();
     expect(after).toHaveLength(before.length);
     // ids stable
@@ -338,47 +332,59 @@ describe("import route", () => {
   });
 
   it("GET /api/credentials/status reports false when nothing configured", async () => {
-    const prevId = process.env.OZON_CLIENT_ID;
-    const prevKey = process.env.OZON_API_KEY;
-    delete process.env.OZON_CLIENT_ID;
-    delete process.env.OZON_API_KEY;
-    try {
-      const app = buildApp({ db: env.db });
-      const res = await app.request("/api/credentials/status", {
-        headers: { Cookie: env.cookie },
-      });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ hasCredentials: false, source: null });
-    } finally {
-      if (prevId) process.env.OZON_CLIENT_ID = prevId;
-      if (prevKey) process.env.OZON_API_KEY = prevKey;
-    }
+    const app = buildApp({ db: env.db });
+    const res = await app.request("/api/credentials/status", {
+      headers: { Cookie: env.cookie },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      shopId: env.shopId,
+      hasCredentials: false,
+      activeSource: null,
+      shop: { hasCredentials: false },
+    });
   });
 
   it("PUT /api/credentials saves to db and surfaces in status", async () => {
+    const app = buildApp({ db: env.db });
+    const headers = { "Content-Type": "application/json", Cookie: env.cookie };
+
+    const put = await app.request("/api/credentials", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ clientId: "abc", apiKey: "xyz" }),
+    });
+    expect(put.status).toBe(200);
+
+    const status = await app.request("/api/credentials/status", { headers });
+    expect(await status.json()).toEqual({
+      shopId: env.shopId,
+      hasCredentials: true,
+      activeSource: "shop",
+      shop: { hasCredentials: true },
+    });
+  });
+
+  it("POST /api/import/catalog returns 400 when shop has no creds, even if env is set", async () => {
     const prevId = process.env.OZON_CLIENT_ID;
     const prevKey = process.env.OZON_API_KEY;
-    delete process.env.OZON_CLIENT_ID;
-    delete process.env.OZON_API_KEY;
+    process.env.OZON_CLIENT_ID = "env-id";
+    process.env.OZON_API_KEY = "env-key";
     try {
       const app = buildApp({ db: env.db });
-      const headers = { "Content-Type": "application/json", Cookie: env.cookie };
-
-      const put = await app.request("/api/credentials", {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ clientId: "abc", apiKey: "xyz" }),
+      const res = await app.request("/api/import/catalog", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: env.cookie },
+        body: JSON.stringify({}),
       });
-      expect(put.status).toBe(200);
-
-      const status = await app.request("/api/credentials/status", { headers });
-      expect(await status.json()).toEqual({
-        hasCredentials: true,
-        source: "db",
-      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/ozon credentials not configured/);
     } finally {
-      if (prevId) process.env.OZON_CLIENT_ID = prevId;
-      if (prevKey) process.env.OZON_API_KEY = prevKey;
+      if (prevId === undefined) delete process.env.OZON_CLIENT_ID;
+      else process.env.OZON_CLIENT_ID = prevId;
+      if (prevKey === undefined) delete process.env.OZON_API_KEY;
+      else process.env.OZON_API_KEY = prevKey;
     }
   });
 });

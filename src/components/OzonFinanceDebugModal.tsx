@@ -25,6 +25,7 @@ export default function OzonFinanceDebugModal({ articleId, onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setError(null);
     setData(null);

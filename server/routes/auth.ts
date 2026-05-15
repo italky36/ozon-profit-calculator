@@ -3,7 +3,8 @@ import type { Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { eq } from "drizzle-orm";
 import type { DB } from "../db/client";
-import { users } from "../db/schema";
+import { shops, userSettings, users } from "../db/schema";
+import { readDefaultTaxSettings } from "../settings/defaults";
 import {
   consumeVerificationToken,
   createSession,
@@ -128,6 +129,51 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       .set({ isVerified: true, updatedAt: now })
       .where(eq(users.id, consumed.userId))
       .run();
+
+    // Autocreate a default shop on first verification. Idempotent — if the
+    // user already has a shop (e.g. legacy backfill ran), skip.
+    const existingShop = db
+      .select({ id: shops.id })
+      .from(shops)
+      .where(eq(shops.userId, consumed.userId))
+      .get();
+    let activeShopId: number;
+    if (existingShop) {
+      activeShopId = existingShop.id;
+    } else {
+      const inserted = db
+        .insert(shops)
+        .values({
+          userId: consumed.userId,
+          name: "Мой магазин",
+          shortName: "M1",
+          color: null,
+          taxSettings: readDefaultTaxSettings(db),
+          autoRefreshEnabled: false,
+          autoRefreshIntervalMin: 30,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: shops.id })
+        .all();
+      activeShopId = inserted[0].id;
+    }
+    // Ensure user_settings row exists and active_shop_id is set.
+    const existingSettings = db
+      .select({ id: userSettings.id })
+      .from(userSettings)
+      .where(eq(userSettings.userId, consumed.userId))
+      .get();
+    if (existingSettings) {
+      db.update(userSettings)
+        .set({ activeShopId, updatedAt: now })
+        .where(eq(userSettings.userId, consumed.userId))
+        .run();
+    } else {
+      db.insert(userSettings)
+        .values({ userId: consumed.userId, activeShopId, updatedAt: now })
+        .run();
+    }
 
     const row = db
       .select()

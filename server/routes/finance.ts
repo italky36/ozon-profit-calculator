@@ -1,7 +1,9 @@
 import { Hono } from "hono";
-import { and, asc, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 import { financeTransactions } from "../db/schema";
 import type { DB } from "../db/client";
+import type { SessionUser } from "../auth/utils";
+import { resolveShopId, visibleShopIds } from "../middleware/session";
 
 const TYPES = new Set([
   "sale",
@@ -13,10 +15,42 @@ const TYPES = new Set([
   "other",
 ]);
 
-export function financeRoutes(db: DB): Hono {
-  const app = new Hono();
+type FinanceEnv = { Variables: { user: SessionUser } };
+
+/** Resolve which shopIds the request scopes to.
+ *  - explicit `?shopId=N` → just that shop (validated for visibility);
+ *  - omitted → all shops visible to the user (owned + granted).
+ */
+const scopeShopIds = async (
+  db: DB,
+  user: SessionUser,
+  explicit: string | undefined,
+): Promise<number[] | { error: string; status: 400 | 404 }> => {
+  if (explicit !== undefined && explicit !== "") {
+    try {
+      const id = await resolveShopId(db, user, { explicit });
+      if (!id) return { error: "no shop available", status: 400 };
+      return [id];
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return {
+        error: err.message,
+        status: (err.status as 400 | 404) ?? 400,
+      };
+    }
+  }
+  return await visibleShopIds(db, user.id);
+};
+
+export function financeRoutes(db: DB): Hono<FinanceEnv> {
+  const app = new Hono<FinanceEnv>();
 
   app.get("/transactions", async (c) => {
+    const user = c.get("user");
+    const scope = await scopeShopIds(db, user, c.req.query("shopId"));
+    if (!Array.isArray(scope)) return c.json({ error: scope.error }, scope.status);
+    if (scope.length === 0) return c.json([]);
+
     const fromRaw = c.req.query("from");
     const toRaw = c.req.query("to");
     const type = c.req.query("type");
@@ -24,7 +58,10 @@ export function financeRoutes(db: DB): Hono {
     const limit = Math.min(Number(c.req.query("limit") ?? 500), 5000);
     const offset = Math.max(Number(c.req.query("offset") ?? 0), 0);
 
-    const filters: SQL[] = [];
+    const filters: SQL[] = [
+      inArray(financeTransactions.shopId, scope),
+      eq(financeTransactions.userId, user.id),
+    ];
     if (fromRaw) {
       const from = new Date(fromRaw);
       if (Number.isNaN(from.getTime()))
@@ -45,10 +82,11 @@ export function financeRoutes(db: DB): Hono {
       filters.push(eq(financeTransactions.articleId, articleId));
     }
 
-    const where = filters.length ? and(...filters) : undefined;
+    const where = and(...filters);
 
     const rows = await db
       .select({
+        shopId: financeTransactions.shopId,
         operationId: financeTransactions.operationId,
         operationType: financeTransactions.operationType,
         operationDate: financeTransactions.operationDate,
@@ -67,6 +105,7 @@ export function financeRoutes(db: DB): Hono {
     const out = rows.map((r) => {
       const raw = (r.raw ?? {}) as { accruals_for_sale?: number };
       return {
+        shopId: r.shopId,
         operationId: r.operationId,
         operationType: r.operationType,
         operationDate: r.operationDate,
@@ -85,9 +124,17 @@ export function financeRoutes(db: DB): Hono {
   });
 
   app.get("/summary", async (c) => {
+    const user = c.get("user");
+    const scope = await scopeShopIds(db, user, c.req.query("shopId"));
+    if (!Array.isArray(scope)) return c.json({ error: scope.error }, scope.status);
+    if (scope.length === 0) return c.json([]);
+
     const fromRaw = c.req.query("from");
     const toRaw = c.req.query("to");
-    const filters: SQL[] = [];
+    const filters: SQL[] = [
+      inArray(financeTransactions.shopId, scope),
+      eq(financeTransactions.userId, user.id),
+    ];
     if (fromRaw) {
       const from = new Date(fromRaw);
       if (Number.isNaN(from.getTime()))
@@ -100,7 +147,7 @@ export function financeRoutes(db: DB): Hono {
         return c.json({ error: "invalid 'to'" }, 400);
       filters.push(lte(financeTransactions.operationDate, to));
     }
-    const where = filters.length ? and(...filters) : undefined;
+    const where = and(...filters);
 
     const rows = await db
       .select({
@@ -116,10 +163,21 @@ export function financeRoutes(db: DB): Hono {
     return c.json(rows);
   });
 
-  // Удалить ВСЕ накопленные транзакции. Используется кнопкой «Очистить
-  // импортированные финансы» в UI. После этого можно импортировать с нуля.
+  // Удалить накопленные транзакции. Scope: либо ?shopId=N, либо все магазины
+  // юзера.
   app.delete("/transactions/all", async (c) => {
-    const result = await db.delete(financeTransactions);
+    const user = c.get("user");
+    const scope = await scopeShopIds(db, user, c.req.query("shopId"));
+    if (!Array.isArray(scope)) return c.json({ error: scope.error }, scope.status);
+    if (scope.length === 0) return c.json({ deleted: 0 });
+    const result = await db
+      .delete(financeTransactions)
+      .where(
+        and(
+          inArray(financeTransactions.shopId, scope),
+          eq(financeTransactions.userId, user.id),
+        ),
+      );
     return c.json({ deleted: result.changes });
   });
 

@@ -2,22 +2,26 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Ban,
   CircleCheck,
-  KeyRound,
   Mail,
   MailPlus,
   RotateCcw,
   Send,
   ShieldAlert,
+  Store,
   Trash2,
+  UserPlus,
+  UserMinus,
 } from "lucide-react";
 import {
   api,
-  type AdminOzonCredentials,
+  type AdminShop,
+  type AdminShopAccess,
+  type AdminShopCandidate,
   type AdminSmtpSettings,
   type AdminUser,
   type SmtpSecureMode,
 } from "../../api";
-import { useAuth } from "../../contexts/AuthContext";
+import { useAuth } from "../../contexts/useAuth";
 
 export default function AdminPage() {
   const { user: me } = useAuth();
@@ -42,8 +46,330 @@ export default function AdminPage() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <UsersSection meId={me.id} />
-      <OzonCredentialsSection />
+      <ShopsSection />
       <SmtpSection />
+      <TestSendSection />
+    </div>
+  );
+}
+
+function ShopsSection() {
+  const [shops, setShops] = useState<AdminShop[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [accessByShop, setAccessByShop] = useState<
+    Record<number, AdminShopAccess[]>
+  >({});
+  const [granting, setGranting] = useState<number | null>(null);
+  const [candidates, setCandidates] = useState<AdminShopCandidate[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<number | "">("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const list = await api.admin.shops.list();
+      setShops(list);
+      const access: Record<number, AdminShopAccess[]> = {};
+      for (const s of list) {
+        access[s.id] = await api.admin.shops.getAccess(s.id);
+      }
+      setAccessByShop(access);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void reload();
+  }, [reload]);
+
+  const openGrant = async (shopId: number) => {
+    setGranting(shopId);
+    setSelectedUserId("");
+    setError(null);
+    try {
+      setCandidates(await api.admin.shops.getCandidates(shopId));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const submitGrant = async () => {
+    if (granting == null || typeof selectedUserId !== "number") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.admin.shops.grantAccess(granting, selectedUserId);
+      setGranting(null);
+      await reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (shopId: number, userId: number, email: string) => {
+    if (
+      !window.confirm(
+        `Отозвать доступ у ${email}? Его товары, финансы и импорты в этом магазине будут удалены безвозвратно.`,
+      )
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.admin.shops.revokeAccess(shopId, userId);
+      await reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h3
+        style={{
+          margin: "0 0 12px",
+          fontSize: 14,
+          fontWeight: 700,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <Store size={16} /> Магазины и доступы
+      </h3>
+      <p
+        className="muted"
+        style={{ marginTop: 0, marginBottom: 12, fontSize: 12 }}
+      >
+        Магазины, которыми вы владеете. Назначьте пользователя — он увидит
+        магазин у себя со своим личным каталогом и финансами, используя API-ключи,
+        привязанные к этому магазину.
+      </p>
+      {error && (
+        <div
+          style={{
+            padding: "8px 12px",
+            background: "color-mix(in srgb, var(--err) 12%, transparent)",
+            color: "var(--err)",
+            borderRadius: 6,
+            fontSize: 13,
+            marginBottom: 12,
+          }}
+        >
+          {error}
+        </div>
+      )}
+      {loading ? (
+        <span className="muted">Загрузка…</span>
+      ) : shops.length === 0 ? (
+        <span className="muted">У вас пока нет магазинов.</span>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {shops.map((s) => {
+            const access = accessByShop[s.id] ?? [];
+            return (
+              <div
+                key={s.id}
+                style={{
+                  padding: 12,
+                  borderRadius: 8,
+                  border: "1px solid var(--border-soft)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      padding: "2px 8px",
+                      borderRadius: 5,
+                      fontWeight: 700,
+                      fontSize: 11,
+                      background:
+                        s.color ??
+                        "color-mix(in srgb, var(--accent) 18%, transparent)",
+                      color: s.color ? "#fff" : "var(--accent)",
+                    }}
+                  >
+                    {s.shortName}
+                  </span>
+                  <strong style={{ flex: 1 }}>{s.name}</strong>
+                  <span
+                    className="muted"
+                    style={{ fontSize: 12 }}
+                    title={
+                      s.hasOzonCreds
+                        ? "Привязаны ключи Ozon API"
+                        : "Ключи не настроены"
+                    }
+                  >
+                    {s.hasOzonCreds ? "Ozon API ✓" : "Ozon API —"}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    onClick={() => void openGrant(s.id)}
+                    title="Назначить пользователя"
+                  >
+                    <UserPlus size={14} /> Назначить
+                  </button>
+                </div>
+                {access.length > 0 ? (
+                  <ul
+                    style={{
+                      listStyle: "none",
+                      padding: 0,
+                      margin: "10px 0 0",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    {access.map((a) => (
+                      <li
+                        key={a.userId}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "4px 8px",
+                          borderRadius: 6,
+                          background:
+                            "color-mix(in srgb, var(--accent) 4%, transparent)",
+                          fontSize: 13,
+                        }}
+                      >
+                        <span style={{ flex: 1 }}>{a.email}</span>
+                        <span className="muted" style={{ fontSize: 11 }}>
+                          {a.role === "admin" ? "admin" : ""}
+                          {a.isBlocked ? " · заблокирован" : ""}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          disabled={busy}
+                          onClick={() => void revoke(s.id, a.userId, a.email)}
+                          title="Отозвать доступ (с удалением данных пользователя в этом магазине)"
+                        >
+                          <UserMinus size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div
+                    className="muted"
+                    style={{ marginTop: 8, fontSize: 12 }}
+                  >
+                    Пока никому не выдан доступ.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {granting != null && (
+        <div className="modal-backdrop" onClick={() => setGranting(null)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 480, width: "92vw" }}
+          >
+            <div className="modal-header">
+              <h3>Назначить пользователя</h3>
+              <button
+                className="btn-icon"
+                onClick={() => setGranting(null)}
+                aria-label="Закрыть"
+              >
+                ×
+              </button>
+            </div>
+            {candidates.length === 0 ? (
+              <p className="muted">
+                Все подходящие пользователи уже имеют доступ или их нет.
+              </p>
+            ) : (
+              <>
+                <label
+                  className="gs-field"
+                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                >
+                  <span className="gs-label">Пользователь</span>
+                  <select
+                    value={selectedUserId}
+                    onChange={(e) =>
+                      setSelectedUserId(
+                        e.target.value ? Number(e.target.value) : "",
+                      )
+                    }
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 6,
+                      border: "1px solid var(--border-soft)",
+                      fontSize: 13,
+                    }}
+                  >
+                    <option value="">— выберите —</option>
+                    {candidates.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.email}
+                        {u.role === "admin" ? " (admin)" : ""}
+                        {u.isBlocked ? " (заблокирован)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "flex-end",
+                    gap: 8,
+                    marginTop: 16,
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    onClick={() => setGranting(null)}
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={
+                      busy ||
+                      typeof selectedUserId !== "number" ||
+                      selectedUserId <= 0
+                    }
+                    onClick={() => void submitGrant()}
+                  >
+                    {busy ? "…" : "Назначить"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -68,6 +394,7 @@ function UsersSection({ meId }: { meId: number }) {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void reload();
   }, [reload]);
 
@@ -429,149 +756,6 @@ function secureHint(mode: SmtpSecureMode, port: string): string {
     : "Авто → STARTTLS / plain (nodemailer апгрейдится, если сервер поддерживает).";
 }
 
-function OzonCredentialsSection() {
-  const [data, setData] = useState<AdminOzonCredentials | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [clientId, setClientId] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  const reload = useCallback(async () => {
-    setLoading(true);
-    try {
-      const d = await api.admin.getOzonCredentials();
-      setData(d);
-      setClientId(d.clientId ?? "");
-      setApiKey("");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await api.admin.putOzonCredentials({
-        clientId: clientId.trim(),
-        apiKey: apiKey.trim() || undefined,
-      });
-      setNotice("Сохранено");
-      await reload();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="card">
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 12,
-        }}
-      >
-        <h3
-          style={{
-            margin: 0,
-            fontSize: 14,
-            fontWeight: 700,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <KeyRound size={14} /> Ozon Seller API
-          <span style={badge}>источник: {sourceLabel(data?.source ?? null)}</span>
-        </h3>
-        <button
-          type="button"
-          className="btn-icon"
-          onClick={() => void reload()}
-          disabled={loading || busy}
-          title="Обновить"
-        >
-          <RotateCcw size={14} /> Обновить
-        </button>
-      </div>
-
-      {error && <div style={errBox}>{error}</div>}
-      {notice && <div style={okBox}>{notice}</div>}
-
-      <p className="muted" style={{ fontSize: 12, marginTop: 0, marginBottom: 12 }}>
-        Приоритет: запись в БД → переменные окружения <code>OZON_CLIENT_ID</code>/
-        <code>OZON_API_KEY</code>. Если в БД есть запись — она перекрывает .env.
-      </p>
-
-      <div style={fieldRow}>
-        <label style={labelStyle}>Client ID</label>
-        <input
-          style={inputStyle}
-          value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
-          placeholder="например, 123456"
-          disabled={busy}
-        />
-      </div>
-      <div style={fieldRow}>
-        <label style={labelStyle}>
-          API Key
-          {data?.hasApiKey && (
-            <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>
-              (сохранён)
-            </span>
-          )}
-        </label>
-        <input
-          style={inputStyle}
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder={data?.hasApiKey ? "оставьте пустым, чтобы не менять" : "вставьте ключ"}
-          disabled={busy}
-          autoComplete="new-password"
-        />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          alignItems: "center",
-          marginTop: 12,
-        }}
-      >
-        <button
-          type="button"
-          className="btn-icon"
-          onClick={() => void save()}
-          disabled={busy || !clientId.trim() || (!data?.hasApiKey && !apiKey.trim())}
-        >
-          Сохранить
-        </button>
-        {data?.updatedAt && (
-          <span className="muted" style={{ fontSize: 12 }}>
-            обновлено {new Date(data.updatedAt).toLocaleString()}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function SmtpSection() {
   const [data, setData] = useState<AdminSmtpSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -581,8 +765,6 @@ function SmtpSection() {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [from, setFrom] = useState("");
-  const [testTo, setTestTo] = useState("");
-  const [testSubject, setTestSubject] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -606,6 +788,7 @@ function SmtpSection() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void reload();
   }, [reload]);
 
@@ -652,27 +835,6 @@ function SmtpSection() {
     }
   };
 
-  const sendTest = async () => {
-    if (!testTo.trim() || !testTo.includes("@")) {
-      setError("Укажите валидный email для теста");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const r = await api.admin.testSmtp(
-        testTo.trim(),
-        testSubject.trim() || undefined,
-      );
-      setNotice(`Тестовое письмо отправлено через ${r.source}`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="card">
       <div
@@ -693,8 +855,10 @@ function SmtpSection() {
             gap: 8,
           }}
         >
-          <MailPlus size={14} /> SMTP для писем подтверждения
-          <span style={badge}>источник: {sourceLabel(data?.source ?? null)}</span>
+          <MailPlus size={14} />
+          <span className="admin-h3-full">SMTP для писем подтверждения</span>
+          <span className="admin-h3-short">SMTP</span>
+          <span style={badge}><span className="admin-badge-prefix">источник: </span>{sourceLabel(data?.source ?? null)}</span>
         </h3>
         <button
           type="button"
@@ -716,7 +880,7 @@ function SmtpSection() {
         никогда не возвращается из API — оставьте поле пустым, чтобы не менять.
       </p>
 
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>Host</label>
         <input
           style={inputStyle}
@@ -726,7 +890,7 @@ function SmtpSection() {
           disabled={busy}
         />
       </div>
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>Port</label>
         <input
           style={inputStyle}
@@ -737,7 +901,7 @@ function SmtpSection() {
           disabled={busy}
         />
       </div>
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>Шифрование</label>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <select
@@ -756,7 +920,7 @@ function SmtpSection() {
           </span>
         </div>
       </div>
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>User</label>
         <input
           style={inputStyle}
@@ -776,7 +940,7 @@ function SmtpSection() {
           autoComplete="off"
         />
       </div>
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>
           Password
           {data?.hasPassword && (
@@ -795,7 +959,7 @@ function SmtpSection() {
           autoComplete="new-password"
         />
       </div>
-      <div style={fieldRow}>
+      <div className="admin-fieldrow" style={fieldRow}>
         <label style={labelStyle}>From</label>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <input
@@ -856,36 +1020,92 @@ function SmtpSection() {
         )}
       </div>
 
-      <hr style={{ border: 0, borderTop: "1px solid var(--border-soft)", margin: "16px 0" }} />
+    </div>
+  );
+}
 
-      <div style={fieldRow}>
-        <label style={labelStyle}>Тест: тема</label>
-        <input
-          style={inputStyle}
-          value={testSubject}
-          onChange={(e) => setTestSubject(e.target.value)}
-          placeholder="Тест отправки писем — Калькулятор Ozon"
-          disabled={busy}
-        />
+function TestSendSection() {
+  const [testSubject, setTestSubject] = useState("");
+  const [testTo, setTestTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const sendTest = async () => {
+    if (!testTo.trim() || !testTo.includes("@")) {
+      setError("Укажите валидный email для теста");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.admin.testSmtp(
+        testTo.trim(),
+        testSubject.trim() || undefined,
+      );
+      setNotice(`Тестовое письмо отправлено через ${r.source}`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          marginBottom: 12,
+        }}
+      >
+        <h3
+          style={{
+            margin: 0,
+            fontSize: 14,
+            fontWeight: 700,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <Send size={14} /> Тест отправки
+        </h3>
       </div>
-      <div style={fieldRow}>
-        <label style={labelStyle}>Тест: отправить на</label>
-        <div style={{ display: "flex", gap: 8 }}>
+      {error && <div style={errBox}>{error}</div>}
+      {notice && <div style={okBox}>{notice}</div>}
+      <div className="admin-test-row">
+        <div className="admin-fieldrow" style={fieldRow}>
+          <label style={labelStyle}>Тест: тема</label>
           <input
-            style={{ ...inputStyle, flex: 1 }}
-            value={testTo}
-            onChange={(e) => setTestTo(e.target.value)}
-            placeholder="you@example.com"
+            style={inputStyle}
+            value={testSubject}
+            onChange={(e) => setTestSubject(e.target.value)}
+            placeholder="Тест отправки писем — Калькулятор Ozon"
             disabled={busy}
           />
-          <button
-            type="button"
-            className="btn-icon"
-            onClick={() => void sendTest()}
-            disabled={busy || !testTo.trim()}
-          >
-            <Send size={14} /> Отправить
-          </button>
+        </div>
+        <div className="admin-fieldrow" style={fieldRow}>
+          <label style={labelStyle}>Тест: отправить на</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              placeholder="you@example.com"
+              disabled={busy}
+            />
+            <button
+              type="button"
+              className="btn-icon"
+              onClick={() => void sendTest()}
+              disabled={busy || !testTo.trim()}
+            >
+              <Send size={14} /> Отправить
+            </button>
+          </div>
         </div>
       </div>
       <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>

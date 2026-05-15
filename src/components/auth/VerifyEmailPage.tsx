@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useAuth } from "../../contexts/AuthContext";
+import { useAuth } from "../../contexts/useAuth";
 import { getQueryParam, navigate } from "../../lib/router";
 import AuthShell, { FormError, FormNotice } from "./AuthShell";
 
@@ -19,6 +19,7 @@ export default function VerifyEmailPage() {
     ranRef.current = true;
     const token = getQueryParam("token");
     if (!token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setState({ kind: "missing" });
       return;
     }

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import GlobalSettings from "./components/GlobalSettings";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ShopSettings from "./components/ShopSettings";
 import ProductsTable, { type RowResult } from "./components/ProductsTable";
 import ProductDrawer from "./components/ProductDrawer";
 import OzonImportModal from "./components/OzonImportModal";
@@ -8,8 +8,9 @@ import AdminPage from "./components/admin/AdminPage";
 import AppHeader from "./components/AppHeader";
 import TabBar from "./components/TabBar";
 import TweaksPanel from "./components/TweaksPanel";
+import ShopsModal from "./components/ShopsModal";
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
-import { useAuth } from "./contexts/AuthContext";
+import { useAuth } from "./contexts/useAuth";
 import { Package, ShieldCheck, Wallet, Settings as SettingsIcon } from "lucide-react";
 import type { FilterValue } from "./components/ChannelFilter";
 import { calculateRow } from "./lib/calc";
@@ -19,7 +20,7 @@ import type {
   References,
   TaxSettings,
 } from "./types";
-import { api, type RealizedMarginRow, type RefsResponse } from "./api";
+import { api, type RealizedMarginRow, type RefsResponse, type Shop } from "./api";
 import { initAutoRefresh, onAutoRefreshChange } from "./lib/autoRefresh";
 
 const newId = (): string => {
@@ -27,6 +28,22 @@ const newId = (): string => {
     return crypto.randomUUID();
   }
   return `id-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+};
+
+const SHOP_FILTER_KEY = "ozon-calc.shopFilter";
+const loadShopFilter = (): Set<number> => {
+  try {
+    const raw = localStorage.getItem(SHOP_FILTER_KEY);
+    if (!raw) return new Set();
+    return new Set(
+      raw
+        .split(",")
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && n > 0),
+    );
+  } catch {
+    return new Set();
+  }
 };
 
 const COFFEE_DEFAULT: ProductInput = {
@@ -122,13 +139,75 @@ export default function App() {
 
   const [refs, setRefs] = useState<References | null>(null);
   const [categories, setCategories] = useState<Record<string, string[]>>({});
-  const [taxSettings, setTaxSettings] = useState<TaxSettings | null>(null);
+  const [shops, setShops] = useState<Shop[]>([]);
+  const [activeShopId, setActiveShopId] = useState<number | null>(null);
+  /** Пустой Set означает «Все магазины». */
+  const [shopFilter, setShopFilter] = useState<Set<number>>(
+    () => loadShopFilter(),
+  );
+
+  // Persist filter as comma-separated ids; clear key when empty.
+  useEffect(() => {
+    try {
+      if (shopFilter.size === 0) {
+        localStorage.removeItem(SHOP_FILTER_KEY);
+      } else {
+        localStorage.setItem(SHOP_FILTER_KEY, [...shopFilter].join(","));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [shopFilter]);
+
+  // When shops list changes (delete/rename), drop any stale ids from the filter.
+  // Sync-to-external-state pattern: shops are owned by another source of truth
+  // (server), and the filter set must reflect what currently exists.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShopFilter((cur) => {
+      if (cur.size === 0) return cur;
+      const validIds = new Set(shops.map((s) => s.id));
+      const next = new Set([...cur].filter((id) => validIds.has(id)));
+      return next.size === cur.size ? cur : next;
+    });
+  }, [shops]);
   const [rows, setRows] = useState<ProductRow[]>([]);
+
+  const activeShop = useMemo(
+    () => shops.find((s) => s.id === activeShopId) ?? null,
+    [shops, activeShopId],
+  );
+
+  useEffect(() => {
+    if (activeShopId == null) return;
+    localStorage.setItem("ozon-calc.activeShopId", String(activeShopId));
+    void api.shops.setActive(activeShopId).catch(() => {
+      // Best-effort sync — UI продолжит работать с local state.
+    });
+    // Refresh refs — cluster tariffs depend on the active shop's set.
+    void api.refs.get(activeShopId).then((r) => {
+      setRefs({
+        commissions: r.commissions,
+        storage: r.storage,
+        logisticsTariffs: r.logisticsTariffs,
+        logisticsSettings: (r as RefsResponse).logisticsSettings,
+        logisticsClusterTariffs: r.logisticsClusterTariffs,
+      });
+    }).catch(() => {
+      /* best-effort */
+    });
+  }, [activeShopId]);
+  const taxByShop = useMemo(
+    () => new Map(shops.map((s) => [s.id, s.taxSettings])),
+    [shops],
+  );
+  const taxSettings: TaxSettings | null = activeShop?.taxSettings ?? null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
+  const [shopsModalOpen, setShopsModalOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
   const TAB_KEY = "ozon-calc.active-tab";
   const [activeTab, setActiveTab] = useState<TabId>(() => {
@@ -149,6 +228,7 @@ export default function App() {
   }, [activeTab]);
   // Если не-админ ранее был на "admin" и роль изменилась — откатить.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (activeTab === "admin" && !isAdmin) setActiveTab("calc");
   }, [activeTab, isAdmin]);
   const [channelFilter, setChannelFilter] = useState<FilterValue>("Все");
@@ -269,10 +349,9 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const [refsData, productList, settings] = await Promise.all([
+        const [refsData, shopList] = await Promise.all([
           api.refs.get(),
-          api.products.list(),
-          api.settings.get(),
+          api.shops.list(),
         ]);
         if (cancelled) return;
         const r: References = {
@@ -284,9 +363,21 @@ export default function App() {
         };
         setRefs(r);
         setCategories(refsData.categories);
+        setShops(shopList);
+        // Active shop: persisted localStorage (последний выбранный) или
+        // первый в списке. Сервер не возвращает активный отдельно — у нас
+        // user_settings.active_shop_id, но для UX достаточно localStorage,
+        // и активный shopId дублируется на сервер при смене.
+        const persisted = Number(localStorage.getItem("ozon-calc.activeShopId") ?? "");
+        const initialActive =
+          shopList.find((s) => s.id === persisted)?.id ??
+          shopList[0]?.id ??
+          null;
+        setActiveShopId(initialActive);
+        // Загружаем товары всех магазинов (для фильтра «Все»).
+        const productList = await api.products.list();
+        if (cancelled) return;
         setRows(productList);
-        setTaxSettings(settings);
-        lastSavedSettings.current = settings;
       } catch (e) {
         if (!cancelled) setLoadError((e as Error).message);
       } finally {
@@ -298,28 +389,37 @@ export default function App() {
     };
   }, []);
 
-  // Boot the auto-refresh timer once we know creds + settings exist on server.
-  // The timer lives at module scope, so reload-survival is purely about reading
-  // persisted config and arming it on each app load.
+  const refreshProducts = useCallback(async () => {
+    try {
+      const list = await api.products.list();
+      setRows(list);
+    } catch (e) {
+      setActionError(`refresh: ${(e as Error).message}`);
+    }
+  }, []);
+
+  // Boot auto-refresh timers per shop. Re-init whenever the shop list changes.
   useEffect(() => {
-    void initAutoRefresh();
+    if (shops.length === 0) return;
+    void initAutoRefresh(shops.map((s) => s.id));
     const off = onAutoRefreshChange(() => {
       // Each tick / completion event triggers a product list refresh so the
       // table reflects whatever the auto-import just pulled.
       void refreshProducts();
     });
     return off;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [shops, refreshProducts]);
 
+  // Debounced PUT taxSettings of the active shop on change.
   useEffect(() => {
-    if (!taxSettings) return;
-    if (lastSavedSettings.current === taxSettings) return;
+    if (!activeShop) return;
+    if (lastSavedSettings.current === activeShop.taxSettings) return;
     if (settingsTimer.current) clearTimeout(settingsTimer.current);
+    const shopId = activeShop.id;
+    const snapshot = activeShop.taxSettings;
     settingsTimer.current = setTimeout(() => {
-      const snapshot = taxSettings;
       api.settings
-        .put(snapshot)
+        .put(snapshot, shopId)
         .then(() => {
           lastSavedSettings.current = snapshot;
         })
@@ -328,16 +428,21 @@ export default function App() {
     return () => {
       if (settingsTimer.current) clearTimeout(settingsTimer.current);
     };
-  }, [taxSettings]);
+  }, [activeShop]);
 
   const results = useMemo(() => {
     const map = new Map<string, RowResult>();
-    if (!refs || !taxSettings) return map;
+    if (!refs) return map;
     for (const row of rows) {
+      const tax = taxByShop.get(row.shopId);
+      if (!tax) {
+        map.set(row.id, { error: "магазин не найден" });
+        continue;
+      }
       try {
         map.set(
           row.id,
-          calculateRow(row.input, taxSettings, refs, {
+          calculateRow(row.input, tax, refs, {
             ozonCommissions: row.ozonCommissions ?? null,
           }),
         );
@@ -346,22 +451,33 @@ export default function App() {
       }
     }
     return map;
-  }, [rows, taxSettings, refs]);
+  }, [rows, taxByShop, refs]);
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((row) => {
-      if (row.input.articleId.toLowerCase().includes(q)) return true;
-      if (row.input.productName.toLowerCase().includes(q)) return true;
-      if (row.ozonSku != null && String(row.ozonSku).includes(q)) return true;
-      return false;
-    });
-  }, [rows, searchQuery]);
+    let out = rows;
+    if (shopFilter.size > 0) {
+      out = out.filter((row) => shopFilter.has(row.shopId));
+    }
+    if (q) {
+      out = out.filter((row) => {
+        if (row.input.articleId.toLowerCase().includes(q)) return true;
+        if (row.input.productName.toLowerCase().includes(q)) return true;
+        if (row.ozonSku != null && String(row.ozonSku).includes(q)) return true;
+        return false;
+      });
+    }
+    return out;
+  }, [rows, searchQuery, shopFilter]);
 
   const addRow = async () => {
-    const taken = new Set(rows.map((r) => r.input.articleId));
-    const template = rows[rows.length - 1]?.input ?? COFFEE_DEFAULT;
+    if (!activeShopId) {
+      setActionError("add: no active shop");
+      return;
+    }
+    const shopRows = rows.filter((r) => r.shopId === activeShopId);
+    const taken = new Set(shopRows.map((r) => r.input.articleId));
+    const template = shopRows[shopRows.length - 1]?.input ?? COFFEE_DEFAULT;
     const fitted = fitsCategories(template, categories);
     const baseArticle = fitted.articleId || "NEW-001";
     const input: ProductInput = {
@@ -369,10 +485,10 @@ export default function App() {
       articleId: uniqueArticleId(baseArticle, taken),
     };
     const tempId = `temp-${newId()}`;
-    setRows((prev) => [...prev, { id: tempId, input }]);
+    setRows((prev) => [...prev, { id: tempId, shopId: activeShopId, input }]);
     setSelectedId(tempId);
     try {
-      const created = await api.products.create(input);
+      const created = await api.products.create(activeShopId, input);
       setRows((prev) => prev.map((r) => (r.id === tempId ? created : r)));
       setSelectedId(created.id);
     } catch (e) {
@@ -405,15 +521,6 @@ export default function App() {
     } catch (e) {
       setRows(snapshot);
       setActionError(`update: ${(e as Error).message}`);
-    }
-  };
-
-  const refreshProducts = async () => {
-    try {
-      const list = await api.products.list();
-      setRows(list);
-    } catch (e) {
-      setActionError(`refresh: ${(e as Error).message}`);
     }
   };
 
@@ -496,11 +603,42 @@ export default function App() {
         {activeTab === "calc" && (
           <>
 
-            <GlobalSettings
+            <ShopSettings
               value={taxSettings}
-              onChange={setTaxSettings}
+              onChange={(next) => {
+                if (!activeShopId) return;
+                setShops((prev) =>
+                  prev.map((s) =>
+                    s.id === activeShopId ? { ...s, taxSettings: next } : s,
+                  ),
+                );
+              }}
               onProductsRefresh={refreshProducts}
               onRefsRefresh={refreshRefs}
+              shopId={activeShopId}
+              shopName={activeShop?.name ?? null}
+              shopColor={activeShop?.color ?? null}
+              currentTariffSetId={activeShop?.tariffSetId ?? null}
+              userIsAdmin={user?.role === "admin"}
+              shopIsOwner={activeShop?.isOwner ?? true}
+              shopOwnerEmail={activeShop?.ownerEmail ?? null}
+              shopHasOverrides={activeShop?.hasOverrides ?? false}
+              allShops={shops}
+              onActiveShopChange={setActiveShopId}
+              onManageShops={() => setShopsModalOpen(true)}
+              onResetOverrides={async () => {
+                const freshShops = await api.shops.list();
+                setShops(freshShops);
+              }}
+              onTariffChanged={async () => {
+                // Reload shops (to pick up new tariffSetId) and refs (active
+                // tariff rows attached to /api/refs response).
+                const [freshShops] = await Promise.all([
+                  api.shops.list(),
+                  refreshRefs(),
+                ]);
+                setShops(freshShops);
+              }}
             />
 
             <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
@@ -558,6 +696,7 @@ export default function App() {
                 onUpdate={updateRow}
                 onRemove={removeRow}
                 onImport={() => setImportOpen(true)}
+                onProductsRefresh={refreshProducts}
                 channelFilter={channelFilter}
                 onChannelFilterChange={setChannelFilter}
                 showChart={tweaks.showChart}
@@ -565,10 +704,14 @@ export default function App() {
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
                 totalRowsCount={rows.length}
-                taxSettings={taxSettings}
+                taxSettings={taxSettings ?? undefined}
                 activeOnly={activeOnly}
                 onActiveOnlyChange={setActiveOnly}
                 breakdownMode={tweaks.breakdownMode}
+                shopsById={new Map(shops.map((s) => [s.id, s]))}
+                shopsForFilter={shops}
+                shopFilter={shopFilter}
+                onShopFilterChange={setShopFilter}
               />
             </div>
 
@@ -591,6 +734,7 @@ export default function App() {
 
         {activeTab === "finance" && (
           <FinanceTab
+            shops={shops}
             onOpenArticle={(articleId) => {
               const row = rows.find((r) => r.input.articleId === articleId);
               if (row) {
@@ -608,8 +752,27 @@ export default function App() {
         {activeTab === "admin" && isAdmin && <AdminPage />}
       </main>
 
-      {importOpen && (
+      {shopsModalOpen && (
+        <ShopsModal
+          shops={shops}
+          activeShopId={activeShopId}
+          onClose={() => setShopsModalOpen(false)}
+          onChanged={(next) => {
+            setShops(next);
+            // If active shop got removed, fall back to first.
+            if (
+              activeShopId !== null &&
+              !next.find((s) => s.id === activeShopId)
+            ) {
+              setActiveShopId(next[0]?.id ?? null);
+            }
+          }}
+        />
+      )}
+
+      {importOpen && shops.length > 0 && (
         <OzonImportModal
+          shops={shops}
           onClose={() => setImportOpen(false)}
           onImported={refreshProducts}
         />

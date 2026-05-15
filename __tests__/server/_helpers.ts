@@ -5,7 +5,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import * as schema from "../../server/db/schema";
-import { sessions, userSettings, users } from "../../server/db/schema";
+import { sessions, shops, userSettings, users } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { setEmailClient, type EmailClient, type EmailMessage } from "../../server/email/client";
 import type { TaxSettings } from "../../src/types";
@@ -46,9 +46,9 @@ export function setupTestEnv(): TestEnv {
     }
   }
   const db = drizzle(sqlite, { schema });
-  db.insert(userSettings)
-    .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
-    .run();
+  // Per-user settings rows are created lazily on first GET /api/settings via
+  // ensureUserRow. Tests that exercise tax settings should login first; that
+  // path will seed the user's row.
 
   const emails: EmailMessage[] = [];
   const mock: EmailClient = {
@@ -91,6 +91,48 @@ export function createUserDirect(
   return result.id;
 }
 
+/** Create a shop for `userId` with SAMPLE_TAX and set it as active. Returns the
+ * shop's id. Used by tests that need a user with a default shop (multi-shop
+ * model requires every user to have ≥1 shop). */
+export function createShopFor(
+  db: DB,
+  userId: number,
+  opts: { name?: string; shortName?: string; color?: string | null } = {},
+): number {
+  const now = new Date();
+  const inserted = db
+    .insert(shops)
+    .values({
+      userId,
+      name: opts.name ?? "Тестовый магазин",
+      shortName: opts.shortName ?? `T${userId % 9}`,
+      color: opts.color ?? null,
+      taxSettings: SAMPLE_TAX,
+      autoRefreshEnabled: false,
+      autoRefreshIntervalMin: 30,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: shops.id })
+    .get();
+  const settings = db
+    .select({ id: userSettings.id })
+    .from(userSettings)
+    .where(eq(userSettings.userId, userId))
+    .get();
+  if (settings) {
+    db.update(userSettings)
+      .set({ activeShopId: inserted.id, updatedAt: now })
+      .where(eq(userSettings.userId, userId))
+      .run();
+  } else {
+    db.insert(userSettings)
+      .values({ userId, activeShopId: inserted.id, updatedAt: now })
+      .run();
+  }
+  return inserted.id;
+}
+
 /** Issue POST /api/auth/login and return Set-Cookie session token. */
 export async function loginAndGetCookie(
   app: TestEnv["app"],
@@ -114,27 +156,42 @@ export async function loginAndGetCookie(
   return cookieValue; // "ozon_calc_session=..."
 }
 
-/** Convenience: create user + login → return cookie. */
+/** Convenience: create user + default shop + login → return cookie & ids.
+ * Multi-shop model requires every authenticated user to have ≥1 shop, so a
+ * fresh user gets one automatically (mirrors the verifyEmail path). */
 export async function loginAs(
   env: TestEnv,
   email: string,
   password: string,
   role: "admin" | "user" = "user",
-): Promise<{ cookie: string; userId: number }> {
+): Promise<{ cookie: string; userId: number; shopId: number }> {
   const existing = env.db
     .select({ id: users.id })
     .from(users)
     .where(eq(users.email, email))
     .get();
-  const userId = existing
-    ? existing.id
-    : createUserDirect(env.db, email, password, role);
+  let userId: number;
+  let shopId: number;
+  if (existing) {
+    userId = existing.id;
+    const existingShop = env.db
+      .select({ id: shops.id })
+      .from(shops)
+      .where(eq(shops.userId, userId))
+      .get();
+    shopId = existingShop?.id ?? createShopFor(env.db, userId);
+  } else {
+    userId = createUserDirect(env.db, email, password, role);
+    shopId = createShopFor(env.db, userId);
+  }
   const cookie = await loginAndGetCookie(env.app, email, password);
-  return { cookie, userId };
+  return { cookie, userId, shopId };
 }
 
-/** Sync admin-cookie path for legacy tests: creates admin user + inserts a
- * session row directly. Avoids the bcrypt cost of going through /login. */
+/** Sync admin-cookie path for legacy tests: creates admin user + default
+ * shop + inserts a session row directly. Avoids the bcrypt cost of /login.
+ * Returns `cookie` only for backwards compatibility; call sites that need
+ * shopId/userId should use loginAs instead. */
 export function adminSessionCookie(env: TestEnv): string {
   const userId = createUserDirect(
     env.db,
@@ -142,6 +199,7 @@ export function adminSessionCookie(env: TestEnv): string {
     "password",
     "admin",
   );
+  createShopFor(env.db, userId);
   const sessionId = "test-admin-session";
   env.db
     .insert(sessions)

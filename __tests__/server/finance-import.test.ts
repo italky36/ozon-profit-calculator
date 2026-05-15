@@ -4,26 +4,12 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "../../server/db/schema";
-import { financeTransactions, sessions, userSettings } from "../../server/db/schema";
+import { financeTransactions, sessions } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { runFinanceImport } from "../../server/routes/import";
 import type { OzonClient } from "../../server/ozon/client";
-import type { TaxSettings } from "../../src/types";
 import fixture from "../fixtures/ozon-finance.json" with { type: "json" };
-import { createUserDirect } from "./_helpers";
-
-const SAMPLE_TAX: TaxSettings = {
-  damageRate: 0.01,
-  taxSystem: "УСН Доходы минус расходы",
-  usnIncomeRate: 0.06,
-  usnIncomeMinusRate: 0.07,
-  ausnIncomeRate: 0.08,
-  ausnIncomeMinusRate: 0.2,
-  osnoOooRate: 0.25,
-  osnoIpAnnualIncome: 2400000,
-  npdRate: 0.04,
-  partyExtraExpenses: 100,
-};
+import { createShopFor, createUserDirect } from "./_helpers";
 
 const makeMockClient = (): OzonClient => ({
   async post<T>(endpoint: string): Promise<T> {
@@ -36,6 +22,8 @@ interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
   cookie: string;
+  userId: number;
+  shopId: number;
 }
 
 const setupDb = (): TestEnv => {
@@ -50,10 +38,8 @@ const setupDb = (): TestEnv => {
     }
   }
   const db = drizzle(sqlite, { schema });
-  db.insert(userSettings)
-    .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
-    .run();
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const shopId = createShopFor(db, adminId);
   const sessionId = "test-finance-session";
   db.insert(sessions)
     .values({
@@ -63,7 +49,13 @@ const setupDb = (): TestEnv => {
       createdAt: new Date(),
     })
     .run();
-  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
+  return {
+    db,
+    sqlite,
+    cookie: `ozon_calc_session=${sessionId}`,
+    userId: adminId,
+    shopId,
+  };
 };
 
 const FILTER = { from: "2026-04-01T00:00:00.000Z", to: "2026-04-30T23:59:59.999Z" };
@@ -76,7 +68,7 @@ describe("runFinanceImport", () => {
   afterEach(() => env.sqlite.close());
 
   it("inserts transactions classified by operation_type", async () => {
-    const counters = await runFinanceImport(env.db, makeMockClient(), FILTER);
+    const counters = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.userId, FILTER);
     expect(counters.inserted).toBe(7);
     expect(counters.skipped).toBe(0);
 
@@ -98,10 +90,10 @@ describe("runFinanceImport", () => {
   });
 
   it("is idempotent on repeat run (INSERT OR IGNORE)", async () => {
-    await runFinanceImport(env.db, makeMockClient(), FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.userId, FILTER);
     const before = env.db.select().from(financeTransactions).all();
 
-    const second = await runFinanceImport(env.db, makeMockClient(), FILTER);
+    const second = await runFinanceImport(env.db, makeMockClient(), env.shopId, env.userId, FILTER);
     expect(second.inserted).toBe(0);
     expect(second.skipped).toBe(7);
 
@@ -163,7 +155,7 @@ describe("finance import route + finance API", () => {
   });
 
   it("GET /api/finance/transactions returns rows + filters by type", async () => {
-    await runFinanceImport(env.db, makeMockClient(), FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.userId, FILTER);
     const app = buildApp({ db: env.db });
 
     const all = await app.request("/api/finance/transactions", { headers: headers(env.cookie) });
@@ -181,7 +173,7 @@ describe("finance import route + finance API", () => {
   });
 
   it("GET /api/finance/summary aggregates by type", async () => {
-    await runFinanceImport(env.db, makeMockClient(), FILTER);
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.userId, FILTER);
     const app = buildApp({ db: env.db });
     const res = await app.request("/api/finance/summary", { headers: headers(env.cookie) });
     const summary = (await res.json()) as Array<{

@@ -1,8 +1,14 @@
 import { Hono } from "hono";
-import { desc, eq, isNull } from "drizzle-orm";
-import { financeTransactions, importRuns, products } from "../db/schema";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import {
+  financeTransactions,
+  importRuns,
+  products,
+} from "../db/schema";
 import type { OzonCommissions } from "../../src/types";
 import type { DB } from "../db/client";
+import type { SessionUser } from "../auth/utils";
+import { resolveShopId, visibleShopIds } from "../middleware/session";
 import { createOzonClient, resolveCredentials, type OzonClient } from "../ozon/client";
 import {
   getCategoryLookup,
@@ -39,6 +45,8 @@ interface RunCounters {
 export async function runCatalogImport(
   db: DB,
   client: OzonClient,
+  shopId: number,
+  userId: number,
   onProgress: (counters: RunCounters) => void = () => {},
 ): Promise<RunCounters> {
   const counters: RunCounters = {
@@ -66,7 +74,13 @@ export async function runCatalogImport(
         const [existing] = tx
           .select()
           .from(products)
-          .where(eq(products.articleId, entry.articleId))
+          .where(
+            and(
+              eq(products.articleId, entry.articleId),
+              eq(products.shopId, shopId),
+              eq(products.userId, userId),
+            ),
+          )
           .all();
 
         if (existing) {
@@ -116,7 +130,13 @@ export async function runCatalogImport(
               ...commissionsUpdate,
               ...statusUpdate,
             })
-            .where(eq(products.articleId, entry.articleId))
+            .where(
+              and(
+                eq(products.articleId, entry.articleId),
+                eq(products.shopId, shopId),
+                eq(products.userId, userId),
+              ),
+            )
             .run();
           if (!entry.patch.category || !entry.patch.productType) {
             counters.unmatched++;
@@ -135,6 +155,8 @@ export async function runCatalogImport(
               ...NEW_PRODUCT_DEFAULTS,
               clustersCount: String(NEW_PRODUCT_DEFAULTS.clustersCount),
               id: randomUUID(),
+              shopId,
+              userId,
               articleId: entry.articleId,
               productName: entry.patch.productName,
               category: entry.patch.category,
@@ -211,12 +233,18 @@ function splitFinanceRange(
   return out;
 }
 
-/** Build sku → articleId map from products. Used as a fallback when finance
- * operations have items[].sku but not items[].offer_id (older Ozon ops). */
-const buildSkuMap = async (db: DB): Promise<Map<number, string>> => {
+/** Build sku → articleId map for (shop, user) products. Per-user — каталог
+ * другого юзера (в том же shared shop) или другого shop'а не должен влиять
+ * на резолв. */
+const buildSkuMap = async (
+  db: DB,
+  shopId: number,
+  userId: number,
+): Promise<Map<number, string>> => {
   const rows = await db
     .select({ sku: products.ozonSku, articleId: products.articleId })
-    .from(products);
+    .from(products)
+    .where(and(eq(products.shopId, shopId), eq(products.userId, userId)));
   const map = new Map<number, string>();
   for (const r of rows) {
     if (r.sku != null) map.set(r.sku, r.articleId);
@@ -228,6 +256,8 @@ const buildSkuMap = async (db: DB): Promise<Map<number, string>> => {
 export async function runFinanceImport(
   db: DB,
   client: OzonClient,
+  shopId: number,
+  userId: number,
   filter: TransactionFilter,
   onProgress: (counters: FinanceCounters) => void = () => {},
 ): Promise<FinanceCounters> {
@@ -237,7 +267,7 @@ export async function runFinanceImport(
     skipped: 0,
   };
 
-  const skuMap = await buildSkuMap(db);
+  const skuMap = await buildSkuMap(db, shopId, userId);
 
   const resolveArticle = (op: {
     items?: Array<{ sku?: number; offer_id?: string }>;
@@ -262,6 +292,8 @@ export async function runFinanceImport(
         const result = tx
           .insert(financeTransactions)
           .values({
+            shopId,
+            userId,
             operationId: op.operation_id,
             operationType: op.operation_type,
             operationDate: new Date(op.operation_date),
@@ -283,13 +315,29 @@ export async function runFinanceImport(
   return counters;
 }
 
-export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
-  const app = new Hono();
+type ImportEnv = { Variables: { user: SessionUser } };
+
+export function importRoutes(
+  db: DB,
+  ctx: ImportContext = {},
+): Hono<ImportEnv> {
+  const app = new Hono<ImportEnv>();
 
   app.post("/catalog", async (c) => {
+    const user = c.get("user");
+    const body = (await c.req.json().catch(() => ({}))) as { shopId?: unknown };
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: body.shopId as never });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
+
     let client = ctx.ozonClient;
     if (!client) {
-      const creds = await resolveCredentials(db);
+      const creds = await resolveCredentials(db, shopId);
       if (!creds) {
         return c.json(
           { error: "ozon credentials not configured" },
@@ -303,6 +351,8 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
     const [run] = await db
       .insert(importRuns)
       .values({
+        shopId,
+        userId: user.id,
         kind: "catalog",
         startedAt,
         status: "running",
@@ -311,10 +361,12 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
       })
       .returning();
 
-    // Fire-and-forget. Single-tenant, no queue needed.
+    // Fire-and-forget. Per-(shop, user) — каждый импорт изолирован FK.
+    const importShopId = shopId;
+    const importUserId = user.id;
     void (async () => {
       try {
-        const counters = await runCatalogImport(db, client, (c2) => {
+        const counters = await runCatalogImport(db, client, importShopId, importUserId, (c2) => {
           db.update(importRuns)
             .set({ itemsProcessed: c2.itemsProcessed })
             .where(eq(importRuns.id, run.id))
@@ -345,17 +397,27 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   });
 
   app.post("/finance", async (c) => {
+    const user = c.get("user");
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
-    const { from, to, transactionType } = (body ?? {}) as {
+    const { from, to, transactionType, shopId: bodyShopId } = (body ?? {}) as {
       from?: unknown;
       to?: unknown;
       transactionType?: unknown;
+      shopId?: unknown;
     };
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: bodyShopId as never });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
     if (
       typeof from !== "string" ||
       typeof to !== "string" ||
@@ -384,7 +446,7 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
 
     let client = ctx.ozonClient;
     if (!client) {
-      const creds = await resolveCredentials(db);
+      const creds = await resolveCredentials(db, shopId);
       if (!creds) {
         return c.json({ error: "ozon credentials not configured" }, 400);
       }
@@ -395,6 +457,8 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
     const [run] = await db
       .insert(importRuns)
       .values({
+        shopId,
+        userId: user.id,
         kind: "finance",
         startedAt,
         status: "running",
@@ -403,6 +467,8 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
       })
       .returning();
 
+    const importShopId = shopId;
+    const importUserId = user.id;
     void (async () => {
       try {
         const total = {
@@ -417,7 +483,7 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
             to: ch.to,
             transactionType: transactionTypeStr,
           };
-          const counters = await runFinanceImport(db, client, chunkFilter, (c2) => {
+          const counters = await runFinanceImport(db, client, importShopId, importUserId, chunkFilter, (c2) => {
             db.update(importRuns)
               .set({
                 itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
@@ -466,21 +532,51 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
     return c.json({ runId: run.id });
   });
 
+  /** Returns all shopIds visible to `user` (owned + shared via shop_access). */
+  const allVisibleShopsOf = async (user: SessionUser): Promise<number[]> =>
+    visibleShopIds(db, user.id);
+
   app.get("/runs/:id", async (c) => {
+    const user = c.get("user");
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "invalid id" }, 400);
     const [row] = await db
       .select()
       .from(importRuns)
-      .where(eq(importRuns.id, id));
+      .where(and(eq(importRuns.id, id), eq(importRuns.userId, user.id)));
     if (!row) return c.json({ error: "not found" }, 404);
     return c.json(row);
   });
 
   app.get("/runs", async (c) => {
+    const user = c.get("user");
+    const shopIdQ = c.req.query("shopId");
+    let scope: number[];
+    if (shopIdQ) {
+      try {
+        const id = await resolveShopId(db, user, { explicit: shopIdQ });
+        if (!id) return c.json([]);
+        scope = [id];
+      } catch (e) {
+        const err = e as Error & { status?: number };
+        return c.json(
+          { error: err.message },
+          (err.status as 400 | 404) ?? 400,
+        );
+      }
+    } else {
+      scope = await allVisibleShopsOf(user);
+    }
+    if (scope.length === 0) return c.json([]);
     const rows = await db
       .select()
       .from(importRuns)
+      .where(
+        and(
+          inArray(importRuns.shopId, scope),
+          eq(importRuns.userId, user.id),
+        ),
+      )
       .orderBy(desc(importRuns.startedAt))
       .limit(50);
     return c.json(rows);
@@ -491,18 +587,36 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   // Updates only the catalog fields; local fields stay intact. Returns 404 if
   // the article isn't in the local DB or wasn't found in Ozon.
   app.post("/catalog/refresh/:articleId", async (c) => {
+    const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
 
-    const [existing] = await db
+    // Resolve product by (shopId, articleId). shopId comes from ?shopId=
+    // (if provided) or active. Verify ownership via JOIN on shops.userId.
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: c.req.query("shopId") });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
+
+    const [productRow] = await db
       .select()
       .from(products)
-      .where(eq(products.articleId, articleId));
-    if (!existing) return c.json({ error: "product not found" }, 404);
+      .where(
+        and(
+          eq(products.articleId, articleId),
+          eq(products.shopId, shopId),
+          eq(products.userId, user.id),
+        ),
+      );
+    if (!productRow) return c.json({ error: "product not found" }, 404);
 
     let client = ctx.ozonClient;
     if (!client) {
-      const creds = await resolveCredentials(db);
+      const creds = await resolveCredentials(db, shopId);
       if (!creds) {
         return c.json({ error: "ozon credentials not configured" }, 400);
       }
@@ -511,8 +625,8 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
 
     try {
       const categories = await getCategoryLookup(client);
-      const productIdHint = existing.ozonProductId
-        ? [existing.ozonProductId]
+      const productIdHint = productRow.ozonProductId
+        ? [productRow.ozonProductId]
         : [];
       const [infos, priceMap] = await Promise.all([
         productIdHint.length
@@ -575,8 +689,8 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
       db.update(products)
         .set({
           productName: entry.patch.productName,
-          category: entry.patch.category || existing.category,
-          productType: entry.patch.productType || existing.productType,
+          category: entry.patch.category || productRow.category,
+          productType: entry.patch.productType || productRow.productType,
           volumeL: entry.patch.volumeL,
           depthMm: entry.patch.depthMm,
           widthMm: entry.patch.widthMm,
@@ -594,7 +708,7 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
           ...commissionsUpdate,
           ...statusUpdate,
         })
-        .where(eq(products.articleId, articleId))
+        .where(eq(products.id, productRow.id))
         .run();
 
       return c.json({
@@ -618,14 +732,31 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   // Walks rows where article_id IS NULL, checks raw.items[].sku against
   // products.ozon_sku, updates row when match is found.
   app.post("/finance/relink", async (c) => {
-    const skuMap = await buildSkuMap(db);
-    if (skuMap.size === 0) {
+    const user = c.get("user");
+    // Process every shop the user can see. SKU maps are scoped per (shop, user)
+    // so a viewer of a shared shop never picks up another user's articleIds.
+    const shopIds = await allVisibleShopsOf(user);
+    if (shopIds.length === 0)
+      return c.json({ ok: true, scanned: 0, linked: 0 });
+
+    const skuMaps = new Map<number, Map<number, string>>();
+    for (const shopId of shopIds) {
+      skuMaps.set(shopId, await buildSkuMap(db, shopId, user.id));
+    }
+    if ([...skuMaps.values()].every((m) => m.size === 0)) {
       return c.json({ ok: true, scanned: 0, linked: 0, note: "no SKU data" });
     }
+
     const orphans = await db
       .select()
       .from(financeTransactions)
-      .where(isNull(financeTransactions.articleId));
+      .where(
+        and(
+          isNull(financeTransactions.articleId),
+          inArray(financeTransactions.shopId, shopIds),
+          eq(financeTransactions.userId, user.id),
+        ),
+      );
 
     let linked = 0;
     db.transaction((tx) => {
@@ -642,12 +773,15 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
           }
         }
         if (!articleId) {
-          for (const it of items) {
-            if (typeof it.sku === "number") {
-              const a = skuMap.get(it.sku);
-              if (a) {
-                articleId = a;
-                break;
+          const skuMap = skuMaps.get(r.shopId);
+          if (skuMap) {
+            for (const it of items) {
+              if (typeof it.sku === "number") {
+                const a = skuMap.get(it.sku);
+                if (a) {
+                  articleId = a;
+                  break;
+                }
               }
             }
           }
@@ -655,7 +789,13 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
         if (articleId) {
           tx.update(financeTransactions)
             .set({ articleId })
-            .where(eq(financeTransactions.operationId, r.operationId))
+            .where(
+              and(
+                eq(financeTransactions.operationId, r.operationId),
+                eq(financeTransactions.shopId, r.shopId),
+                eq(financeTransactions.userId, r.userId),
+              ),
+            )
             .run();
           linked++;
         }
@@ -670,13 +810,50 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   // credited per sale. Includes grand-total since first import (Ozon's own
   // /finance API caps at ~30 days; we keep history forever locally).
   app.get("/debug/finance/:articleId", async (c) => {
+    const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
+
+    // Scope: ?shopId=N (validated for visibility) or all visible shops.
+    let scope: number[];
+    const explicit = c.req.query("shopId");
+    if (explicit) {
+      try {
+        const id = await resolveShopId(db, user, { explicit });
+        if (!id) {
+          scope = [];
+        } else {
+          scope = [id];
+        }
+      } catch (e) {
+        const err = e as Error & { status?: number };
+        return c.json(
+          { error: err.message },
+          (err.status as 400 | 404) ?? 400,
+        );
+      }
+    } else {
+      scope = await allVisibleShopsOf(user);
+    }
+    if (scope.length === 0)
+      return c.json({
+        articleId,
+        period: { from: null, to: null },
+        sale: { operations: 0, units: 0, grossSum: 0, netSum: 0, avgPerUnitGross: null, avgPerUnitNet: null },
+        refund: { operations: 0, units: 0, grossSum: 0, netSum: 0 },
+        recent: [],
+      });
 
     const rows = await db
       .select()
       .from(financeTransactions)
-      .where(eq(financeTransactions.articleId, articleId));
+      .where(
+        and(
+          eq(financeTransactions.articleId, articleId),
+          inArray(financeTransactions.shopId, scope),
+          eq(financeTransactions.userId, user.id),
+        ),
+      );
 
     interface AggBucket {
       count: number;
@@ -759,12 +936,22 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   // verify that Ozon actually returns visibility_details / status fields for
   // a given SKU when the inactivity badge is missing.
   app.get("/debug/info/:articleId", async (c) => {
+    const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
 
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: c.req.query("shopId") });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
+
     let client = ctx.ozonClient;
     if (!client) {
-      const creds = await resolveCredentials(db);
+      const creds = await resolveCredentials(db, shopId);
       if (!creds) {
         return c.json({ error: "ozon credentials not configured" }, 400);
       }
@@ -798,12 +985,22 @@ export function importRoutes(db: DB, ctx: ImportContext = {}): Hono {
   // Useful to inspect what Ozon currently returns for a SKU without re-running
   // the full catalog import.
   app.get("/debug/prices/:articleId", async (c) => {
+    const user = c.get("user");
     const articleId = c.req.param("articleId");
     if (!articleId) return c.json({ error: "articleId required" }, 400);
 
+    let shopId: number | null;
+    try {
+      shopId = await resolveShopId(db, user, { explicit: c.req.query("shopId") });
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return c.json({ error: err.message }, (err.status as 400 | 404) ?? 400);
+    }
+    if (!shopId) return c.json({ error: "no shop available" }, 400);
+
     let client = ctx.ozonClient;
     if (!client) {
-      const creds = await resolveCredentials(db);
+      const creds = await resolveCredentials(db, shopId);
       if (!creds) {
         return c.json({ error: "ozon credentials not configured" }, 400);
       }

@@ -5,10 +5,16 @@ import {
   type FinanceSummaryRow,
   type FinanceTransactionRow,
   type FinanceType,
-  type ImportRun,
+  type Shop,
 } from "../api";
 import { fmtRub } from "../format";
 import { KpiCard } from "./KpiStrip";
+import { useToast } from "../contexts/useToast";
+import ShopBadge from "./ShopBadge";
+import {
+  useMultiShopImport,
+  type ShopRunState,
+} from "../lib/useMultiShopImport";
 
 const TYPE_LABEL: Record<FinanceType, string> = {
   sale: "Продажа",
@@ -38,35 +44,59 @@ const fmtDate = (ms: number): string => {
   return d.toLocaleDateString("ru-RU");
 };
 
-interface RunInfoProps {
-  importing: boolean;
-  run: ImportRun | null;
-  error: string | null;
-}
-
-function RunInfo({ importing, run, error }: RunInfoProps) {
-  if (error) return <p style={{ color: "var(--err)", margin: 0 }}>Ошибка: {error}</p>;
-  if (!importing && !run) return null;
-  if (importing) {
+function ShopRunPill({ run }: { run: ShopRunState }) {
+  const common: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 600,
+    padding: "2px 8px",
+    borderRadius: 6,
+    whiteSpace: "nowrap",
+  };
+  if (run.status === "queued")
     return (
-      <p className="muted" style={{ margin: 0 }}>
-        Импорт идёт… Обработано: <b>{run?.itemsProcessed ?? 0}</b>
-      </p>
+      <span
+        style={{ ...common, background: "var(--surface-muted)", color: "var(--muted)" }}
+      >
+        в очереди
+      </span>
     );
-  }
-  if (run?.status === "ok") {
+  if (run.status === "starting")
+    return (
+      <span style={{ ...common, background: "var(--accent-bg)", color: "var(--accent)" }}>
+        запуск…
+      </span>
+    );
+  if (run.status === "running")
+    return (
+      <span style={{ ...common, background: "var(--accent-bg)", color: "var(--accent)" }}>
+        {run.itemsProcessed}/…
+      </span>
+    );
+  if (run.status === "ok") {
     const params = (run.params ?? {}) as { inserted?: number; skipped?: number };
     return (
-      <p className="muted" style={{ margin: 0 }}>
-        Готово. Добавлено: <b>{params.inserted ?? 0}</b>, пропущено
-        (дубликаты): <b>{params.skipped ?? 0}</b>.
-      </p>
+      <span
+        style={{ ...common, background: "color-mix(in srgb, #16a34a 14%, transparent)", color: "#15803d" }}
+        title={`Добавлено: ${params.inserted ?? 0}, пропущено: ${params.skipped ?? 0}`}
+      >
+        готово
+      </span>
     );
   }
+  if (run.status === "skipped" || run.status === "error")
+    return (
+      <span
+        style={{ ...common, background: "color-mix(in srgb, var(--err) 14%, transparent)", color: "var(--err)" }}
+        title={run.errorMessage ?? ""}
+      >
+        {run.status === "skipped" ? "нет ключа" : "ошибка"}
+      </span>
+    );
   return null;
 }
 
 interface Props {
+  shops: Shop[];
   onOpenArticle?: (articleId: string) => void;
 }
 
@@ -83,7 +113,8 @@ const loadStoredPeriod = (): { from: string; to: string } | null => {
   return null;
 };
 
-export default function FinanceTab({ onOpenArticle }: Props = {}) {
+export default function FinanceTab({ shops, onOpenArticle }: Props) {
+  const toast = useToast();
   const stored = loadStoredPeriod();
   const [from, setFrom] = useState(stored?.from ?? monthAgoIso());
   const [to, setTo] = useState(stored?.to ?? todayIso());
@@ -101,18 +132,49 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
     }
   }, [from, to]);
 
-  const [importing, setImporting] = useState(false);
-  const [run, setRun] = useState<ImportRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<FinanceTransactionRow[]>([]);
   const [summary, setSummary] = useState<FinanceSummaryRow[]>([]);
   const [filterType, setFilterType] = useState<FinanceType | "">("");
   const PAGE_SIZE = 100;
   const [page, setPage] = useState(1);
-  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [userTouchedShops, setUserTouchedShops] = useState(false);
+
+  const refreshRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const multi = useMultiShopImport({
+    kind: "finance",
+    financeParams: { from, to },
+    onShopDone: () => {
+      void refreshRef.current();
+    },
+  });
+
+  // Default-select shops with credentials once creds resolve.
+  useEffect(() => {
+    if (multi.credsLoading || userTouchedShops) return;
+    const next = new Set<number>();
+    for (const s of shops) {
+      if (multi.credsByShop.get(s.id)?.hasCredentials) next.add(s.id);
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelected(next);
+  }, [multi.credsLoading, multi.credsByShop, shops, userTouchedShops]);
+
+  const toggleShop = (id: number) => {
+    setUserTouchedShops(true);
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Reset to first page when filters change.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPage(1);
   }, [from, to, filterType]);
 
@@ -160,17 +222,12 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
       setError((e as Error).message);
     }
   };
-
   useEffect(() => {
-    return () => {
-      if (pollTimer.current) clearInterval(pollTimer.current);
-    };
-  }, []);
+    refreshRef.current = refresh;
+  });
 
   const [relinking, setRelinking] = useState(false);
-  const [relinkResult, setRelinkResult] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
-  const [clearResult, setClearResult] = useState<string | null>(null);
 
   const clearAll = async () => {
     if (
@@ -182,13 +239,12 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
       return;
     }
     setClearing(true);
-    setClearResult(null);
     try {
       const { deleted } = await api.finance.clearAll();
-      setClearResult(`Удалено ${deleted} операций.`);
+      toast.show(`Удалено ${deleted} операций.`, { variant: "success" });
       void refresh();
     } catch (e) {
-      setClearResult(`Ошибка: ${(e as Error).message}`);
+      toast.show(`Ошибка: ${(e as Error).message}`, { variant: "error" });
     } finally {
       setClearing(false);
     }
@@ -196,54 +252,24 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
 
   const relink = async () => {
     setRelinking(true);
-    setRelinkResult(null);
     try {
       const r = await api.import.relinkFinance();
-      setRelinkResult(
+      toast.show(
         `Просканировано: ${r.scanned}, привязано к товарам: ${r.linked}.`,
+        { variant: "success" },
       );
       // Re-fetch transactions so they show the now-linked articleId.
       void refresh();
     } catch (e) {
-      setRelinkResult(`Ошибка: ${(e as Error).message}`);
+      toast.show(`Ошибка: ${(e as Error).message}`, { variant: "error" });
     } finally {
       setRelinking(false);
     }
   };
 
-  const startImport = async () => {
+  const startImport = () => {
     setError(null);
-    setRun(null);
-    setImporting(true);
-    try {
-      const { runId } = await api.import.startFinance({ from, to });
-      const initial = await api.import.getRun(runId);
-      setRun(initial);
-      pollTimer.current = setInterval(async () => {
-        try {
-          const next = await api.import.getRun(runId);
-          setRun(next);
-          if (next.status !== "running") {
-            if (pollTimer.current) clearInterval(pollTimer.current);
-            pollTimer.current = null;
-            setImporting(false);
-            if (next.status === "error") {
-              setError(next.errorMessage ?? "import failed");
-            } else {
-              await refresh();
-            }
-          }
-        } catch (e) {
-          if (pollTimer.current) clearInterval(pollTimer.current);
-          pollTimer.current = null;
-          setImporting(false);
-          setError((e as Error).message);
-        }
-      }, 1000);
-    } catch (e) {
-      setImporting(false);
-      setError((e as Error).message);
-    }
+    multi.start([...selected]);
   };
 
   // KPI считаем из summary (агрегат сервера по всему периоду), а не из
@@ -303,6 +329,7 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
         <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>Финансы Ozon</h3>
 
         <div
+          className="finance-actions"
           style={{
             display: "flex",
             flexWrap: "wrap",
@@ -362,16 +389,22 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
               <button
                 className="btn-primary"
                 onClick={startImport}
-                disabled={importing || invalid}
+                disabled={
+                  multi.phase === "running" || invalid || selected.size === 0
+                }
                 title={
                   invalid
                     ? "«По дату» должна быть позже «С даты»"
-                    : chunkCount === 1
-                      ? `Период ${days} дн. — один запрос к Ozon API.`
-                      : `Период ${days} дн. Будет разбит на ${chunkCount} запросов по 30 дней (Ozon API ограничен 30 днями за раз).`
+                    : selected.size === 0
+                      ? "Выберите хотя бы один магазин"
+                      : chunkCount === 1
+                        ? `Период ${days} дн. — один запрос к Ozon API на магазин.`
+                        : `Период ${days} дн. Будет разбит на ${chunkCount} запросов по 30 дней на каждый магазин.`
                 }
               >
-                Импортировать за период
+                {selected.size > 1
+                  ? `Импортировать за период (${selected.size})`
+                  : "Импортировать за период"}
               </button>
             );
           })()}
@@ -383,11 +416,6 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
           >
             {relinking ? "Связываем…" : "Привязать неопознанные"}
           </button>
-          {relinkResult && (
-            <span className="muted" style={{ fontSize: 12 }}>
-              {relinkResult}
-            </span>
-          )}
           <button
             className="btn-secondary"
             onClick={clearAll}
@@ -397,11 +425,6 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
           >
             {clearing ? "Очищаем…" : "Очистить финансы"}
           </button>
-          {clearResult && (
-            <span className="muted" style={{ fontSize: 12 }}>
-              {clearResult}
-            </span>
-          )}
           <label>
             <span>Тип</span>
             <select
@@ -418,7 +441,103 @@ export default function FinanceTab({ onOpenArticle }: Props = {}) {
           </label>
         </div>
 
-        <RunInfo importing={importing} run={run} error={error} />
+        {shops.length > 1 && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              marginTop: -8,
+              marginBottom: 12,
+            }}
+          >
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              Магазины
+            </span>
+            <div className="shop-filter-row">
+              {shops.map((s) => {
+                const creds = multi.credsByShop.get(s.id);
+                const eligible = !!creds?.hasCredentials;
+                const isSel = selected.has(s.id);
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={`ch-pill${isSel ? " active" : ""}`}
+                    disabled={!eligible || multi.phase === "running"}
+                    onClick={() => toggleShop(s.id)}
+                    title={
+                      eligible
+                        ? s.name
+                        : `${s.name} — нет ключа API, настройте в карточке магазина`
+                    }
+                    style={
+                      s.color && isSel
+                        ? {
+                            borderColor: s.color,
+                            background: s.color,
+                            color: "#fff",
+                          }
+                        : s.color
+                          ? { borderColor: s.color, color: s.color }
+                          : undefined
+                    }
+                  >
+                    <span
+                      style={{
+                        fontWeight: 700,
+                        marginRight: 6,
+                        letterSpacing: 0.5,
+                      }}
+                    >
+                      {s.shortName}
+                    </span>
+                    {s.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <p style={{ color: "var(--err)", margin: 0 }}>Ошибка: {error}</p>
+        )}
+        {multi.runsByShop.size > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              marginTop: 4,
+            }}
+          >
+            {[...multi.runsByShop.entries()].map(([shopId, r]) => {
+              const s = shops.find((x) => x.id === shopId);
+              if (!s) return null;
+              return (
+                <div
+                  key={shopId}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 13,
+                  }}
+                >
+                  <ShopBadge
+                    code={s.shortName}
+                    color={s.color}
+                    title={s.name}
+                    size="sm"
+                  />
+                  <span style={{ flex: 1 }}>{s.name}</span>
+                  <ShopRunPill run={r} />
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {summary.length > 0 && (
           <div style={{ marginTop: 16 }}>

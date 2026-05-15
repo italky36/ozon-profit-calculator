@@ -5,6 +5,55 @@ import type {
   TaxSettings,
 } from "../types";
 
+export interface Shop {
+  id: number;
+  name: string;
+  shortName: string;
+  color: string | null;
+  taxSettings: TaxSettings;
+  autoRefreshEnabled: boolean;
+  autoRefreshIntervalMin: number;
+  hasOzonCreds: boolean;
+  ozonUpdatedAt: number | null;
+  /** Selected cluster tariff set (effective for current user). NULL → fall
+   * back to latest global. */
+  tariffSetId: number | null;
+  createdAt: number;
+  updatedAt: number;
+  /** True when the current user owns this shop. False for shared admin shops. */
+  isOwner: boolean;
+  /** Email of the shop owner. Null when current user is the owner. */
+  ownerEmail: string | null;
+  /** True when at least one field is overridden by current user (vs shop defaults). */
+  hasOverrides: boolean;
+}
+
+export interface TariffSet {
+  id: number;
+  shopId: number | null;
+  scope: "global" | "shop";
+  name: string;
+  uploadedAt: number;
+  rowCount: number;
+}
+
+export interface ShopCreateInput {
+  name: string;
+  shortName?: string;
+  color?: string | null;
+  taxSettings?: TaxSettings;
+}
+
+export interface ShopPatch {
+  name?: string;
+  shortName?: string;
+  color?: string | null;
+  taxSettings?: TaxSettings;
+  autoRefreshEnabled?: boolean;
+  autoRefreshIntervalMin?: number;
+  tariffSetId?: number | null;
+}
+
 interface RefsResponse extends References {
   lists: Record<string, unknown>;
   categories: Record<string, string[]>;
@@ -21,9 +70,14 @@ export interface ImportRun {
   params: Record<string, unknown> | null;
 }
 
+export type CredentialsActiveSource = "shop" | null;
+
 export interface CredentialsStatus {
+  shopId: number;
   hasCredentials: boolean;
-  source: "env" | "db" | null;
+  /** Which source resolveCredentials() will pick for THIS shop. */
+  activeSource: CredentialsActiveSource;
+  shop: { hasCredentials: boolean };
 }
 
 export type FinanceType =
@@ -36,6 +90,7 @@ export type FinanceType =
   | "other";
 
 export interface FinanceTransactionRow {
+  shopId: number;
   operationId: number;
   operationType: string;
   operationDate: number; // ms timestamp
@@ -64,6 +119,7 @@ export interface FinanceListQuery {
 }
 
 export interface RealizedMarginRow {
+  shopId: number;
   articleId: string;
   actualRevenue: number;
   actualRefund: number;
@@ -151,14 +207,6 @@ export interface AdminUser extends AuthUser {
   updatedAt: string;
 }
 
-export interface AdminOzonCredentials {
-  hasCredentials: boolean;
-  source: "env" | "db" | null;
-  clientId: string | null;
-  hasApiKey: boolean;
-  updatedAt: string | null;
-}
-
 export type SmtpSecureMode = "auto" | "ssl" | "starttls" | "none";
 
 export interface AdminSmtpSettings {
@@ -170,6 +218,31 @@ export interface AdminSmtpSettings {
   secure: SmtpSecureMode;
   hasPassword: boolean;
   updatedAt: string | null;
+}
+
+export interface AdminShop {
+  id: number;
+  name: string;
+  shortName: string;
+  color: string | null;
+  hasOzonCreds: boolean;
+  viewersCount: number;
+  createdAt: number;
+}
+
+export interface AdminShopAccess {
+  userId: number;
+  email: string;
+  role: "admin" | "user";
+  isBlocked: boolean;
+  grantedAt: number;
+}
+
+export interface AdminShopCandidate {
+  id: number;
+  email: string;
+  role: "admin" | "user";
+  isBlocked: boolean;
 }
 
 export const api = {
@@ -217,13 +290,6 @@ export const api = {
         `/admin/users/${id}/revoke-sessions`,
         { method: "POST" },
       ),
-    getOzonCredentials: () =>
-      apiFetch<AdminOzonCredentials>("/admin/ozon-credentials"),
-    putOzonCredentials: (creds: { clientId: string; apiKey?: string }) =>
-      apiFetch<{ ok: true }>("/admin/ozon-credentials", {
-        method: "PUT",
-        body: JSON.stringify(creds),
-      }),
     getSmtp: () => apiFetch<AdminSmtpSettings>("/admin/smtp"),
     putSmtp: (cfg: {
       host: string;
@@ -244,28 +310,122 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ to, subject }),
       }),
+    shops: {
+      list: () => apiFetch<AdminShop[]>("/admin/shops"),
+      getAccess: (shopId: number) =>
+        apiFetch<AdminShopAccess[]>(`/admin/shops/${shopId}/access`),
+      getCandidates: (shopId: number) =>
+        apiFetch<AdminShopCandidate[]>(
+          `/admin/shops/${shopId}/access/candidates`,
+        ),
+      grantAccess: (shopId: number, userId: number) =>
+        apiFetch<{ ok: true; alreadyGranted?: boolean }>(
+          `/admin/shops/${shopId}/access`,
+          { method: "POST", body: JSON.stringify({ userId }) },
+        ),
+      revokeAccess: (shopId: number, userId: number) =>
+        apiFetch<{ ok: true; revoked: number }>(
+          `/admin/shops/${shopId}/access/${userId}`,
+          { method: "DELETE" },
+        ),
+    },
   },
   refs: {
-    get: () => apiFetch<RefsResponse>("/refs"),
-    clusterLogisticsStats: () =>
-      apiFetch<{
+    get: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<RefsResponse>(`/refs${qs}`);
+    },
+    clusterLogisticsStats: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<{
         count: number;
         fromClusters: string[];
         toClusters: string[];
-      }>("/refs/cluster-logistics"),
+      }>(`/refs/cluster-logistics${qs}`);
+    },
+    // Legacy: admin-only global overwrite. Use tariffSets.upload for the
+    // versioned flow.
     uploadClusterLogistics: (file: File) =>
       apiUpload<{
         inserted: number;
         fromClusters: string[];
         toClusters: string[];
       }>("/refs/cluster-logistics/upload", file),
+    tariffSets: {
+      list: () => apiFetch<TariffSet[]>("/refs/cluster-logistics/sets"),
+      upload: async (input: {
+        file: File;
+        name: string;
+        scope: "global" | "shop";
+        shopId?: number;
+      }): Promise<TariffSet & { fromClusters: string[]; toClusters: string[] }> => {
+        const fd = new FormData();
+        fd.append("file", input.file);
+        fd.append("name", input.name);
+        fd.append("scope", input.scope);
+        if (input.scope === "shop" && input.shopId != null) {
+          fd.append("shopId", String(input.shopId));
+        }
+        const res = await fetch(`${BASE}/refs/cluster-logistics/sets`, {
+          method: "POST",
+          body: fd,
+          credentials: "include",
+        });
+        if (res.status === 401) for (const l of authErrorListeners) l();
+        const text = await res.text();
+        const body = text ? (JSON.parse(text) as unknown) : null;
+        if (!res.ok) {
+          const msg =
+            body && typeof body === "object" && "error" in body
+              ? String((body as { error: unknown }).error)
+              : `HTTP ${res.status}`;
+          throw new Error(msg);
+        }
+        return body as TariffSet & {
+          fromClusters: string[];
+          toClusters: string[];
+        };
+      },
+      remove: (id: number) =>
+        apiFetch<void>(`/refs/cluster-logistics/sets/${id}`, {
+          method: "DELETE",
+        }),
+    },
   },
-  products: {
-    list: () => apiFetch<ProductRow[]>("/products"),
-    create: (input: ProductInput) =>
-      apiFetch<ProductRow>("/products", {
+  shops: {
+    list: () => apiFetch<Shop[]>("/shops"),
+    create: (input: ShopCreateInput) =>
+      apiFetch<Shop>("/shops", {
         method: "POST",
         body: JSON.stringify(input),
+      }),
+    update: (id: number, patch: ShopPatch) =>
+      apiFetch<Shop>(`/shops/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      }),
+    remove: (id: number) =>
+      apiFetch<void>(`/shops/${id}`, { method: "DELETE" }),
+    setActive: (shopId: number) =>
+      apiFetch<{ activeShopId: number }>("/shops/active", {
+        method: "PUT",
+        body: JSON.stringify({ shopId }),
+      }),
+    /** Clear per-user overrides for this shop (revert to shop defaults). */
+    resetOverrides: (id: number) =>
+      apiFetch<Shop>(`/shops/${id}/reset-overrides`, { method: "POST" }),
+  },
+  products: {
+    /** When shopId is provided — returns products of that shop only.
+     *  When omitted — products of all user's shops (for «Все» filter). */
+    list: (shopId?: number | null) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<ProductRow[]>(`/products${qs}`);
+    },
+    create: (shopId: number, input: ProductInput) =>
+      apiFetch<ProductRow>("/products", {
+        method: "POST",
+        body: JSON.stringify({ ...input, shopId }),
       }),
     update: (id: string, input: ProductInput) =>
       apiFetch<ProductRow>(`/products/${encodeURIComponent(id)}`, {
@@ -276,40 +436,81 @@ export const api = {
       apiFetch<void>(`/products/${encodeURIComponent(id)}`, {
         method: "DELETE",
       }),
-    bulkResetWhitePurchase: () =>
-      apiFetch<{ updated: number }>("/products/bulk/white-purchase-reset", {
+    bulkResetWhitePurchase: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<{ updated: number }>(
+        `/products/bulk/white-purchase-reset${qs}`,
+        { method: "POST" },
+      );
+    },
+    bulkUpdate: (
+      ids: string[],
+      patch: { whitePurchase?: boolean | null; vatRate?: string | number },
+    ) =>
+      apiFetch<{ updated: number }>("/products/bulk/update", {
         method: "POST",
+        body: JSON.stringify({ ids, patch }),
+      }),
+    bulkDelete: (ids: string[]) =>
+      apiFetch<{ deleted: number }>("/products/bulk/delete", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
       }),
   },
   settings: {
-    get: () => apiFetch<TaxSettings>("/settings"),
-    put: (next: TaxSettings) =>
+    get: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<TaxSettings>(`/settings${qs}`);
+    },
+    put: (next: TaxSettings, shopId?: number) =>
       apiFetch<TaxSettings>("/settings", {
         method: "PUT",
-        body: JSON.stringify(next),
+        body: JSON.stringify(shopId != null ? { ...next, shopId } : next),
       }),
-    getAutoRefresh: () =>
-      apiFetch<{ enabled: boolean; intervalMin: number }>(
+    getAutoRefresh: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<{ shopId: number; enabled: boolean; intervalMin: number }>(
+        `/settings/auto-refresh${qs}`,
+      );
+    },
+    putAutoRefresh: (
+      next: { enabled: boolean; intervalMin: number },
+      shopId?: number,
+    ) =>
+      apiFetch<{ shopId: number; enabled: boolean; intervalMin: number }>(
         "/settings/auto-refresh",
-      ),
-    putAutoRefresh: (next: { enabled: boolean; intervalMin: number }) =>
-      apiFetch<{ enabled: boolean; intervalMin: number }>(
-        "/settings/auto-refresh",
-        { method: "PUT", body: JSON.stringify(next) },
+        {
+          method: "PUT",
+          body: JSON.stringify(shopId != null ? { ...next, shopId } : next),
+        },
       ),
   },
   credentials: {
-    status: () => apiFetch<CredentialsStatus>("/credentials/status"),
-    put: (creds: { clientId: string; apiKey: string }) =>
+    status: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<CredentialsStatus>(`/credentials/status${qs}`);
+    },
+    statusAll: () =>
+      apiFetch<{ shops: CredentialsStatus[] }>("/credentials/status/all"),
+    put: (creds: { clientId: string; apiKey: string }, shopId?: number) =>
       apiFetch<{ ok: true }>("/credentials", {
         method: "PUT",
-        body: JSON.stringify(creds),
+        body: JSON.stringify(shopId != null ? { ...creds, shopId } : creds),
       }),
+    remove: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<{ ok: true; cleared: number }>(`/credentials${qs}`, {
+        method: "DELETE",
+      });
+    },
   },
   import: {
-    startCatalog: () =>
-      apiFetch<{ runId: number }>("/import/catalog", { method: "POST" }),
-    startFinance: (body: { from: string; to: string }) =>
+    startCatalog: (shopId?: number) =>
+      apiFetch<{ runId: number }>("/import/catalog", {
+        method: "POST",
+        body: JSON.stringify(shopId != null ? { shopId } : {}),
+      }),
+    startFinance: (body: { from: string; to: string; shopId?: number }) =>
       apiFetch<{ runId: number }>("/import/finance", {
         method: "POST",
         body: JSON.stringify(body),
@@ -373,7 +574,7 @@ export const api = {
       }>(`/import/debug/finance/${encodeURIComponent(articleId)}`),
   },
   finance: {
-    listTransactions: (q: FinanceListQuery = {}) => {
+    listTransactions: (q: FinanceListQuery & { shopId?: number } = {}) => {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(q)) {
         if (v !== undefined && v !== null && v !== "")
@@ -384,26 +585,33 @@ export const api = {
         `/finance/transactions${qs ? `?${qs}` : ""}`,
       );
     },
-    summary: (q: { from?: string; to?: string } = {}) => {
+    summary: (q: { from?: string; to?: string; shopId?: number } = {}) => {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(q)) {
-        if (v) params.set(k, v);
+        if (v !== undefined && v !== null && v !== "")
+          params.set(k, String(v));
       }
       const qs = params.toString();
       return apiFetch<FinanceSummaryRow[]>(
         `/finance/summary${qs ? `?${qs}` : ""}`,
       );
     },
-    clearAll: () =>
-      apiFetch<{ deleted: number }>("/finance/transactions/all", {
-        method: "DELETE",
-      }),
+    clearAll: (shopId?: number) => {
+      const qs = shopId != null ? `?shopId=${shopId}` : "";
+      return apiFetch<{ deleted: number }>(
+        `/finance/transactions/all${qs}`,
+        { method: "DELETE" },
+      );
+    },
   },
   analytics: {
-    realizedMargin: (q: { from?: string; to?: string } = {}) => {
+    realizedMargin: (
+      q: { from?: string; to?: string; shopId?: number } = {},
+    ) => {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(q)) {
-        if (v) params.set(k, v);
+        if (v !== undefined && v !== null && v !== "")
+          params.set(k, String(v));
       }
       const qs = params.toString();
       return apiFetch<RealizedMarginResponse>(

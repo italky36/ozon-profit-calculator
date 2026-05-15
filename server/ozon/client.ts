@@ -1,10 +1,16 @@
 import { eq } from "drizzle-orm";
-import { apiCredentials } from "../db/schema";
+import { shops } from "../db/schema";
 import type { DB } from "../db/client";
 
 export interface OzonCredentials {
   clientId: string;
   apiKey: string;
+}
+
+export type CredentialsSource = "shop";
+
+export interface ResolvedCredentials extends OzonCredentials {
+  source: CredentialsSource;
 }
 
 export class OzonApiError extends Error {
@@ -22,20 +28,29 @@ export class OzonApiError extends Error {
 
 const BASE_URL = "https://api-seller.ozon.ru";
 
-/** Resolve creds: env wins; fall back to api_credentials table. */
+/**
+ * Resolve Ozon credentials for a shop. Only the shop's own keys are accepted —
+ * the historical admin-global fallback and env-var fallback were removed in
+ * 0018 to prevent unrelated shops from silently sharing one Ozon account.
+ */
 export async function resolveCredentials(
   db: DB,
-): Promise<OzonCredentials | null> {
-  const envClient = process.env.OZON_CLIENT_ID;
-  const envKey = process.env.OZON_API_KEY;
-  if (envClient && envKey) {
-    return { clientId: envClient, apiKey: envKey };
+  shopId: number,
+): Promise<ResolvedCredentials | null> {
+  const [shopRow] = await db
+    .select({
+      clientId: shops.ozonClientId,
+      apiKey: shops.ozonApiKey,
+    })
+    .from(shops)
+    .where(eq(shops.id, shopId));
+  if (shopRow?.clientId && shopRow?.apiKey) {
+    return {
+      clientId: shopRow.clientId,
+      apiKey: shopRow.apiKey,
+      source: "shop",
+    };
   }
-  const [row] = await db
-    .select()
-    .from(apiCredentials)
-    .where(eq(apiCredentials.id, 1));
-  if (row) return { clientId: row.clientId, apiKey: row.apiKey };
   return null;
 }
 

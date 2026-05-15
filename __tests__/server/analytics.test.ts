@@ -4,29 +4,17 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "../../server/db/schema";
-import { financeTransactions, sessions, userSettings } from "../../server/db/schema";
+import { financeTransactions, sessions } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
-import type { TaxSettings } from "../../src/types";
-import { createUserDirect } from "./_helpers";
+import { createShopFor, createUserDirect } from "./_helpers";
 
-
-const SAMPLE_TAX: TaxSettings = {
-  damageRate: 0.01,
-  taxSystem: "УСН Доходы минус расходы",
-  usnIncomeRate: 0.06,
-  usnIncomeMinusRate: 0.07,
-  ausnIncomeRate: 0.08,
-  ausnIncomeMinusRate: 0.2,
-  osnoOooRate: 0.25,
-  osnoIpAnnualIncome: 2400000,
-  npdRate: 0.04,
-  partyExtraExpenses: 100,
-};
 
 interface TestEnv {
   db: ReturnType<typeof drizzle<typeof schema>>;
   sqlite: Database.Database;
   cookie: string;
+  userId: number;
+  shopId: number;
 }
 
 const setupDb = (): TestEnv => {
@@ -41,11 +29,9 @@ const setupDb = (): TestEnv => {
     }
   }
   const db = drizzle(sqlite, { schema });
-  db.insert(userSettings)
-    .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
-    .run();
 
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const shopId = createShopFor(db, adminId);
   const sessionId = "test-analytics-session";
   db.insert(sessions)
     .values({
@@ -55,7 +41,13 @@ const setupDb = (): TestEnv => {
       createdAt: new Date(),
     })
     .run();
-  return { db, sqlite, cookie: `ozon_calc_session=${sessionId}` };
+  return {
+    db,
+    sqlite,
+    cookie: `ozon_calc_session=${sessionId}`,
+    userId: adminId,
+    shopId,
+  };
 };
 
 interface Tx {
@@ -73,6 +65,8 @@ const seedTx = (env: TestEnv, list: Tx[]) => {
     env.db
       .insert(financeTransactions)
       .values({
+        shopId: env.shopId,
+        userId: env.userId,
         operationId: t.operation_id,
         operationType: t.operation_type,
         operationDate: new Date(t.operation_date),

@@ -4,23 +4,10 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { buildApp } from "../../server/index";
-import { sessions, userSettings } from "../../server/db/schema";
+import { sessions } from "../../server/db/schema";
 import * as schema from "../../server/db/schema";
-import type { ProductInput, TaxSettings } from "../../src/types";
-import { createUserDirect } from "./_helpers";
-
-const SAMPLE_TAX: TaxSettings = {
-  damageRate: 0.01,
-  taxSystem: "УСН Доходы минус расходы",
-  usnIncomeRate: 0.06,
-  usnIncomeMinusRate: 0.07,
-  ausnIncomeRate: 0.08,
-  ausnIncomeMinusRate: 0.2,
-  osnoOooRate: 0.25,
-  osnoIpAnnualIncome: 2400000,
-  npdRate: 0.04,
-  partyExtraExpenses: 100,
-};
+import type { ProductInput } from "../../src/types";
+import { createShopFor, createUserDirect, SAMPLE_TAX } from "./_helpers";
 
 const SAMPLE_INPUT: ProductInput = {
   articleId: "TEST-PRODUCT",
@@ -78,12 +65,10 @@ const setup = (): TestEnv => {
   }
 
   const db = drizzle(sqlite, { schema });
-  // Seed user_settings so GET /api/settings works.
-  db.insert(userSettings)
-    .values({ id: 1, taxSettings: SAMPLE_TAX, updatedAt: new Date() })
-    .run();
 
   const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  // Multi-shop model: ensure user has at least one shop.
+  createShopFor(db, adminId);
   const sessionId = "test-products-session";
   db.insert(sessions)
     .values({

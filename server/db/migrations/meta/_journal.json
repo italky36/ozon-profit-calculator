@@ -99,6 +99,41 @@
       "when": 1778496202926,
       "tag": "0013_user_blocked",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1778619561466,
+      "tag": "0014_medical_bruce_banner",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1778710000000,
+      "tag": "0015_shops",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1778720000000,
+      "tag": "0016_tariff_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1778800000000,
+      "tag": "0017_shared_shops",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1778900000000,
+      "tag": "0018_drop_global_creds",
+      "breakpoints": true
     }
   ]
 }

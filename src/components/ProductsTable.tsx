@@ -5,6 +5,8 @@ import {
   ChevronUp,
   Download,
   FileSpreadsheet,
+  Filter,
+  Plus,
   Search,
   X,
 } from "lucide-react";
@@ -22,7 +24,12 @@ import MarginBar from "./MarginBar";
 import ChannelBadge, { type ChannelKey } from "./ChannelBadge";
 import ChannelFilter, { type FilterValue } from "./ChannelFilter";
 import InactivityBadge from "./InactivityBadge";
+import BulkActionsBar from "./BulkActionsBar";
+import ShopBadge from "./ShopBadge";
+import type { Shop } from "../api";
 import { inactivityOf, isActiveOzon } from "../lib/ozonStatus";
+import ShopMultiSelect from "./ShopMultiSelect";
+import ProductFiltersSheet from "./ProductFiltersSheet";
 
 export type RowResult = CalcResult | { error: string };
 
@@ -58,6 +65,18 @@ interface Props {
   /** Tax settings — required for the full Excel export (header line shows
    * the active tax system). When omitted, only short export is offered. */
   taxSettings?: TaxSettings;
+  /** Refetch products from server after bulk update/delete (App.tsx provides
+   * `refreshProducts`). When omitted, bulk actions still run but the UI won't
+   * sync to the new server state. */
+  onProductsRefresh?: () => void | Promise<void>;
+  /** Map shopId → Shop. Used to render per-row ShopBadge in the "Маг." column. */
+  shopsById?: Map<number, Shop>;
+  /** All shops the user can filter by (owned + shared). When ≥2, renders the
+   * inline shop-filter chips in the toolbar. Omit or pass <2 to hide. */
+  shopsForFilter?: Shop[];
+  /** Selected shopIds for the filter. Empty set = all shops shown. */
+  shopFilter?: Set<number>;
+  onShopFilterChange?: (next: Set<number>) => void;
 }
 
 type SortKey =
@@ -106,6 +125,18 @@ const SCHEMAS: Array<{ key: SchemaKey; label: string; cls: string }> = [
   { key: "realFbs", label: "realFBS", cls: "real" },
 ];
 
+function useIsMobile(bp = 768): boolean {
+  const [m, setM] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < bp,
+  );
+  useEffect(() => {
+    const onResize = () => setM(window.innerWidth < bp);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [bp]);
+  return m;
+}
+
 const isCalc = (r: RowResult | undefined): r is CalcResult => !!r && !("error" in r);
 
 const bestKey = (r: CalcResult): SchemaKey => {
@@ -137,7 +168,23 @@ export default function ProductsTable({
   onSearchChange,
   totalRowsCount,
   taxSettings,
+  onProductsRefresh,
+  shopsById,
+  shopsForFilter,
+  shopFilter,
+  onShopFilterChange,
 }: Props) {
+  // Bulk-selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelect = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const clearSelection = () => setSelectedIds(new Set());
+
   // Excel-export dropdown state
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement | null>(null);
@@ -158,6 +205,17 @@ export default function ProductsTable({
     const t = setTimeout(() => onSearchChange?.(localQuery), 150);
     return () => clearTimeout(t);
   }, [localQuery, onSearchChange, searchQuery]);
+
+  const isMobile = useIsMobile(768);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilterCount =
+    (channelFilter !== "Все" ? 1 : 0) +
+    (activeOnly ? 1 : 0) +
+    (shopFilter && shopFilter.size > 0 && shopsForFilter
+      ? shopFilter.size < shopsForFilter.length
+        ? 1
+        : 0
+      : 0);
 
   // ── Sort by column ──────────────────────────────────────────────────────
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
@@ -185,11 +243,11 @@ export default function ProductsTable({
   const showActuals = !!actuals;
 
   // Column count for colSpan math:
-  //  - 11 always-rendered: Артикул, SKU, Название, Категория, Цена, Себест.,
-  //    FBO, FBS, realFBS, Лучшая, delete.
+  //  - 12 always-rendered: checkbox, Маг., Артикул, SKU, Название, Категория,
+  //    Цена, Себест., FBO, FBS, realFBS, Лучшая, delete.
   //  - + График when showChart
   //  - + 3 actuals (Продано / Ср. за продажу / Поступления) when actuals
-  const colCount = 11 + (showChart ? 1 : 0) + (showActuals ? 3 : 0);
+  const colCount = 13 + (showChart ? 1 : 0) + (showActuals ? 3 : 0);
 
   // Precompute visible rows after channel + active filters so we can both
   // render the counter accurately and skip an extra IIFE in tbody.
@@ -267,57 +325,126 @@ export default function ProductsTable({
     <section>
       <div className="products-toolbar">
         <div className="products-toolbar-left">
-          <ChannelFilter active={channelFilter} onChange={onChannelFilterChange} />
-          {onActiveOnlyChange && (
-            <label
-              className="active-only-toggle"
-              title="Скрыть товары в архиве и снятые с витрины Ozon"
-            >
-              <input
-                type="checkbox"
-                checked={!!activeOnly}
-                onChange={(e) => onActiveOnlyChange(e.target.checked)}
-              />
-              <span>Только активные</span>
-            </label>
-          )}
-          {onSearchChange && (
-            <label className="products-search">
-              <Search size={14} className="products-search-icon" />
-              <input
-                type="text"
-                value={localQuery}
-                onChange={(e) => setLocalQuery(e.target.value)}
-                placeholder="Артикул, SKU или название"
-                title="Поиск по артикулу, SKU или названию"
-                aria-label="Поиск по таблице"
-              />
-              {localQuery && (
-                <button
-                  type="button"
-                  className="products-search-clear"
-                  onClick={() => {
-                    setLocalQuery("");
-                    onSearchChange("");
-                  }}
-                  aria-label="Очистить поиск"
-                  title="Очистить"
-                >
-                  <X size={12} />
-                </button>
+          {isMobile ? (
+            <>
+              {onSearchChange && (
+                <label className="products-search products-search-full">
+                  <Search size={14} className="products-search-icon" />
+                  <input
+                    type="text"
+                    value={localQuery}
+                    onChange={(e) => setLocalQuery(e.target.value)}
+                    placeholder="Артикул, SKU или название"
+                    aria-label="Поиск по таблице"
+                  />
+                  {localQuery && (
+                    <button
+                      type="button"
+                      className="products-search-clear"
+                      onClick={() => {
+                        setLocalQuery("");
+                        onSearchChange("");
+                      }}
+                      aria-label="Очистить поиск"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </label>
               )}
-            </label>
+              <button
+                type="button"
+                className="filters-trigger"
+                onClick={() => setFiltersOpen(true)}
+                title="Открыть фильтры"
+              >
+                <Filter size={14} />
+                Фильтры
+                {activeFilterCount > 0 && (
+                  <span className="filters-trigger-badge">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+              {searchQuery && totalRowsCount !== undefined && (
+                <span className="search-count" aria-live="polite">
+                  Найдено {sortedRows.length}{" "}
+                  <span className="search-count-of">из</span> {totalRowsCount}
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              {shopsForFilter &&
+                shopsForFilter.length > 1 &&
+                onShopFilterChange && (
+                  <>
+                    <span className="toolbar-group-label">Магазины</span>
+                    <ShopMultiSelect
+                      shops={shopsForFilter}
+                      value={shopFilter ?? new Set()}
+                      onChange={onShopFilterChange}
+                    />
+                  </>
+                )}
+              <ChannelFilter
+                active={channelFilter}
+                onChange={onChannelFilterChange}
+              />
+              {onActiveOnlyChange && (
+                <label
+                  className="active-only-toggle"
+                  title="Скрыть товары в архиве и снятые с витрины Ozon"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!activeOnly}
+                    onChange={(e) => onActiveOnlyChange(e.target.checked)}
+                  />
+                  <span>Только активные</span>
+                </label>
+              )}
+              {onSearchChange && (
+                <label className="products-search">
+                  <Search size={14} className="products-search-icon" />
+                  <input
+                    type="text"
+                    value={localQuery}
+                    onChange={(e) => setLocalQuery(e.target.value)}
+                    placeholder="Артикул, SKU или название"
+                    title="Поиск по артикулу, SKU или названию"
+                    aria-label="Поиск по таблице"
+                  />
+                  {localQuery && (
+                    <button
+                      type="button"
+                      className="products-search-clear"
+                      onClick={() => {
+                        setLocalQuery("");
+                        onSearchChange("");
+                      }}
+                      aria-label="Очистить поиск"
+                      title="Очистить"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </label>
+              )}
+              {searchQuery && totalRowsCount !== undefined && (
+                <span className="search-count" aria-live="polite">
+                  Найдено {sortedRows.length}{" "}
+                  <span className="search-count-of">из</span> {totalRowsCount}
+                </span>
+              )}
+              <span
+                className="toolbar-legend"
+                title="Бейдж Oz на строке означает: данные пришли из Ozon, локально не редактируются"
+              >
+                <OzIcon />
+              </span>
+            </>
           )}
-          {searchQuery && totalRowsCount !== undefined && (
-            <span className="search-count" aria-live="polite">
-              Найдено {sortedRows.length}{" "}
-              <span className="search-count-of">из</span> {totalRowsCount}
-            </span>
-          )}
-          <span className="toolbar-legend">
-            <OzIcon />
-            — данные из Ozon, только чтение
-          </span>
         </div>
         <div className="products-toolbar-actions">
           <div className="excel-export" ref={exportRef}>
@@ -328,7 +455,8 @@ export default function ProductsTable({
               style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
               title="Экспорт в Excel"
             >
-              <FileSpreadsheet size={14} /> Excel{" "}
+              <FileSpreadsheet size={14} />
+              <span className="excel-label">Excel</span>
               <ChevronDown size={12} />
             </button>
             {exportOpen && (
@@ -370,22 +498,71 @@ export default function ProductsTable({
             )}
           </div>
           <button
-            className="btn-secondary"
+            className="btn-secondary toolbar-btn"
             onClick={onImport}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            title="Импорт из Ozon"
           >
-            <Download size={14} /> Импорт из Ozon
+            <Download size={14} />
+            <span className="toolbar-btn-label toolbar-btn-label-full">Импорт из Ozon</span>
+            <span className="toolbar-btn-label toolbar-btn-label-short">Импорт</span>
           </button>
-          <button className="btn-primary" onClick={onAdd}>
-            + Добавить товар
+          <button
+            className="btn-primary toolbar-btn"
+            onClick={onAdd}
+            title="Добавить товар"
+          >
+            <Plus size={14} />
+            <span className="toolbar-btn-label">Добавить товар</span>
           </button>
         </div>
       </div>
+
+      {selectedIds.size > 0 && (
+        <BulkActionsBar
+          selectedIds={selectedIds}
+          rows={rows}
+          results={results}
+          taxSettings={taxSettings}
+          onClear={clearSelection}
+          onAfterChange={async () => {
+            if (onProductsRefresh) await onProductsRefresh();
+          }}
+        />
+      )}
 
       <div className="products-scroll">
         <table className="products-table">
           <thead>
             <tr>
+              <th className="bulk-checkbox-col" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  className="bulk-checkbox"
+                  aria-label="Выбрать все"
+                  checked={
+                    sortedRows.length > 0 &&
+                    sortedRows.every((r) => selectedIds.has(r.id))
+                  }
+                  ref={(el) => {
+                    if (!el) return;
+                    const some = sortedRows.some((r) => selectedIds.has(r.id));
+                    const all =
+                      sortedRows.length > 0 &&
+                      sortedRows.every((r) => selectedIds.has(r.id));
+                    el.indeterminate = some && !all;
+                  }}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedIds(new Set(sortedRows.map((r) => r.id)));
+                    } else {
+                      clearSelection();
+                    }
+                  }}
+                />
+              </th>
+              <th className="shop-col" title="Магазин">
+                <span>Маг.</span>
+              </th>
               <th
                 className={sortableThClass("articleId")}
                 onClick={() => handleSortClick("articleId")}
@@ -515,8 +692,10 @@ export default function ProductsTable({
               const updateField = <K extends keyof ProductInput>(key: K, val: ProductInput[K]) =>
                 onUpdate(row.id, { ...row.input, [key]: val });
 
+              const isChecked = selectedIds.has(row.id);
               const rowClasses = [
                 isSelected ? "selected" : "",
+                isChecked ? "row-checked" : "",
                 inactivity.kind ? "row-inactive" : "",
               ]
                 .filter(Boolean)
@@ -529,6 +708,27 @@ export default function ProductsTable({
                   onClick={() => onSelect(row.id)}
                   title={inactivity.kind ? inactivity.reason : undefined}
                 >
+                  <td
+                    className="bulk-checkbox-col"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      className="bulk-checkbox"
+                      aria-label={`Выбрать ${row.input.articleId}`}
+                      checked={isChecked}
+                      onChange={() => toggleSelect(row.id)}
+                    />
+                  </td>
+                  <td className="shop-col">
+                    {shopsById?.get(row.shopId) && (
+                      <ShopBadge
+                        code={shopsById.get(row.shopId)!.shortName}
+                        color={shopsById.get(row.shopId)!.color}
+                        title={shopsById.get(row.shopId)!.name}
+                      />
+                    )}
+                  </td>
                   <td>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                       <InactivityBadge inactivity={inactivity} />
@@ -736,6 +936,20 @@ export default function ProductsTable({
           </tbody>
         </table>
       </div>
+      {isMobile && shopsForFilter && onShopFilterChange && onActiveOnlyChange && (
+        <ProductFiltersSheet
+          open={filtersOpen}
+          onClose={() => setFiltersOpen(false)}
+          shops={shopsForFilter}
+          shopFilter={shopFilter ?? new Set()}
+          onShopFilterChange={onShopFilterChange}
+          channelFilter={channelFilter}
+          onChannelFilterChange={onChannelFilterChange}
+          activeOnly={!!activeOnly}
+          onActiveOnlyChange={onActiveOnlyChange}
+          resultCount={sortedRows.length}
+        />
+      )}
     </section>
   );
 }

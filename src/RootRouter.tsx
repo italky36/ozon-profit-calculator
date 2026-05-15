@@ -3,7 +3,7 @@ import App from "./App";
 import LoginPage from "./components/auth/LoginPage";
 import RegisterPage from "./components/auth/RegisterPage";
 import VerifyEmailPage from "./components/auth/VerifyEmailPage";
-import { useAuth } from "./contexts/AuthContext";
+import { useAuth } from "./contexts/useAuth";
 import { navigate, usePathname } from "./lib/router";
 
 const PUBLIC_PATHS = new Set(["/login", "/register", "/verify-email"]);

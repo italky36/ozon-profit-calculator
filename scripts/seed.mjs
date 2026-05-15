@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -69,92 +68,53 @@ if (userCount === 0) {
   );
 }
 
-// 2. Seed user_settings if absent. Bind to first admin when available so the
-//    legacy single-tenant row becomes the admin's personal settings (Stage 8
-//    will rely on user_id being set).
-const existingSettings = sqlite
-  .prepare("SELECT id, user_id FROM user_settings WHERE id = 1")
-  .get();
-if (!existingSettings) {
-  sqlite
-    .prepare(
-      "INSERT INTO user_settings (id, user_id, tax_settings, updated_at) VALUES (1, ?, ?, ?)",
-    )
-    .run(adminUserId, JSON.stringify(defaultTaxSettings), now);
-  console.log("seeded user_settings");
-} else if (existingSettings.user_id == null && adminUserId != null) {
-  sqlite
-    .prepare("UPDATE user_settings SET user_id = ?, updated_at = ? WHERE id = 1")
-    .run(adminUserId, now);
-  console.log(`backfilled user_settings.user_id = ${adminUserId}`);
-} else {
-  console.log("user_settings already present, skipping");
-}
+// 2. Seed default shop + user_settings for the admin if absent.
+//    Each user gets a default shop "Мой магазин" (code M1) with default tax
+//    settings; the same logic runs at registration via auth.verifyEmail.
+if (adminUserId != null) {
+  const existingShop = sqlite
+    .prepare("SELECT id FROM shops WHERE user_id = ? LIMIT 1")
+    .get(adminUserId);
+  let adminShopId = existingShop?.id ?? null;
 
-// 3. Seed reference coffee-machine product if products table is empty.
-const productCount = sqlite
-  .prepare("SELECT COUNT(*) as n FROM products")
-  .get().n;
+  if (!adminShopId) {
+    const result = sqlite
+      .prepare(
+        `INSERT INTO shops (
+          user_id, name, short_name, color, tax_settings,
+          auto_refresh_enabled, auto_refresh_interval_min,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
+      )
+      .run(
+        adminUserId,
+        "Мой магазин",
+        "M1",
+        JSON.stringify(defaultTaxSettings),
+        now,
+        now,
+      );
+    adminShopId = Number(result.lastInsertRowid);
+    console.log("seeded default shop M1 for admin");
+  }
 
-if (productCount === 0) {
-  const insert = sqlite.prepare(`
-    INSERT INTO products (
-      id, article_id, product_name, category, product_type,
-      is_kgt, is_kazakhstan, is_fire_hazard,
-      planned_storage_days, volume_l, vat_rate, redemption_percent,
-      sales_plan, logistics_mode, local_share, clusters_count,
-      current_price, discount_percent, marketing_percent,
-      real_fbs_delivery_cost, real_fbs_return_cost, acceptance_tariff,
-      cost_price, extra_expenses_per_unit, white_purchase,
-      incoming_vat_purchase, incoming_vat_rate,
-      created_at, updated_at, ozon_product_id
-    ) VALUES (
-      ?, ?, ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?,
-      ?, ?,
-      ?, ?, NULL
-    )
-  `);
-
-  insert.run(
-    randomUUID(),
-    "TEST-001",
-    "Кофемашина (пример)",
-    "Кофеварки и кофемашины",
-    "Автоматическая кофемашина",
-    0,
-    0,
-    0,
-    30,
-    209,
-    "0.05",
-    90,
-    10,
-    "Авто",
-    0.5,
-    "Считать без наценки",
-    337000,
-    0.345,
-    0,
-    500,
-    250,
-    "Доверительная приемка",
-    87000,
-    0,
-    1,
-    0,
-    0,
-    now,
-    now,
-  );
-  console.log("seeded reference coffee-machine product");
-} else {
-  console.log(`products table has ${productCount} rows, skipping seed`);
+  const existingSettings = sqlite
+    .prepare("SELECT id FROM user_settings WHERE user_id = ?")
+    .get(adminUserId);
+  if (!existingSettings) {
+    sqlite
+      .prepare(
+        "INSERT INTO user_settings (user_id, active_shop_id, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(adminUserId, adminShopId, now);
+    console.log("seeded user_settings");
+  } else {
+    sqlite
+      .prepare(
+        "UPDATE user_settings SET active_shop_id = COALESCE(active_shop_id, ?), updated_at = ? WHERE user_id = ?",
+      )
+      .run(adminShopId, now, adminUserId);
+  }
 }
 
 sqlite.close();

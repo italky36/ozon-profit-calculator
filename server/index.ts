@@ -9,6 +9,7 @@ import { adminRoutes } from "./routes/admin";
 import { refsRoutes } from "./routes/refs";
 import { productsRoutes } from "./routes/products";
 import { settingsRoutes } from "./routes/settings";
+import { shopsRoutes } from "./routes/shops";
 import { credentialsRoutes } from "./routes/credentials";
 import { importRoutes } from "./routes/import";
 import type { ImportContext } from "./routes/import";
@@ -36,6 +37,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
   api.route("/admin", adminRoutes(db));
   api.use("*", requireAuth);
   api.route("/refs", refsRoutes(db));
+  api.route("/shops", shopsRoutes(db));
   api.route("/products", productsRoutes(db));
   api.route("/settings", settingsRoutes(db));
   api.route("/credentials", credentialsRoutes(db));

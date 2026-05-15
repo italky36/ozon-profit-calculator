@@ -23,7 +23,7 @@ npm run test:watch        # vitest в watch-режиме
 # DB (Drizzle + better-sqlite3, файл data/app.db)
 npm run db:generate       # drizzle-kit generate (после правки server/db/schema.ts)
 npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует)
-npm run db:seed           # default tax settings + эталон-кофемашина (если БД пустая)
+npm run db:seed           # первый админ + его default shop «Мой магазин (M1)»
 npm run db:extract        # Excel → SQLite ref_* таблицы
                           # путь к Excel: EXTRACT_SOURCE=… npm run db:extract
 
@@ -36,7 +36,7 @@ npx vitest run __tests__/server/         # все backend-тесты
 ## Запуск с нуля
 
 1. `cp .env.example .env`. Настроить SMTP-параметры (или оставить пустыми — письма пойдут в stdout) и `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого админа.
-2. `npm run db:seed` — создаст `data/app.db`, засеет начальные данные и первого админа (если таблица `users` пуста).
+2. `npm run db:seed` — создаст `data/app.db`, засеет первого админа (если таблица `users` пуста) и его дефолтный магазин «Мой магазин» с кодом `M1`.
 3. `npm run db:extract` — наполнит `ref_*` справочники из Excel (требуется `C:/Users/admin/Downloads/Техника — копия2.xlsx` или `EXTRACT_SOURCE=…`).
 4. `npm run dev`. Фронт ходит в `/api/*` через Vite-прокси (`SERVER_URL`, по умолчанию `http://localhost:3001`). Войти на `/login` с теми creds, что в `.env`.
 
@@ -55,15 +55,15 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ### Поток данных (frontend)
 
-На монтаже `App.tsx` запрашивает три эндпоинта параллельно: `GET /api/refs`, `GET /api/products`, `GET /api/settings`. Полученные `References + ProductRow[] + TaxSettings` идут в `useMemo`, который для каждой строки прогоняет `calculateRow(row.input, taxSettings, refs, { ozonCommissions: row.ozonCommissions })`. Мутации (`addRow`/`duplicateRow`/`removeRow`/`updateRow`) делают optimistic update с откатом на ошибке через `api.products.*`. `setTaxSettings` дебаунсится 300мс перед `PUT /api/settings`.
+На монтаже `App.tsx` параллельно запрашивает `GET /api/refs` и `GET /api/shops`, затем `GET /api/products`. Хранит state: `shops: Shop[]`, `activeShopId`, `shopFilter` (null = «Все магазины»). `taxSettings` для каждой строки резолвится через `taxByShop = Map<shopId, TaxSettings>` (вычисляется из `shops`); в calc-loop'е — `calculateRow(row.input, taxByShop.get(row.shopId)!, refs, { ozonCommissions })`. Мутации (`addRow`/`updateRow`/`removeRow`/`bulk*`) делают optimistic update с откатом на ошибке через `api.products.*`. При смене активного магазина — debounced `PUT /api/settings?shopId=…` сохраняет TaxSettings конкретного магазина, и `GET /api/refs?shopId=…` обновляет cluster-tariffs (зависит от выбранного у магазина набора).
 
 **Хранилище**:
-- **Бизнес-данные** (товары, налоги, кредсы Ozon, финтранзакции, auto-refresh-конфиг) — единственный source of truth это SQLite (`data/app.db`).
-- **UI-preferences** — в `localStorage`, ключи `ozon-calc.tweaks` (TweaksPanel: цвет акцента, density, unitMode и т.п.) и `ozon-calc.actuals` (галка «Сравнить с фактом» + период). Их сброс не трогает данные. **Не клади бизнес-данные в localStorage** — для них всегда SQLite + миграция.
+- **Бизнес-данные** (магазины, товары, налоги/auto-refresh внутри магазина, Ozon-креды, наборы тарифов, финтранзакции, импорты) — единственный source of truth это SQLite (`data/app.db`).
+- **UI-preferences** — в `localStorage`, ключи `ozon-calc.tweaks` (TweaksPanel: цвет акцента, density, unitMode и т.п.), `ozon-calc.actuals` (галка «Сравнить с фактом» + период), `ozon-calc.activeShopId` (последний выбранный магазин для UX). Их сброс не трогает данные. **Не клади бизнес-данные в localStorage** — для них всегда SQLite + миграция.
 
 ### Поток данных (backend)
 
-Скрипт `extract-data.mjs` читает Excel и пишет в `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings` (через Drizzle-runtime-migrator). `seed.mjs` инициализирует `user_settings` и кладёт эталон-кофемашину в `products`. На рантайме Hono читает Drizzle-модели и отдаёт JSON; при импорте Ozon Seller API наполняет `products.*`, `products.ozon_commissions`, `finance_transactions`, `import_runs`. `server/index.ts` — единая точка сборки приложения через `buildApp({ authToken, db?, importContext? })`, что позволяет тестам подменять БД на `:memory:` и Ozon-клиент на mock.
+Скрипт `extract-data.mjs` читает Excel и пишет в `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`, плюс наполняет таблицу `logistics_cluster_tariffs` через **глобальный набор тарифов** (см. ниже). `seed.mjs` создаёт первого админа и его дефолтный магазин «Мой магазин (M1)». На рантайме Hono читает Drizzle-модели и отдаёт JSON; при импорте Ozon Seller API наполняет `products.*`, `products.ozon_commissions`, `finance_transactions`, `import_runs` — всё в контексте конкретного магазина (`shop_id`). `server/index.ts` — единая точка сборки приложения через `buildApp({ db?, importContext? })`, что позволяет тестам подменять БД на `:memory:` и Ozon-клиент на mock.
 
 ### Engine (`src/lib/calc/`)
 
@@ -77,6 +77,69 @@ npx vitest run __tests__/server/         # все backend-тесты
 - `CalcResult.usedOzonCommissions: boolean` — флаг, какой путь сработал; UI рендерит бейдж «API» рядом с articleId на основе наличия `ozonCommissions`.
 
 **Изменения формул** всегда начинай с того, что найди соответствующий шаг в `index.ts` (комментарии секций совпадают с нумерацией §3 в `README.md` / ТЗ), потом правь нужный модуль.
+
+### Multi-shop архитектура (миграции 0015 + 0017)
+
+Каждый пользователь ведёт N **магазинов** (`shops` таблица): свой набор товаров, финансов, импортов, налогов, auto-refresh и Ozon-кредов. Магазин принадлежит одному owner'у (`shops.user_id`), но админ может **раздать доступ** другим пользователям через таблицу `shop_access(shop_id, user_id)` (миграция 0017). Назначенный viewer видит магазин как «общий» и работает с ним в своём отдельном namespace — данные товаров/финансов/импортов **per-user**, не пересекаются с owner'ом и другими viewer'ами.
+
+- `products`: `(shop_id, user_id)` оба NOT NULL; `UNIQUE(shop_id, user_id, article_id)` — один артикул в одном shared shop может существовать одновременно у нескольких юзеров.
+- `finance_transactions`: PK `(shop_id, user_id, operation_id)` — `operation_id` Ozon-аккаунта повторяется в выписках разных viewer'ов.
+- `import_runs.user_id` — у каждого юзера своя история импортов в shared shop.
+- `shop_access(shop_id, user_id)` — список viewer'ов. Owner всегда в `shops.user_id` (запись в shop_access ему не нужна).
+- `shop_user_settings(shop_id, user_id)` — per-user overrides: `tax_settings` (json), `tariff_set_id`, `auto_refresh_enabled`, `auto_refresh_interval_min`. NULL во всех полях = «наследовать с shops». Это позволяет viewer'у иметь свою СНО и свой выбор тарифного набора, не трогая дефолты, заданные админом.
+
+`shops` содержит inline: `name`, `shortName` (ровно 2 символа, UNIQUE per user), `color` (HEX опц.), `taxSettings` (json), `autoRefreshEnabled/Min`, `ozonClientId/ApiKey`, `tariffSetId`. `user_settings.activeShopId` — выбранный по умолчанию магазин (для импорта/создания товара).
+
+**Видимость и владение** (`server/middleware/session.ts`):
+- `visibleShopIds(db, userId)` — union owned ∪ shop_access. Используется во всех scoped reads без явного `?shopId=`.
+- `userCanSeeShop(db, userId, shopId)` — видим ли (owned ИЛИ access)? Заменил старую проверку через JOIN.
+- `userOwnsShop(db, userId, shopId)` — только owner; гейтит credentials и owner-fields.
+- `resolveShopId(c, opts)` теперь валидирует видимость, а не владение.
+
+Все scoped роуты (products/finance/analytics/import/credentials/settings) принимают необязательный `?shopId=`:
+- передан → фильтр по магазину (валидация: visible);
+- не передан → возвращает данные **всех видимых магазинов** (для UI-фильтра «Все»).
+
+В SQL для products/finance/import_runs всегда добавляется `eq(table.userId, currentUser.id)` — изоляция per-user.
+
+**Эффективные настройки** (`server/settings/shopSettings.ts:resolveShopSettings(db, shopId, userId)`):
+- `taxSettings = override.taxSettings ?? shop.taxSettings`
+- `tariffSetId = override.tariffSetId ?? shop.tariffSetId` (с дальнейшим fallback на global через `resolveTariffSetId(db, shopId, userId)`)
+- `autoRefreshEnabled / IntervalMin` — аналогично
+
+`PUT /api/settings` и `PATCH /api/shops/:id` маршрутизируют запись: owner пишет в `shops.*`, viewer — в `shop_user_settings` через `upsertShopUserSettings`. PATCH owner-fields (`name/shortName/color/ozonClientId/ozonApiKey`) для viewer'а → 403.
+
+**Ozon credentials** (миграция 0018) — только shop-уровень. `server/ozon/client.ts:resolveCredentials(db, shopId)` возвращает `shop.ozonClientId/ozonApiKey` или `null`. Глобальный fallback (бывшая таблица `api_credentials`) и `OZON_CLIENT_ID/API_KEY` env-vars **удалены** — иначе магазин без своих ключей тащил бы каталог чужого Ozon-аккаунта. Магазин без ключей → импорт возвращает 400 `ozon credentials not configured`. Viewer импортирует под ключами owner'а shared shop.
+
+**Auto-refresh** (`src/lib/autoRefresh.ts`) — `Map<shopId, NodeJS.Timeout>`, независимые таймеры на каждый магазин. При смене состава магазинов App вызывает `initAutoRefresh(shopIds)`, который сносит старые таймеры и поднимает новые из effective settings (`shop_user_settings` если задано, иначе `shops`).
+
+**Admin endpoints** (`server/routes/admin.ts`):
+- `GET /api/admin/shops` — admin-owned магазины + счётчик viewer'ов.
+- `GET /api/admin/shops/:id/access` — список юзеров с доступом.
+- `GET /api/admin/shops/:id/access/candidates` — юзеры, которым ещё можно дать доступ.
+- `POST /api/admin/shops/:id/access` body `{userId}` — назначить viewer'а.
+- `DELETE /api/admin/shops/:id/access/:userId` — отозвать + `cascade-delete` per-user `products`/`finance_transactions`/`import_runs`/`shop_user_settings` этого юзера в shop'е (orphans не остаются).
+
+**При добавлении новой scoped-фичи** — следуй паттерну: в schema FK на `shops.id` ON DELETE CASCADE + колонка `user_id` NOT NULL FK; в роуте используй `resolveShopId` + `visibleShopIds` для reads, `eq(table.userId, currentUser.id)` всегда. В тестах создавай user + дефолтный shop через `loginAs(env, email, password)`; для шаринг-кейсов — `POST /api/admin/shops/:id/access` (см. `__tests__/server/sharing.test.ts`).
+
+### Версионирование тарифов логистики (миграция 0016)
+
+Точная матрица per-cluster-pair (`Москва ↔ Урал` и т.д.) живёт в **именованных наборах** `logistics_cluster_tariff_sets` — несколько версий могут сосуществовать, чтобы считать факт за прошлый период по тарифам, которые тогда действовали.
+
+- `logistics_cluster_tariff_sets`: id, `shop_id` (nullable), `name`, `uploaded_at`, `created_at`. `shop_id IS NULL` → **глобальный** набор (виден всем, грузит только админ). Иначе — **персональный** магазина (виден только владельцу).
+- `logistics_cluster_tariffs.set_id` (FK NOT NULL, ON DELETE CASCADE) — каждая строка тарифа принадлежит одному набору.
+- `shops.tariff_set_id` (nullable) — какой набор использует магазин. NULL → последний глобальный по `uploaded_at`.
+
+**Helper `resolveTariffSetId(db, shopId)`** в `server/settings/tariffSets.ts`: shop.tariffSetId → последний global → null. Защита: если магазин ссылается на чужой персональный набор (некорректный API-call), резолвер падает на global.
+
+**API:**
+- `GET /api/refs/cluster-logistics/sets` — список доступных юзеру наборов (глобальные + свои).
+- `POST /api/refs/cluster-logistics/sets` (multipart `file/name/scope/shopId`): `scope=global` требует `role=admin`, `scope=shop` требует владения shopId.
+- `DELETE /api/refs/cluster-logistics/sets/:id` — admin для global, owner для personal.
+- `GET /api/refs?shopId=…` отдаёт `logisticsClusterTariffs` (тарифы активного набора) + `activeTariffSetId`.
+- Legacy `/refs/cluster-logistics/upload` теперь под `requireAdmin` — создаёт **новый** глобальный набор с автоименем «Глобальный набор от YYYY-MM-DD», старые наборы не трогаются.
+
+UI: компонент `src/components/TariffSetsControl.tsx` рендерится внутри секции «Логистика» в `ShopSettings` — селектор активного набора + кнопка «Загрузить новый» (inline-форма с выбором scope: «мой» / «общий» — последнее только для админа) + удаление.
 
 ### Конвенции значений
 
@@ -109,12 +172,14 @@ npx vitest run __tests__/server/         # все backend-тесты
 
 ### Backend-структура
 
-- `server/db/schema.ts` — Drizzle-схема (14 таблиц: ref_*, products, user_settings, api_credentials, smtp_settings, finance_transactions, import_runs, users, sessions, email_verification_tokens).
+- `server/db/schema.ts` — Drizzle-схема (17 таблиц: `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`, `logistics_cluster_tariff_sets`, `logistics_cluster_tariffs`, `shops`, `shop_access`, `shop_user_settings`, `products`, `user_settings`, `users`, `sessions`, `email_verification_tokens`, `smtp_settings`, `finance_transactions`, `import_runs`). `api_credentials` удалена в миграции 0018.
 - `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
 - `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations` для всех точек входа).
 - `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireAdmin` — гейты для роутов.
 - `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout.
-- `server/routes/{auth,admin,refs,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов.
+- `server/routes/{auth,admin,refs,shops,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов. `shops.ts` — CRUD магазинов (`GET/POST /api/shops`, `PATCH/DELETE /api/shops/:id`, `PUT /api/shops/active` для смены `user_settings.active_shop_id`).
+- `server/settings/tariffSets.ts` — `resolveTariffSetId(db, shopId, userId?)`: какой набор тарифов логистики использует пара (shop, user): override → shop.tariffSetId → последний global → null.
+- `server/settings/shopSettings.ts` — `resolveShopSettings(db, shopId, userId)` / `upsertShopUserSettings` / `clearShopUserSettings`. Per-user overrides поверх shops.
 - `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`).
 
 ### Импорт из Ozon (Фазы 2–3)
@@ -140,7 +205,7 @@ npx vitest run __tests__/server/         # все backend-тесты
 - `POST /api/import/finance/relink` — backfill `articleId` для строк `finance_transactions WHERE article_id IS NULL` через `raw.items[].sku → products.ozon_sku`. Возвращает `{ scanned, linked }`. Полезно после первого получения `ozon_sku` для исторических транзакций без `offer_id`.
 - `GET /api/import/debug/prices/:articleId` — сырой ответ `/v5/product/info/prices` (для UI кнопки «Ozon /v5 raw» в drawer'е). Возвращает `{ endpoint, request, response }`.
 - `GET /api/import/debug/finance/:articleId` — агрегаты по локальной `finance_transactions` для одного SKU (без обращения к Ozon). Считает `accruals_for_sale` и `amount` по типам, `period.from/to`, последние 10 операций.
-- `GET/PUT /api/settings/auto-refresh` — конфиг авто-импорта каталога (`{ enabled, intervalMin }`), хранится в `user_settings` (миграция `0002`). Клиент использует его в `src/lib/autoRefresh.ts` — module-scope таймер запускается из `App.tsx` при старте.
+- `GET/PUT /api/settings/auto-refresh?shopId=…` — конфиг авто-импорта каталога (`{ enabled, intervalMin }`) **per-shop** (колонки `shops.auto_refresh_enabled / auto_refresh_interval_min`, миграция `0015`). Клиент использует его в `src/lib/autoRefresh.ts` — `Map<shopId, NodeJS.Timeout>` независимых таймеров; `initAutoRefresh(shopIds)` вызывается из `App.tsx` при изменении состава магазинов.
 
 ### Аналитика (Фаза 4)
 
