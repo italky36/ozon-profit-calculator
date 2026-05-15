@@ -1,7 +1,12 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
-import { sessions, smtpSettings, users } from "../db/schema";
+import {
+  sessions,
+  smtpSettings,
+  users,
+  workspaces,
+} from "../db/schema";
 import {
   createVerificationToken,
   type SessionUser,
@@ -359,6 +364,69 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       );
     }
     return c.json({ ok: true, source });
+  });
+
+  // === Workspaces (platform overview) ===
+
+  /** All workspaces in the platform with member/shop counts and the email of
+   * the primary owner. Paginated only by limit (we expect <10k workspaces). */
+  app.get("/workspaces", (c) => {
+    const rows = db.all<{
+      id: number;
+      name: string;
+      slug: string;
+      created_at: number;
+      member_count: number;
+      shop_count: number;
+      owner_email: string | null;
+    }>(sql`
+      SELECT
+        w.id AS id,
+        w.name AS name,
+        w.slug AS slug,
+        w.created_at AS created_at,
+        (SELECT count(*) FROM workspace_members wm WHERE wm.workspace_id = w.id) AS member_count,
+        (SELECT count(*) FROM shops s WHERE s.workspace_id = w.id) AS shop_count,
+        (
+          SELECT u.email FROM workspace_members wm
+          INNER JOIN users u ON u.id = wm.user_id
+          WHERE wm.workspace_id = w.id AND wm.role = 'owner'
+          ORDER BY wm.created_at ASC
+          LIMIT 1
+        ) AS owner_email
+      FROM workspaces w
+      ORDER BY w.created_at ASC
+    `);
+    return c.json(
+      rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        memberCount: Number(r.member_count),
+        shopCount: Number(r.shop_count),
+        ownerEmail: r.owner_email ?? null,
+        createdAt:
+          typeof r.created_at === "number"
+            ? r.created_at
+            : new Date(r.created_at).getTime(),
+      })),
+    );
+  });
+
+  app.delete("/workspaces/:id", (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id <= 0)
+      return c.json({ error: "invalid id" }, 400);
+    const existing = db
+      .select({ id: workspaces.id })
+      .from(workspaces)
+      .where(eq(workspaces.id, id))
+      .get();
+    if (!existing) return c.json({ error: "workspace not found" }, 404);
+    // Cascades: members, shops, products, finance_transactions, import_runs,
+    // tariff sets, invites — all FK ON DELETE CASCADE to workspaces.id.
+    db.delete(workspaces).where(eq(workspaces.id, id)).run();
+    return c.json({ ok: true });
   });
 
   return app;

@@ -296,4 +296,80 @@ describe("admin routes", () => {
       ).toHaveLength(0);
     });
   });
+
+  describe("GET /api/admin/workspaces", () => {
+    it("lists workspaces with member/shop counts and owner email", async () => {
+      const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
+      await loginAs(env, "u1@x.com", "password123", "user");
+      await loginAs(env, "u2@x.com", "password123", "user");
+
+      const res = await env.app.request("/api/admin/workspaces", {
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<Record<string, unknown>>;
+      expect(list.length).toBeGreaterThanOrEqual(3);
+      for (const w of list) {
+        expect(w).toHaveProperty("id");
+        expect(w).toHaveProperty("name");
+        expect(w).toHaveProperty("slug");
+        expect(w).toHaveProperty("memberCount");
+        expect(w).toHaveProperty("shopCount");
+        expect(w).toHaveProperty("ownerEmail");
+        expect(w).toHaveProperty("createdAt");
+      }
+      const u1 = list.find((w) => w.ownerEmail === "u1@x.com");
+      expect(u1).toBeDefined();
+      expect(u1?.memberCount).toBe(1);
+      expect(u1?.shopCount).toBe(1);
+    });
+
+    it("requires admin", async () => {
+      const { cookie } = await loginAs(env, "u@x.com", "password123", "user");
+      const res = await env.app.request("/api/admin/workspaces", {
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("DELETE /api/admin/workspaces/:id", () => {
+    it("removes workspace and cascades members/shops", async () => {
+      const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
+      const target = await loginAs(env, "victim@x.com", "password123", "user");
+
+      const res = await env.app.request(
+        `/api/admin/workspaces/${target.workspaceId}`,
+        { method: "DELETE", headers: { Cookie: cookie } },
+      );
+      expect(res.status).toBe(200);
+
+      const remaining = env.db
+        .select()
+        .from(users)
+        .where(eq(users.email, "victim@x.com"))
+        .all();
+      expect(remaining).toHaveLength(1); // user itself stays
+
+      const list = await env.app.request("/api/admin/workspaces", {
+        headers: { Cookie: cookie },
+      });
+      const rows = (await list.json()) as Array<{ id: number }>;
+      expect(rows.find((r) => r.id === target.workspaceId)).toBeUndefined();
+    });
+
+    it("requires admin", async () => {
+      const { cookie, workspaceId } = await loginAs(
+        env,
+        "u@x.com",
+        "password123",
+        "user",
+      );
+      const res = await env.app.request(`/api/admin/workspaces/${workspaceId}`, {
+        method: "DELETE",
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(403);
+    });
+  });
 });

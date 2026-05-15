@@ -223,29 +223,14 @@ export interface AdminSmtpSettings {
   updatedAt: string | null;
 }
 
-export interface AdminShop {
+export interface AdminWorkspace {
   id: number;
   name: string;
-  shortName: string;
-  color: string | null;
-  hasOzonCreds: boolean;
-  viewersCount: number;
+  slug: string;
+  memberCount: number;
+  shopCount: number;
+  ownerEmail: string | null;
   createdAt: number;
-}
-
-export interface AdminShopAccess {
-  userId: number;
-  email: string;
-  role: "admin" | "user";
-  isBlocked: boolean;
-  grantedAt: number;
-}
-
-export interface AdminShopCandidate {
-  id: number;
-  email: string;
-  role: "admin" | "user";
-  isBlocked: boolean;
 }
 
 export type WorkspaceRole = "owner" | "manager" | "member";
@@ -360,25 +345,9 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ to, subject }),
       }),
-    shops: {
-      list: () => apiFetch<AdminShop[]>("/admin/shops"),
-      getAccess: (shopId: number) =>
-        apiFetch<AdminShopAccess[]>(`/admin/shops/${shopId}/access`),
-      getCandidates: (shopId: number) =>
-        apiFetch<AdminShopCandidate[]>(
-          `/admin/shops/${shopId}/access/candidates`,
-        ),
-      grantAccess: (shopId: number, userId: number) =>
-        apiFetch<{ ok: true; alreadyGranted?: boolean }>(
-          `/admin/shops/${shopId}/access`,
-          { method: "POST", body: JSON.stringify({ userId }) },
-        ),
-      revokeAccess: (shopId: number, userId: number) =>
-        apiFetch<{ ok: true; revoked: number }>(
-          `/admin/shops/${shopId}/access/${userId}`,
-          { method: "DELETE" },
-        ),
-    },
+    listWorkspaces: () => apiFetch<AdminWorkspace[]>("/admin/workspaces"),
+    deleteWorkspace: (id: number) =>
+      apiFetch<{ ok: true }>(`/admin/workspaces/${id}`, { method: "DELETE" }),
   },
   refs: {
     get: (shopId?: number) => {

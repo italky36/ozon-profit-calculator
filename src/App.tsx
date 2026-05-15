@@ -8,14 +8,12 @@ import TweaksPanel from "./components/TweaksPanel";
 const ProductDrawer = lazy(() => import("./components/ProductDrawer"));
 const OzonImportModal = lazy(() => import("./components/OzonImportModal"));
 const FinanceTab = lazy(() => import("./components/FinanceTab"));
-const AdminPage = lazy(() => import("./components/admin/AdminPage"));
 const ShopsModal = lazy(() => import("./components/ShopsModal"));
 const TeamPage = lazy(() => import("./components/TeamPage"));
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
 import { useAuth } from "./contexts/useAuth";
 import {
   Package,
-  ShieldCheck,
   Wallet,
   Settings as SettingsIcon,
   Users,
@@ -110,7 +108,7 @@ const uniqueArticleId = (base: string, taken: Set<string>): string => {
   return `${base}-${Date.now()}`;
 };
 
-type TabId = "calc" | "finance" | "team" | "admin";
+type TabId = "calc" | "finance" | "team";
 
 const BASE_TABS = [
   {
@@ -139,19 +137,9 @@ const BASE_TABS = [
   },
 ];
 
-const ADMIN_TAB = {
-  id: "admin" as const,
-  label: (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <ShieldCheck size={16} /> Админка
-    </span>
-  ),
-};
-
 export default function App() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
-  const TABS = isAdmin ? [...BASE_TABS, ADMIN_TAB] : BASE_TABS;
+  useAuth();
+  const TABS = BASE_TABS;
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
 
   const [refs, setRefs] = useState<References | null>(null);
@@ -230,7 +218,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === "calc" || v === "finance" || v === "team" || v === "admin")
+      if (v === "calc" || v === "finance" || v === "team")
         return v;
     } catch {
       /* ignore */
@@ -244,11 +232,6 @@ export default function App() {
       /* ignore */
     }
   }, [activeTab]);
-  // Если не-админ ранее был на "admin" и роль изменилась — откатить.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (activeTab === "admin" && !isAdmin) setActiveTab("calc");
-  }, [activeTab, isAdmin]);
   const [channelFilter, setChannelFilter] = useState<FilterValue>("Все");
   const ACTIVE_ONLY_KEY = "ozon-calc.active-only";
   const [activeOnly, setActiveOnly] = useState<boolean>(() => {
@@ -670,7 +653,7 @@ export default function App() {
               shopName={activeShop?.name ?? null}
               shopColor={activeShop?.color ?? null}
               currentTariffSetId={activeShop?.tariffSetId ?? null}
-              userIsAdmin={user?.role === "admin"}
+              userIsAdmin={false}
               shopIsOwner={activeShop?.isOwner ?? true}
               shopOwnerEmail={activeShop?.ownerEmail ?? null}
               shopHasOverrides={activeShop?.hasOverrides ?? false}
@@ -807,12 +790,6 @@ export default function App() {
         {activeTab === "team" && (
           <Suspense fallback={<p className="muted">Загрузка…</p>}>
             <TeamPage />
-          </Suspense>
-        )}
-
-        {activeTab === "admin" && isAdmin && (
-          <Suspense fallback={<p className="muted">Загрузка…</p>}>
-            <AdminPage />
           </Suspense>
         )}
       </main>
