@@ -97,6 +97,7 @@ interface FieldProps {
   autoComplete?: string;
   required?: boolean;
   minLength?: number;
+  maxLength?: number;
 }
 
 export function Field({
@@ -107,6 +108,7 @@ export function Field({
   autoComplete,
   required,
   minLength,
+  maxLength,
 }: FieldProps) {
   const [revealed, setRevealed] = useState(false);
   const isPassword = type === "password";
@@ -124,6 +126,7 @@ export function Field({
           autoComplete={autoComplete}
           required={required}
           minLength={minLength}
+          maxLength={maxLength}
           style={{
             padding: "8px 12px",
             paddingRight: isPassword ? 40 : 12,

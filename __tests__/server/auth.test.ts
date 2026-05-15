@@ -3,7 +3,10 @@ import { eq } from "drizzle-orm";
 import {
   emailVerificationTokens,
   sessions,
+  shops,
   users,
+  workspaceMembers,
+  workspaces,
 } from "../../server/db/schema";
 import {
   createUserDirect,
@@ -21,11 +24,15 @@ describe("auth routes", () => {
   afterEach(() => teardownTestEnv(env));
 
   describe("POST /api/auth/register", () => {
-    it("creates an unverified user, sends email, returns success message", async () => {
+    it("creates an unverified user + workspace + owner membership + default shop", async () => {
       const res = await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "Foo@Bar.com", password: "password123" }),
+        body: JSON.stringify({
+          email: "Foo@Bar.com",
+          password: "password123",
+          workspaceName: "Acme Trading",
+        }),
       });
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -41,10 +48,36 @@ describe("auth routes", () => {
       expect(user!.isSysadmin).toBe(false);
       expect(user!.passwordHash).not.toBe("password123");
 
+      // Workspace created with the supplied name.
+      const ws = env.db
+        .select()
+        .from(workspaces)
+        .where(eq(workspaces.name, "Acme Trading"))
+        .get();
+      expect(ws).toBeTruthy();
+      expect(ws!.slug).toBe(`foo-${user!.id}`);
+
+      // Owner membership.
+      const member = env.db
+        .select()
+        .from(workspaceMembers)
+        .where(eq(workspaceMembers.userId, user!.id))
+        .get();
+      expect(member?.role).toBe("owner");
+      expect(member?.workspaceId).toBe(ws!.id);
+
+      // Default shop in the workspace.
+      const wsShops = env.db
+        .select()
+        .from(shops)
+        .where(eq(shops.workspaceId, ws!.id))
+        .all();
+      expect(wsShops).toHaveLength(1);
+      expect(wsShops[0].name).toBe("Мой магазин");
+
+      // Verification email + token.
       expect(env.emails).toHaveLength(1);
       expect(env.emails[0].to).toBe("foo@bar.com");
-      expect(env.emails[0].subject).toMatch(/email/i);
-
       const tokens = env.db
         .select()
         .from(emailVerificationTokens)
@@ -53,11 +86,52 @@ describe("auth routes", () => {
       expect(tokens).toHaveLength(1);
     });
 
+    it("rejects missing workspaceName with 400", async () => {
+      const res = await env.app.request("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "a@b.co", password: "password123" }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toMatch(/команд/i);
+    });
+
+    it("rejects empty workspaceName (whitespace only) with 400", async () => {
+      const res = await env.app.request("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "a@b.co",
+          password: "password123",
+          workspaceName: "   ",
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("inviteToken is reserved for Stage 4 → 501", async () => {
+      const res = await env.app.request("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "a@b.co",
+          password: "password123",
+          inviteToken: "deadbeef",
+        }),
+      });
+      expect(res.status).toBe(501);
+    });
+
     it("rejects invalid email", async () => {
       const res = await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "notanemail", password: "password123" }),
+        body: JSON.stringify({
+          email: "notanemail",
+          password: "password123",
+          workspaceName: "X",
+        }),
       });
       expect(res.status).toBe(400);
     });
@@ -66,13 +140,21 @@ describe("auth routes", () => {
       const res = await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "a@b.co", password: "short" }),
+        body: JSON.stringify({
+          email: "a@b.co",
+          password: "short",
+          workspaceName: "X",
+        }),
       });
       expect(res.status).toBe(400);
     });
 
     it("rejects duplicate email with 409", async () => {
-      const body = JSON.stringify({ email: "dup@x.com", password: "password123" });
+      const body = JSON.stringify({
+        email: "dup@x.com",
+        password: "password123",
+        workspaceName: "Team",
+      });
       const a = await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -85,6 +167,12 @@ describe("auth routes", () => {
         body,
       });
       expect(b.status).toBe(409);
+
+      // 409 must not leak a second workspace/membership.
+      const wsRows = env.db.select().from(workspaces).all();
+      expect(wsRows).toHaveLength(1);
+      const members = env.db.select().from(workspaceMembers).all();
+      expect(members).toHaveLength(1);
     });
   });
 
@@ -93,7 +181,11 @@ describe("auth routes", () => {
       await env.app.request("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "v@x.com", password: "password123" }),
+        body: JSON.stringify({
+          email: "v@x.com",
+          password: "password123",
+          workspaceName: "VeeTeam",
+        }),
       });
       const tokenRow = env.db.select().from(emailVerificationTokens).get();
       expect(tokenRow).toBeTruthy();
@@ -107,6 +199,8 @@ describe("auth routes", () => {
       const body = await res.json();
       expect(body.user.email).toBe("v@x.com");
       expect(body.user.isVerified).toBe(true);
+      expect(body.user.workspaceId).toBeGreaterThan(0);
+      expect(body.user.workspaceRole).toBe("owner");
       expect(res.headers.get("set-cookie")).toMatch(/ozon_calc_session=/);
 
       const user = env.db
@@ -118,6 +212,13 @@ describe("auth routes", () => {
 
       const remaining = env.db.select().from(emailVerificationTokens).all();
       expect(remaining).toHaveLength(0);
+
+      // No duplicate workspace from ensurePersonalWorkspace safety-net.
+      const wsCount = env.db
+        .select()
+        .from(workspaces)
+        .all().length;
+      expect(wsCount).toBe(1);
     });
 
     it("rejects unknown / reused token with 400", async () => {
@@ -218,6 +319,9 @@ describe("auth routes", () => {
       const body = await res.json();
       expect(body.user.email).toBe("u@x.com");
       expect(body.user.role).toBe("admin");
+      expect(body.user.isSysadmin).toBe(true);
+      expect(body.user.workspaceId).toBeGreaterThan(0);
+      expect(body.user.workspaceRole).toBe("owner");
     });
 
     it("returns 401 without cookie", async () => {

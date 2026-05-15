@@ -178,6 +178,24 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const parsed = validateCredentials(body);
     if (typeof parsed === "string") return c.json({ error: parsed }, 400);
 
+    const r = (body ?? {}) as {
+      workspaceName?: unknown;
+      inviteToken?: unknown;
+    };
+    if (typeof r.inviteToken === "string" && r.inviteToken.trim()) {
+      // Stage 4 territory — invite-flow not implemented yet.
+      return c.json(
+        { error: "Регистрация по приглашению пока не поддерживается" },
+        501,
+      );
+    }
+    const workspaceName =
+      typeof r.workspaceName === "string" ? r.workspaceName.trim() : "";
+    if (!workspaceName)
+      return c.json({ error: "Укажите название команды" }, 400);
+    if (workspaceName.length > 80)
+      return c.json({ error: "Название команды не длиннее 80 символов" }, 400);
+
     const existing = db
       .select({ id: users.id })
       .from(users)
@@ -187,20 +205,69 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
 
     const passwordHash = await hashPassword(parsed.password);
     const now = new Date();
-    const inserted = db
-      .insert(users)
-      .values({
-        email: parsed.email,
-        passwordHash,
-        isSysadmin: false,
-        isVerified: false,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning({ id: users.id })
-      .get();
+    const defaultTax = readDefaultTaxSettings(db);
 
-    const { token } = createVerificationToken(db, inserted.id);
+    // user → workspace → owner-membership → default shop, atomically.
+    const userId = db.transaction((tx) => {
+      const u = tx
+        .insert(users)
+        .values({
+          email: parsed.email,
+          passwordHash,
+          isSysadmin: false,
+          isVerified: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: users.id })
+        .get();
+
+      const slug = buildPersonalSlug(parsed.email, u.id);
+      const ws = tx
+        .insert(workspaces)
+        .values({
+          name: workspaceName,
+          slug,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: workspaces.id })
+        .get();
+
+      tx.insert(workspaceMembers)
+        .values({
+          workspaceId: ws.id,
+          userId: u.id,
+          role: "owner",
+          status: "active",
+          createdAt: now,
+        })
+        .run();
+
+      const shop = tx
+        .insert(shops)
+        .values({
+          workspaceId: ws.id,
+          name: "Мой магазин",
+          shortName: "M1",
+          color: null,
+          taxSettings: defaultTax,
+          autoRefreshEnabled: false,
+          autoRefreshIntervalMin: 30,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: shops.id })
+        .get();
+
+      tx.insert(userSettings)
+        .values({ userId: u.id, activeShopId: shop.id, updatedAt: now })
+        .run();
+
+      return u.id;
+    });
+
+    const { token } = createVerificationToken(db, userId);
     try {
       await getEmailClient().send(
         generateVerificationEmail(parsed.email, token),

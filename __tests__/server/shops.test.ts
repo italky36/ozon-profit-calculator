@@ -184,6 +184,7 @@ describe("auth.verifyEmail autocreates a default shop", () => {
       body: JSON.stringify({
         email: "fresh@test.local",
         password: "password123",
+        workspaceName: "Fresh Team",
       }),
     });
     expect(reg.status).toBe(200);

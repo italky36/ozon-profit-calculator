@@ -34,8 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const register = useCallback(
-    async (email: string, password: string) => {
-      return api.auth.register(email, password);
+    async (email: string, password: string, workspaceName: string) => {
+      return api.auth.register(email, password, workspaceName);
     },
     [],
   );

@@ -198,7 +198,10 @@ export interface AuthUser {
   id: number;
   email: string;
   role: "admin" | "user";
+  isSysadmin: boolean;
   isVerified: boolean;
+  workspaceId: number;
+  workspaceRole: "owner" | "manager" | "member";
 }
 
 export interface AdminUser extends AuthUser {
@@ -253,10 +256,10 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ email, password }),
       }),
-    register: (email: string, password: string) =>
+    register: (email: string, password: string, workspaceName: string) =>
       apiFetch<{ message: string }>("/auth/register", {
         method: "POST",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, workspaceName }),
       }),
     verifyEmail: (token: string) =>
       apiFetch<{ user: AuthUser }>("/auth/verify-email", {

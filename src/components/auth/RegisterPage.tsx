@@ -7,17 +7,20 @@ import { useSubmit } from "./useSubmit";
 export default function RegisterPage() {
   const { register } = useAuth();
   const [email, setEmail] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const { submitting, onSubmit } = useSubmit(async () => {
+    if (!workspaceName.trim()) throw new Error("Укажите название команды");
     if (password.length < 8) throw new Error("Пароль должен быть минимум 8 символов");
     if (password !== confirm) throw new Error("Пароли не совпадают");
-    const res = await register(email, password);
+    const res = await register(email, password, workspaceName.trim());
     setNotice(res.message || "Регистрация успешна. Проверьте почту для подтверждения.");
     setEmail("");
+    setWorkspaceName("");
     setPassword("");
     setConfirm("");
   }, setError);
@@ -51,6 +54,15 @@ export default function RegisterPage() {
           value={email}
           onChange={setEmail}
           autoComplete="email"
+          required
+        />
+        <Field
+          label="Название команды"
+          type="text"
+          value={workspaceName}
+          onChange={setWorkspaceName}
+          autoComplete="organization"
+          maxLength={80}
           required
         />
         <Field
