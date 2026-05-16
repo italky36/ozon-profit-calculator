@@ -1,10 +1,11 @@
 import { Hono } from "hono";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
   sessions,
   smtpSettings,
   users,
+  workspaceMembers,
   workspaces,
 } from "../db/schema";
 import {
@@ -41,7 +42,36 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
 
   app.get("/users", (c) => {
     const rows = db.select().from(users).all();
-    return c.json(rows.map(userPayload));
+    // Workspace lookup in a single query — keeps /users a constant-cost call.
+    const memberships = db
+      .select({
+        userId: workspaceMembers.userId,
+        workspaceId: workspaces.id,
+        name: workspaces.name,
+        slug: workspaces.slug,
+        role: workspaceMembers.role,
+      })
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+      .all();
+    const byUser = new Map<
+      number,
+      { id: number; name: string; slug: string; role: string }
+    >();
+    for (const m of memberships) {
+      byUser.set(m.userId, {
+        id: m.workspaceId,
+        name: m.name,
+        slug: m.slug,
+        role: m.role,
+      });
+    }
+    return c.json(
+      rows.map((u) => ({
+        ...userPayload(u),
+        workspace: byUser.get(u.id) ?? null,
+      })),
+    );
   });
 
   /** Toggle sysadmin flag. Body still accepts the legacy `{role: 'admin'|'user'}`
@@ -376,6 +406,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       name: string;
       slug: string;
       created_at: number;
+      suspended_at: number | null;
       member_count: number;
       shop_count: number;
       owner_email: string | null;
@@ -385,6 +416,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         w.name AS name,
         w.slug AS slug,
         w.created_at AS created_at,
+        w.suspended_at AS suspended_at,
         (SELECT count(*) FROM workspace_members wm WHERE wm.workspace_id = w.id) AS member_count,
         (SELECT count(*) FROM shops s WHERE s.workspace_id = w.id) AS shop_count,
         (
@@ -409,7 +441,109 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
           typeof r.created_at === "number"
             ? r.created_at
             : new Date(r.created_at).getTime(),
+        suspendedAt:
+          r.suspended_at == null
+            ? null
+            : typeof r.suspended_at === "number"
+              ? r.suspended_at
+              : new Date(r.suspended_at).getTime(),
       })),
+    );
+  });
+
+  /** Toggle a platform pause on a workspace. Suspending revokes all member
+   * sessions immediately; un-suspending just clears the flag (members log in
+   * fresh). Sysadmins are never affected (they're not in workspace_members). */
+  app.put("/workspaces/:id/suspended", async (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id <= 0)
+      return c.json({ error: "invalid id" }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid json" }, 400);
+    }
+    const r = (body ?? {}) as { suspended?: unknown };
+    if (typeof r.suspended !== "boolean")
+      return c.json({ error: "suspended must be boolean" }, 400);
+
+    const existing = db
+      .select({ id: workspaces.id, suspendedAt: workspaces.suspendedAt })
+      .from(workspaces)
+      .where(eq(workspaces.id, id))
+      .get();
+    if (!existing) return c.json({ error: "workspace not found" }, 404);
+
+    const now = new Date();
+    db.update(workspaces)
+      .set({
+        suspendedAt: r.suspended ? now : null,
+        updatedAt: now,
+      })
+      .where(eq(workspaces.id, id))
+      .run();
+
+    if (r.suspended) {
+      // Kick every non-sysadmin member off all devices. Sysadmins shouldn't be
+      // in workspace_members in the first place, but filter defensively in
+      // case a future migration puts them there.
+      const memberIds = db
+        .select({ userId: workspaceMembers.userId })
+        .from(workspaceMembers)
+        .innerJoin(users, eq(users.id, workspaceMembers.userId))
+        .where(eq(workspaceMembers.workspaceId, id))
+        .all()
+        .map((m) => m.userId);
+      if (memberIds.length > 0) {
+        db.delete(sessions).where(inArray(sessions.userId, memberIds)).run();
+      }
+    }
+
+    return c.json({
+      id,
+      suspendedAt: r.suspended ? now.getTime() : null,
+    });
+  });
+
+  // Members of a specific workspace — feeds the accordion-expansion on the
+  // sysadmin → Команды tab. Sysadmin-only by virtue of the requireSysadmin
+  // middleware mounted on this router.
+  app.get("/workspaces/:id/members", (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id <= 0)
+      return c.json({ error: "invalid id" }, 400);
+    const ws = db
+      .select({ id: workspaces.id })
+      .from(workspaces)
+      .where(eq(workspaces.id, id))
+      .get();
+    if (!ws) return c.json({ error: "workspace not found" }, 404);
+    const rows = db
+      .select({
+        userId: workspaceMembers.userId,
+        email: users.email,
+        role: workspaceMembers.role,
+        isBlocked: users.isBlocked,
+        isVerified: users.isVerified,
+        createdAt: workspaceMembers.createdAt,
+      })
+      .from(workspaceMembers)
+      .innerJoin(users, eq(users.id, workspaceMembers.userId))
+      .where(eq(workspaceMembers.workspaceId, id))
+      .all();
+    return c.json(
+      rows
+        .map((r) => ({
+          userId: r.userId,
+          email: r.email,
+          role: r.role,
+          isBlocked: r.isBlocked,
+          isVerified: r.isVerified,
+          createdAt: r.createdAt.getTime(),
+        }))
+        .sort((a, b) => a.createdAt - b.createdAt),
     );
   });
 

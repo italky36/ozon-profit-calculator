@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Plus, Trash2, Users, X } from "lucide-react";
-import type { Shop } from "../api";
+import { useEffect, useState } from "react";
+import { ArrowRightLeft, Plus, Trash2, Users, X } from "lucide-react";
+import type { Shop, WorkspaceMember } from "../api";
 import { api } from "../api";
+import { useAuth } from "../contexts/useAuth";
 import ShopBadge from "./ShopBadge";
 import ShopMembersModal from "./ShopMembersModal";
 
@@ -35,10 +36,32 @@ export default function ShopsModal({
   onClose,
   onChanged,
 }: Props) {
+  const { user } = useAuth();
+  const isWorkspaceOwner = user?.workspaceRole === "owner";
   const [drafts, setDrafts] = useState<Record<number, DraftPatch>>({});
   const [busy, setBusy] = useState<number | "new" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [membersFor, setMembersFor] = useState<Shop | null>(null);
+  const [transferFor, setTransferFor] = useState<Shop | null>(null);
+  // Owner needs the workspace member list to populate the transfer dropdown.
+  // Fetched lazily on first transfer-button click; cached afterwards.
+  const [wsMembers, setWsMembers] = useState<WorkspaceMember[] | null>(null);
+
+  useEffect(() => {
+    if (!isWorkspaceOwner || wsMembers !== null) return;
+    let cancelled = false;
+    void api.workspace
+      .me()
+      .then((info) => {
+        if (!cancelled) setWsMembers(info.members);
+      })
+      .catch(() => {
+        /* non-critical — transfer button shows a fallback message */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isWorkspaceOwner, wsMembers]);
 
   // New-shop form.
   const [newName, setNewName] = useState("");
@@ -84,6 +107,28 @@ export default function ShopsModal({
     try {
       await api.shops.remove(shop.id);
       onChanged(shops.filter((s) => s.id !== shop.id));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const transferShop = async (shop: Shop, userId: number) => {
+    const target = wsMembers?.find((m) => m.userId === userId);
+    if (!target) return;
+    if (
+      !window.confirm(
+        `Передать управление магазином «${shop.name}» пользователю ${target.email}? Старый создатель потеряет права на этот магазин.`,
+      )
+    )
+      return;
+    setBusy(shop.id);
+    setErr(null);
+    try {
+      const updated = await api.shops.transfer(shop.id, userId);
+      onChanged(shops.map((s) => (s.id === shop.id ? updated : s)));
+      setTransferFor(null);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -256,11 +301,26 @@ export default function ShopsModal({
                     title={
                       editable
                         ? "Управлять доступом сотрудников"
-                        : "Только owner/manager управляет доступом"
+                        : "Доступом управляет создатель магазина или owner команды"
                     }
                   >
                     <Users size={14} />
                   </button>
+                  {isWorkspaceOwner && (
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      disabled={busy === s.id}
+                      onClick={() =>
+                        setTransferFor((cur) =>
+                          cur?.id === s.id ? null : s,
+                        )
+                      }
+                      title="Передать управление другому участнику команды"
+                    >
+                      <ArrowRightLeft size={14} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn-icon"
@@ -269,12 +329,17 @@ export default function ShopsModal({
                     title={
                       s.isOwner
                         ? "Удалить магазин"
-                        : "Удалить может только owner/manager команды"
+                        : "Удалить может только создатель магазина или owner команды"
                     }
                   >
                     <Trash2 size={14} />
                   </button>
                 </div>
+                <CreatorHint
+                  shop={s}
+                  currentUserId={user?.id ?? null}
+                  members={wsMembers}
+                />
                 {!s.isOwner && (
                   <div
                     style={{
@@ -283,9 +348,19 @@ export default function ShopsModal({
                       paddingLeft: 32,
                     }}
                   >
-                    Общий магазин команды — настройки задаёт owner/manager. У
+                    Общий магазин команды — управляет создатель или owner. У
                     вас личный каталог и финансы в нём.
                   </div>
+                )}
+                {transferFor?.id === s.id && (
+                  <TransferPopover
+                    shop={s}
+                    members={wsMembers}
+                    currentUserId={user?.id ?? null}
+                    busy={busy === s.id}
+                    onClose={() => setTransferFor(null)}
+                    onPick={(uid) => void transferShop(s, uid)}
+                  />
                 )}
               </div>
             );
@@ -375,6 +450,137 @@ export default function ShopsModal({
           shopName={membersFor.name}
           onClose={() => setMembersFor(null)}
         />
+      )}
+    </div>
+  );
+}
+
+/** Small "создан вами / создан X@…" hint shown under each shop row. */
+function CreatorHint({
+  shop,
+  currentUserId,
+  members,
+}: {
+  shop: Shop;
+  currentUserId: number | null;
+  members: WorkspaceMember[] | null;
+}) {
+  let label: string;
+  if (shop.createdById == null) {
+    label = "Создатель удалён из команды";
+  } else if (shop.createdById === currentUserId) {
+    label = "Создан вами";
+  } else {
+    const m = members?.find((x) => x.userId === shop.createdById);
+    label = m ? `Создан ${m.email}` : `Создан user #${shop.createdById}`;
+  }
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        color: "var(--text-muted, #888)",
+        paddingLeft: 32,
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+/** Owner-only popover for transferring a shop's management to another
+ * workspace member. Hides members in role "member" since the backend rejects
+ * them; surfaces a hint when there is no valid candidate. */
+function TransferPopover({
+  shop,
+  members,
+  currentUserId,
+  busy,
+  onClose,
+  onPick,
+}: {
+  shop: Shop;
+  members: WorkspaceMember[] | null;
+  currentUserId: number | null;
+  busy: boolean;
+  onClose: () => void;
+  onPick: (userId: number) => void;
+}) {
+  const candidates = (members ?? []).filter(
+    (m) =>
+      m.userId !== shop.createdById &&
+      m.userId !== currentUserId &&
+      (m.role === "owner" || m.role === "manager"),
+  );
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        marginLeft: 32,
+        padding: 10,
+        border: "1px solid var(--border-soft)",
+        borderRadius: 8,
+        background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
+        <strong style={{ fontSize: 12 }}>Передать управление</strong>
+        <button
+          type="button"
+          className="btn-icon"
+          onClick={onClose}
+          aria-label="Закрыть"
+          style={{ padding: 2 }}
+        >
+          <X size={12} />
+        </button>
+      </div>
+      {members === null ? (
+        <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+          Загрузка списка участников…
+        </p>
+      ) : candidates.length === 0 ? (
+        <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+          В команде нет других owner/manager, кому можно передать управление.
+          Пригласите менеджера на вкладке «Команда».
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {candidates.map((m) => (
+            <button
+              key={m.userId}
+              type="button"
+              disabled={busy}
+              onClick={() => onPick(m.userId)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "6px 8px",
+                border: "1px solid var(--border-soft)",
+                borderRadius: 6,
+                background: "#fff",
+                cursor: busy ? "wait" : "pointer",
+                fontSize: 12,
+              }}
+            >
+              <span>{m.email}</span>
+              <span
+                className="muted"
+                style={{ fontSize: 10, textTransform: "uppercase" }}
+              >
+                {m.role}
+              </span>
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );

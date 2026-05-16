@@ -97,6 +97,13 @@ export const workspaces = sqliteTable("workspaces", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
+  /** Platform-level pause flag. NULL → active. Non-NULL → sysadmin suspended
+   * the workspace at this timestamp; members can't log in or hold sessions. */
+  suspendedAt: integer("suspended_at", { mode: "timestamp_ms" }),
+  /** Header-badge customization (set by owner via AppHeader popover). NULL →
+   * fall back to UI accent / Users icon. */
+  logoDataUrl: text("logo_data_url"),
+  color: text("color"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
@@ -168,6 +175,12 @@ export const shops = sqliteTable(
      * глобальный набор по uploadedAt. FK enforced at SQL migration level —
      * not modeled here to avoid Drizzle circular ref. */
     tariffSetId: integer("tariff_set_id"),
+    /** Per-shop admin. Workspace owner can manage any shop; everyone else
+     * (managers) can manage only shops they themselves created. NULL → the
+     * creator was removed from the workspace; only workspace owner manages. */
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
@@ -373,6 +386,16 @@ export const emailVerificationTokens = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
 );
+
+export const passwordResetTokens = sqliteTable("password_reset_tokens", {
+  token: text("token").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  usedAt: integer("used_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
 
 // === SMTP settings (sysadmin-editable; overrides env if a row exists) ===
 export const smtpSettings = sqliteTable("smtp_settings", {

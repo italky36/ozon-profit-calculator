@@ -39,14 +39,14 @@ const setupDb = (): TestEnv => {
     }
   }
   const db = drizzle(sqlite, { schema });
-  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
-  const shopId = createShopFor(db, adminId);
-  const workspaceId = workspaceIdOf(db, adminId);
+  const userId = createUserDirect(db, "owner@test.local", "password", "user");
+  const shopId = createShopFor(db, userId);
+  const workspaceId = workspaceIdOf(db, userId);
   const sessionId = "test-finance-session";
   db.insert(sessions)
     .values({
       id: sessionId,
-      userId: adminId,
+      userId,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       createdAt: new Date(),
     })
@@ -55,7 +55,7 @@ const setupDb = (): TestEnv => {
     db,
     sqlite,
     cookie: `ozon_calc_session=${sessionId}`,
-    userId: adminId,
+    userId,
     workspaceId,
     shopId,
   };

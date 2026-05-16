@@ -17,6 +17,7 @@ import type { SessionUser } from "../auth/utils";
 import type { TaxSettings } from "../../src/types";
 import { readDefaultTaxSettings } from "../settings/defaults";
 import {
+  canManageShop,
   canManageWorkspace,
   userCanAccessShop,
 } from "../middleware/session";
@@ -41,9 +42,13 @@ interface ShopOut {
   tariffSetId: number | null;
   createdAt: number;
   updatedAt: number;
-  /** True when the current user can edit shop metadata + assignment.
-   * Workspace owner/manager → true; member → false (read-only). */
+  /** True when the current user can edit shop metadata + assignment. After
+   * Stage 7'' this is per-shop: workspace owner everywhere; manager only on
+   * shops they created (`createdBy === user.id`). Member always false. */
   isOwner: boolean;
+  /** Creator of the shop. NULL → orphaned (creator removed from workspace);
+   * only workspace owner can manage such a shop. */
+  createdById: number | null;
   /** True when the user has at least one non-null override in
    * `shop_user_settings` for this shop. Surfaces the «Сбросить к дефолтам
    * команды» button in the UI. */
@@ -73,7 +78,10 @@ const buildOut = async (
     tariffSetId: eff?.tariffSetId ?? row.tariffSetId ?? null,
     createdAt: row.createdAt.getTime(),
     updatedAt: row.updatedAt.getTime(),
-    isOwner: canManageWorkspace(user.workspaceRole),
+    isOwner:
+      user.workspaceRole === "owner" ||
+      (user.workspaceRole === "manager" && row.createdBy === user.id),
+    createdById: row.createdBy ?? null,
     hasOverrides,
   };
 };
@@ -247,6 +255,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
           taxSettings,
           autoRefreshEnabled: false,
           autoRefreshIntervalMin: 30,
+          createdBy: user.id,
           createdAt: now,
           updatedAt: now,
         })
@@ -320,9 +329,12 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       .where(and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)));
     if (!existing) return c.json({ error: "not found" }, 404);
 
-    if (!canManageWorkspace(user.workspaceRole)) {
+    if (!(await canManageShop(db, user, id))) {
       return c.json(
-        { error: "Только owner или manager редактирует магазин" },
+        {
+          error:
+            "Редактировать магазин может только его создатель или владелец команды",
+        },
         403,
       );
     }
@@ -437,7 +449,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
     return c.json(await buildOut(db, row, user));
   });
 
-  // Assignment endpoints — owner/manager only.
+  // Assignment endpoints — owner of workspace OR creator-of-this-shop only.
   app.get("/:id/members", async (c) => {
     const user = c.get("user");
     const id = Number(c.req.param("id"));
@@ -447,9 +459,12 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       .from(shops)
       .where(and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)));
     if (!shop) return c.json({ error: "not found" }, 404);
-    if (!canManageWorkspace(user.workspaceRole)) {
+    if (!(await canManageShop(db, user, id))) {
       return c.json(
-        { error: "только owner или manager управляет доступом" },
+        {
+          error:
+            "Доступом управляет создатель магазина или владелец команды",
+        },
         403,
       );
     }
@@ -497,17 +512,20 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
     const user = c.get("user");
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "invalid id" }, 400);
-    if (!canManageWorkspace(user.workspaceRole)) {
-      return c.json(
-        { error: "только owner или manager управляет доступом" },
-        403,
-      );
-    }
     const [shop] = await db
       .select()
       .from(shops)
       .where(and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)));
     if (!shop) return c.json({ error: "not found" }, 404);
+    if (!(await canManageShop(db, user, id))) {
+      return c.json(
+        {
+          error:
+            "Доступом управляет создатель магазина или владелец команды",
+        },
+        403,
+      );
+    }
 
     let body: unknown;
     try {
@@ -552,17 +570,20 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
     const targetId = Number(c.req.param("userId"));
     if (!Number.isFinite(id) || !Number.isFinite(targetId))
       return c.json({ error: "invalid id" }, 400);
-    if (!canManageWorkspace(user.workspaceRole)) {
-      return c.json(
-        { error: "только owner или manager управляет доступом" },
-        403,
-      );
-    }
     const [shop] = await db
       .select()
       .from(shops)
       .where(and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)));
     if (!shop) return c.json({ error: "not found" }, 404);
+    if (!(await canManageShop(db, user, id))) {
+      return c.json(
+        {
+          error:
+            "Доступом управляет создатель магазина или владелец команды",
+        },
+        403,
+      );
+    }
 
     const [mem] = await db
       .select({ role: workspaceMembers.role })
@@ -584,14 +605,95 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
     return c.body(null, 204);
   });
 
-  // Delete a shop — owner/manager only. Cascades to products, finance, imports
-  // via FK ON DELETE CASCADE.
+  // Transfer shop management to another member. Workspace owner only — even
+  // the current creator can't hand it off (prevents managers from "losing"
+  // their shop accidentally; only the team owner can reassign).
+  app.put("/:id/transfer", async (c) => {
+    const user = c.get("user");
+    const id = Number(c.req.param("id"));
+    if (!Number.isFinite(id)) return c.json({ error: "invalid id" }, 400);
+    if (user.workspaceRole !== "owner") {
+      return c.json(
+        { error: "Передать управление может только владелец команды" },
+        403,
+      );
+    }
+    const [shop] = await db
+      .select()
+      .from(shops)
+      .where(and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)));
+    if (!shop) return c.json({ error: "not found" }, 404);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid json" }, 400);
+    }
+    const targetId = Number((body as { userId?: unknown } | null)?.userId);
+    if (!Number.isFinite(targetId) || targetId <= 0)
+      return c.json({ error: "userId required" }, 400);
+
+    const [mem] = await db
+      .select({ role: workspaceMembers.role })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      );
+    if (!mem) return c.json({ error: "user not in workspace" }, 404);
+    if (mem.role === "member")
+      return c.json(
+        {
+          error:
+            "Управление магазином можно передать только владельцу или менеджеру команды",
+        },
+        400,
+      );
+
+    const now = new Date();
+    await db
+      .update(shops)
+      .set({ createdBy: targetId, updatedAt: now })
+      .where(eq(shops.id, id));
+
+    // Manager needs an explicit shop_member row to see the shop. Owner sees
+    // everything by default, so we skip the row in that case.
+    if (mem.role === "manager") {
+      const [existing] = await db
+        .select({ shopId: shopMember.shopId })
+        .from(shopMember)
+        .where(and(eq(shopMember.shopId, id), eq(shopMember.userId, targetId)));
+      if (!existing) {
+        await db.insert(shopMember).values({
+          shopId: id,
+          userId: targetId,
+          createdAt: now,
+          createdBy: user.id,
+        });
+      }
+    }
+
+    const [row] = await db.select().from(shops).where(eq(shops.id, id));
+    return c.json(await buildOut(db, row, user));
+  });
+
+  // Delete a shop — creator-of-shop or workspace owner only. Cascades to
+  // products, finance, imports via FK ON DELETE CASCADE.
   app.delete("/:id", async (c) => {
     const user = c.get("user");
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "invalid id" }, 400);
-    if (!canManageWorkspace(user.workspaceRole)) {
-      return c.json({ error: "Только owner или manager удаляет магазин" }, 403);
+    if (!(await canManageShop(db, user, id))) {
+      return c.json(
+        {
+          error:
+            "Удалить магазин может только его создатель или владелец команды",
+        },
+        403,
+      );
     }
 
     const [{ n: total }] = await db

@@ -21,8 +21,12 @@ export interface Shop {
   createdAt: number;
   updatedAt: number;
   /** True when the current user can edit shop metadata + assignment.
-   * Workspace owner/manager → true; member → false. */
+   * Workspace owner → true on every shop; manager → only on shops they
+   * created; member → false. */
   isOwner: boolean;
+  /** Creator of the shop (userId). NULL → orphaned (creator left/demoted);
+   * only workspace owner manages such shops. */
+  createdById: number | null;
   /** True when at least one field is overridden by current user (vs shop defaults). */
   hasOverrides: boolean;
 }
@@ -139,6 +143,15 @@ export interface RealizedMarginResponse {
 
 const BASE = "/api";
 
+export type AppScope = "workspace" | "sysadmin";
+/** Scope of the current SPA. Tells the backend which session cookie to use
+ * and which user-type is allowed. Sysadmin SPA bootstrap calls
+ * `configureApiScope('sysadmin')` before any fetch fires. */
+let appScope: AppScope = "workspace";
+export function configureApiScope(scope: AppScope): void {
+  appScope = scope;
+}
+
 export type AuthErrorListener = () => void;
 const authErrorListeners = new Set<AuthErrorListener>();
 export function onAuthError(listener: AuthErrorListener): () => void {
@@ -149,6 +162,7 @@ export function onAuthError(listener: AuthErrorListener): () => void {
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
+  headers.set("X-App-Scope", appScope);
 
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -179,6 +193,7 @@ async function apiUpload<T>(path: string, file: File): Promise<T> {
     method: "POST",
     body: fd,
     credentials: "include",
+    headers: { "X-App-Scope": appScope },
   });
   if (res.status === 401) for (const l of authErrorListeners) l();
   const text = await res.text();
@@ -205,8 +220,25 @@ export interface AuthUser {
 
 export interface AdminUser extends AuthUser {
   isBlocked: boolean;
+  /** Workspace this user belongs to. NULL for sysadmins (they live outside
+   * any team) and for users mid-registration who haven't yet been seeded. */
+  workspace: {
+    id: number;
+    name: string;
+    slug: string;
+    role: WorkspaceRole;
+  } | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AdminWorkspaceMember {
+  userId: number;
+  email: string;
+  role: WorkspaceRole;
+  isBlocked: boolean;
+  isVerified: boolean;
+  createdAt: number;
 }
 
 export type SmtpSecureMode = "auto" | "ssl" | "starttls" | "none";
@@ -230,6 +262,8 @@ export interface AdminWorkspace {
   shopCount: number;
   ownerEmail: string | null;
   createdAt: number;
+  /** When the workspace is paused by a sysadmin. NULL → active. */
+  suspendedAt: number | null;
 }
 
 export type WorkspaceRole = "owner" | "manager" | "member";
@@ -239,6 +273,8 @@ export interface WorkspaceMember {
   email: string;
   role: WorkspaceRole;
   status: "active" | "suspended";
+  /** Account-level block (users.is_blocked) — affects all logins everywhere. */
+  isBlocked: boolean;
   isYou: boolean;
   createdAt: number;
 }
@@ -247,6 +283,10 @@ export interface WorkspaceInfo {
   id: number;
   name: string;
   slug: string;
+  /** Header-badge accent color (HEX). NULL → use UI accent. */
+  color: string | null;
+  /** Header-badge logo data URL. NULL → use Users icon. */
+  logoDataUrl: string | null;
   createdAt: number;
   updatedAt: number;
   role: WorkspaceRole;
@@ -268,6 +308,17 @@ export interface PublicInviteInfo {
   role: WorkspaceRole;
   inviterEmail: string;
   expiresAt: number;
+}
+
+export interface ShopAccessMatrix {
+  members: Array<{ userId: number; email: string; role: WorkspaceRole }>;
+  shops: Array<{
+    id: number;
+    name: string;
+    shortName: string;
+    color: string | null;
+  }>;
+  assignments: Array<{ userId: number; shopId: number }>;
 }
 
 export const api = {
@@ -299,6 +350,20 @@ export const api = {
       }),
     logout: () =>
       apiFetch<{ message: string }>("/auth/logout", { method: "POST" }),
+    forgotPassword: (email: string) =>
+      apiFetch<{ message: string }>("/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      }),
+    checkResetToken: (token: string) =>
+      apiFetch<{ ok: true }>(
+        `/auth/reset-password/${encodeURIComponent(token)}`,
+      ),
+    resetPassword: (token: string, password: string) =>
+      apiFetch<{ message: string }>("/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ token, password }),
+      }),
   },
   admin: {
     listUsers: () => apiFetch<AdminUser[]>("/admin/users"),
@@ -345,6 +410,15 @@ export const api = {
         body: JSON.stringify({ to, subject }),
       }),
     listWorkspaces: () => apiFetch<AdminWorkspace[]>("/admin/workspaces"),
+    listWorkspaceMembers: (id: number) =>
+      apiFetch<AdminWorkspaceMember[]>(
+        `/admin/workspaces/${id}/members`,
+      ),
+    setWorkspaceSuspended: (id: number, suspended: boolean) =>
+      apiFetch<{ id: number; suspendedAt: number | null }>(
+        `/admin/workspaces/${id}/suspended`,
+        { method: "PUT", body: JSON.stringify({ suspended }) },
+      ),
     deleteWorkspace: (id: number) =>
       apiFetch<{ ok: true }>(`/admin/workspaces/${id}`, { method: "DELETE" }),
   },
@@ -388,6 +462,7 @@ export const api = {
           method: "POST",
           body: fd,
           credentials: "include",
+          headers: { "X-App-Scope": appScope },
         });
         if (res.status === 401) for (const l of authErrorListeners) l();
         const text = await res.text();
@@ -432,6 +507,13 @@ export const api = {
     /** Clear per-user overrides for this shop (revert to shop defaults). */
     resetOverrides: (id: number) =>
       apiFetch<Shop>(`/shops/${id}/reset-overrides`, { method: "POST" }),
+    /** Transfer shop management to another team member (owner-only). Target
+     * must be a workspace owner or manager (not a member). */
+    transfer: (id: number, userId: number) =>
+      apiFetch<Shop>(`/shops/${id}/transfer`, {
+        method: "PUT",
+        body: JSON.stringify({ userId }),
+      }),
     members: {
       list: (id: number) =>
         apiFetch<{
@@ -671,11 +753,24 @@ export const api = {
   },
   workspace: {
     me: () => apiFetch<WorkspaceInfo>("/workspace/me"),
-    update: (patch: { name?: string; slug?: string }) =>
-      apiFetch<{ id: number; name: string; slug: string }>("/workspace/me", {
+    update: (patch: {
+      name?: string;
+      slug?: string;
+      color?: string | null;
+      logoDataUrl?: string | null;
+    }) =>
+      apiFetch<{
+        id: number;
+        name: string;
+        slug: string;
+        color: string | null;
+        logoDataUrl: string | null;
+      }>("/workspace/me", {
         method: "PATCH",
         body: JSON.stringify(patch),
       }),
+    shopAccess: () =>
+      apiFetch<ShopAccessMatrix>("/workspace/me/shop-access"),
     listInvites: () =>
       apiFetch<WorkspaceInviteRow[]>("/workspace/me/invites"),
     createInvite: (email: string, role: WorkspaceRole) =>
@@ -695,6 +790,15 @@ export const api = {
       ),
     removeMember: (userId: number) =>
       apiFetch<{ ok: true }>(`/workspace/me/members/${userId}`, {
+        method: "DELETE",
+      }),
+    setMemberBlocked: (userId: number, blocked: boolean) =>
+      apiFetch<{ ok: true; userId: number; blocked: boolean }>(
+        `/workspace/me/members/${userId}/blocked`,
+        { method: "PUT", body: JSON.stringify({ blocked }) },
+      ),
+    deleteMemberAccount: (userId: number) =>
+      apiFetch<{ ok: true }>(`/workspace/me/members/${userId}/account`, {
         method: "DELETE",
       }),
   },

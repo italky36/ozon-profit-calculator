@@ -135,7 +135,15 @@ export function workspaceIdOf(db: DB, userId: number): number {
 export function createShopFor(
   db: DB,
   userId: number,
-  opts: { name?: string; shortName?: string; color?: string | null } = {},
+  opts: {
+    name?: string;
+    shortName?: string;
+    color?: string | null;
+    /** Who creates the shop (sets `shops.created_by`). Defaults to `userId`
+     * — meaning «this is `userId`'s own shop». Pass a different id to model
+     * a shop created by another team member. */
+    createdBy?: number;
+  } = {},
 ): number {
   const now = new Date();
   const workspaceId = workspaceIdOf(db, userId);
@@ -149,6 +157,7 @@ export function createShopFor(
       taxSettings: SAMPLE_TAX,
       autoRefreshEnabled: false,
       autoRefreshIntervalMin: 30,
+      createdBy: opts.createdBy ?? userId,
       createdAt: now,
       updatedAt: now,
     })
@@ -172,15 +181,21 @@ export function createShopFor(
   return inserted.id;
 }
 
-/** Issue POST /api/auth/login and return Set-Cookie session token. */
+/** Issue POST /api/auth/login and return Set-Cookie session token.
+ * `scope` chooses which cookie/auth-scope the server returns; "sysadmin" sets
+ * the sysadmin cookie and is required when `email` is a sysadmin account. */
 export async function loginAndGetCookie(
   app: TestEnv["app"],
   email: string,
   password: string,
+  scope: "workspace" | "sysadmin" = "workspace",
 ): Promise<string> {
   const res = await app.request("/api/auth/login", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-App-Scope": scope,
+    },
     body: JSON.stringify({ email, password }),
   });
   if (res.status !== 200)
@@ -225,7 +240,14 @@ export async function loginAs(
     userId = createUserDirect(env.db, email, password, role);
     shopId = createShopFor(env.db, userId);
   }
-  const cookie = await loginAndGetCookie(env.app, email, password);
+  // Admins log in via the sysadmin scope (sets the sysadmin cookie); regular
+  // users via the workspace scope.
+  const cookie = await loginAndGetCookie(
+    env.app,
+    email,
+    password,
+    role === "admin" ? "sysadmin" : "workspace",
+  );
   return {
     cookie,
     userId,
@@ -234,7 +256,8 @@ export async function loginAs(
   };
 }
 
-/** Sync admin-cookie path for legacy tests. */
+/** Sync admin-cookie path for legacy tests. Returns the sysadmin cookie since
+ * the workspace cookie now refuses to resolve a sysadmin user. */
 export function adminSessionCookie(env: TestEnv): string {
   const userId = createUserDirect(
     env.db,
@@ -253,5 +276,5 @@ export function adminSessionCookie(env: TestEnv): string {
       createdAt: new Date(),
     })
     .run();
-  return `ozon_calc_session=${sessionId}`;
+  return `ozon_calc_sysadmin_session=${sessionId}`;
 }

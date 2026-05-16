@@ -12,20 +12,66 @@ import { validateSession, type SessionUser } from "../auth/utils";
 
 export const SESSION_COOKIE_NAME =
   process.env.SESSION_COOKIE_NAME ?? "ozon_calc_session";
+/** Sysadmin sessions live under a different cookie name so the workspace SPA
+ * and sysadmin SPA can coexist on the same browser without leaking auth across
+ * ports/origins. In prod the SPAs sit on different subdomains and cookies are
+ * already separated by host — this cookie name doubles the isolation. */
+export const SYSADMIN_COOKIE_NAME =
+  process.env.SYSADMIN_COOKIE_NAME ?? "ozon_calc_sysadmin_session";
+
+export type AppScope = "workspace" | "sysadmin";
 
 export interface SessionVars {
   user: SessionUser;
 }
 
-/** Reads session cookie, validates it, attaches `user` to context. Does not
- * itself reject — pair with `requireAuth` for protected routes. */
+/** Read the X-App-Scope hint sent by the SPA. Workspace SPA omits or sends
+ * `workspace`; sysadmin SPA sends `sysadmin`. Anything else is treated as
+ * absent (server falls back to inferring from which cookie is present). */
+export function readAppScope(c: { req: { header(name: string): string | undefined } }):
+  | AppScope
+  | undefined {
+  const raw = c.req.header("x-app-scope");
+  if (raw === "sysadmin" || raw === "workspace") return raw;
+  return undefined;
+}
+
+/** Reads session cookie matching the request's scope, validates it, attaches
+ * `user` to context. Does not itself reject — pair with `requireAuth` for
+ * protected routes.
+ *
+ * Scope rules:
+ *   - explicit `X-App-Scope: sysadmin` → read sysadmin cookie only; user must
+ *     have `isSysadmin=true` or treat as anon.
+ *   - explicit `X-App-Scope: workspace` → read workspace cookie only; user
+ *     must NOT be a sysadmin or treat as anon.
+ *   - no header (tests, curl) → try both cookies; pick whichever resolves to a
+ *     user matching its expected type. */
 export function sessionMiddleware(db: DB): MiddlewareHandler {
   return async (c, next) => {
-    const sid = getCookie(c, SESSION_COOKIE_NAME);
-    if (sid) {
-      const user = validateSession(db, sid);
-      if (user) c.set("user", user);
-    }
+    const scope = readAppScope(c);
+    const workspaceSid = getCookie(c, SESSION_COOKIE_NAME);
+    const sysadminSid = getCookie(c, SYSADMIN_COOKIE_NAME);
+
+    const tryWorkspace = (): SessionUser | null => {
+      if (!workspaceSid) return null;
+      const u = validateSession(db, workspaceSid);
+      return u && !u.isSysadmin ? u : null;
+    };
+    const trySysadmin = (): SessionUser | null => {
+      if (!sysadminSid) return null;
+      const u = validateSession(db, sysadminSid);
+      return u && u.isSysadmin ? u : null;
+    };
+
+    const user: SessionUser | null =
+      scope === "sysadmin"
+        ? trySysadmin()
+        : scope === "workspace"
+          ? tryWorkspace()
+          : (trySysadmin() ?? tryWorkspace());
+
+    if (user) c.set("user", user);
     await next();
   };
 }
@@ -64,10 +110,39 @@ export async function shopBelongsToWorkspace(
   return Boolean(row);
 }
 
-/** Workspace-level role gate. owner/manager can mutate shop admin-fields and
- * credentials; member can read+edit data but not change shop metadata. */
+/** Workspace-level role gate. Used only for workspace-wide operations:
+ * inviting members, creating shops (anyone with this becomes a shop creator),
+ * renaming the workspace, etc. **Per-shop** management is gated by
+ * `canManageShop` — see that helper. */
 export function canManageWorkspace(role: SessionUser["workspaceRole"]): boolean {
   return role === "owner" || role === "manager";
+}
+
+/** Per-shop admin gate. Workspace owner can manage any shop in their
+ * workspace; a manager can manage only shops where they are the `created_by`.
+ * A creator who has since been demoted to `member` loses management — the gate
+ * checks the user's CURRENT workspace role on every call. Owner of the
+ * workspace is the safety net for orphaned shops. */
+export async function canManageShop(
+  db: DB,
+  user: SessionUser,
+  shopId: number,
+): Promise<boolean> {
+  if (user.workspaceRole === "owner") {
+    return shopBelongsToWorkspace(db, user.workspaceId, shopId);
+  }
+  if (user.workspaceRole !== "manager") return false;
+  const row = await db
+    .select({
+      workspaceId: shops.workspaceId,
+      createdBy: shops.createdBy,
+    })
+    .from(shops)
+    .where(eq(shops.id, shopId))
+    .get();
+  if (!row) return false;
+  if (row.workspaceId !== user.workspaceId) return false;
+  return row.createdBy === user.id;
 }
 
 /** Visibility check: can `user` see/work with `shopId`?

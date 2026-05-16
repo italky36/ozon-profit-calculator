@@ -10,7 +10,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 5173). Prod: `dist/sysadmin/` — deploy to admin.<domain> in production.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = env.SERVER_URL ?? "http://localhost:3001";
+  // 127.0.0.1 (not "localhost") skips Node's IPv4/IPv6 happy-eyeballs probe
+  // that on Windows can surface as EACCES if the API isn't listening on ::1.
+  const target = env.SERVER_URL ?? "http://127.0.0.1:3001";
   return {
     root: path.resolve(__dirname, "sysadmin"),
     publicDir: path.resolve(__dirname, "public"),

@@ -66,14 +66,14 @@ const setup = (): TestEnv => {
 
   const db = drizzle(sqlite, { schema });
 
-  const adminId = createUserDirect(db, "admin@test.local", "password", "admin");
+  const userId = createUserDirect(db, "owner@test.local", "password", "user");
   // Multi-shop model: ensure user has at least one shop.
-  createShopFor(db, adminId);
+  createShopFor(db, userId);
   const sessionId = "test-products-session";
   db.insert(sessions)
     .values({
       id: sessionId,
-      userId: adminId,
+      userId,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       createdAt: new Date(),
     })

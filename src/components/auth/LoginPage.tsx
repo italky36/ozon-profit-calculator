@@ -61,6 +61,18 @@ export default function LoginPage() {
           autoComplete="current-password"
           required
         />
+        <div style={{ marginTop: -4, marginBottom: 12, textAlign: "right" }}>
+          <a
+            href="/forgot-password"
+            onClick={(e) => {
+              e.preventDefault();
+              navigate("/forgot-password");
+            }}
+            style={{ color: "var(--accent)", fontSize: 12, fontWeight: 500 }}
+          >
+            Забыли пароль?
+          </a>
+        </div>
         <button
           type="submit"
           className="btn-primary"

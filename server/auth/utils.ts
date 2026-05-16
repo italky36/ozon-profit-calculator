@@ -1,17 +1,20 @@
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
   emailVerificationTokens,
+  passwordResetTokens,
   sessions,
   users,
   workspaceMembers,
+  workspaces,
 } from "../db/schema";
 
 const BCRYPT_ROUNDS = 10;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -101,6 +104,18 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
     .where(eq(workspaceMembers.userId, row.userId))
     .get();
 
+  // Suspended workspace: lock out everyone except sysadmins (who don't belong
+  // to a workspace anyway). Mirrors the isBlocked branch above — same intent,
+  // different scope.
+  if (!row.isSysadmin && member) {
+    const ws = db
+      .select({ suspendedAt: workspaces.suspendedAt })
+      .from(workspaces)
+      .where(eq(workspaces.id, member.workspaceId))
+      .get();
+    if (ws?.suspendedAt) return null;
+  }
+
   return {
     id: row.userId,
     email: row.email,
@@ -149,4 +164,64 @@ export function consumeVerificationToken(
     .run();
   if (row.expiresAt.getTime() < Date.now()) return null;
   return { userId: row.userId };
+}
+
+export interface PasswordResetTokenInfo {
+  token: string;
+  expiresAt: Date;
+}
+
+/** Issues a single-use password-reset token. Any previous unused tokens for
+ * the same user are invalidated (marked used) so the latest «forgot password»
+ * always supersedes earlier attempts. */
+export function createPasswordResetToken(
+  db: DB,
+  userId: number,
+): PasswordResetTokenInfo {
+  const token = generateToken();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + PASSWORD_RESET_TTL_MS);
+  db.update(passwordResetTokens)
+    .set({ usedAt: now })
+    .where(
+      and(
+        eq(passwordResetTokens.userId, userId),
+        isNull(passwordResetTokens.usedAt),
+      ),
+    )
+    .run();
+  db.insert(passwordResetTokens)
+    .values({ token, userId, expiresAt, createdAt: now })
+    .run();
+  return { token, expiresAt };
+}
+
+export type PasswordResetTokenStatus =
+  | { ok: true; userId: number }
+  | { ok: false; reason: "not_found" | "expired" | "used" };
+
+/** Validates a reset token without consuming it. Use for the GET probe before
+ * showing the «new password» form. */
+export function checkPasswordResetToken(
+  db: DB,
+  token: string,
+): PasswordResetTokenStatus {
+  const row = db
+    .select()
+    .from(passwordResetTokens)
+    .where(eq(passwordResetTokens.token, token))
+    .get();
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.usedAt) return { ok: false, reason: "used" };
+  if (row.expiresAt.getTime() < Date.now())
+    return { ok: false, reason: "expired" };
+  return { ok: true, userId: row.userId };
+}
+
+/** Marks a reset token as used. Idempotent: re-marking a used token is a no-op. */
+export function consumePasswordResetToken(db: DB, token: string): void {
+  db.update(passwordResetTokens)
+    .set({ usedAt: new Date() })
+    .where(eq(passwordResetTokens.token, token))
+    .run();
 }

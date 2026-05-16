@@ -39,6 +39,32 @@ export function generateVerificationEmail(
   };
 }
 
+export function generatePasswordResetEmail(
+  email: string,
+  token: string,
+): EmailMessage {
+  const link = `${appUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+  const safeLink = escapeHtml(link);
+  return {
+    to: email,
+    subject: "Восстановление пароля — Ozon Profit Calculator",
+    text: `Здравствуйте!\n\nВы запросили восстановление пароля в Ozon Profit Calculator. Чтобы задать новый пароль, перейдите по ссылке:\n${link}\n\nСсылка действительна 1 час и может быть использована один раз.\n\nЕсли вы не запрашивали восстановление, проигнорируйте это письмо — текущий пароль останется без изменений.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
+        <h2 style="margin: 0 0 16px;">Восстановление пароля</h2>
+        <p>Вы запросили восстановление пароля в Ozon Profit Calculator. Чтобы задать новый пароль, нажмите на кнопку ниже.</p>
+        <p style="margin: 24px 0;">
+          <a href="${safeLink}" style="display: inline-block; background: #005bff; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500;">
+            Задать новый пароль
+          </a>
+        </p>
+        <p style="color: #666; font-size: 14px;">Или скопируйте ссылку:<br><a href="${safeLink}">${safeLink}</a></p>
+        <p style="color: #666; font-size: 14px;">Ссылка действительна 1 час и может быть использована один раз. Если вы не запрашивали восстановление, проигнорируйте это письмо — текущий пароль останется без изменений.</p>
+      </div>
+    `.trim(),
+  };
+}
+
 const ROLE_LABEL: Record<string, string> = {
   owner: "владелец",
   manager: "менеджер",

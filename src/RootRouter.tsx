@@ -1,13 +1,21 @@
 import { useEffect } from "react";
 import App from "./App";
+import ForgotPasswordPage from "./components/auth/ForgotPasswordPage";
 import InvitePage from "./components/auth/InvitePage";
 import LoginPage from "./components/auth/LoginPage";
 import RegisterPage from "./components/auth/RegisterPage";
+import ResetPasswordPage from "./components/auth/ResetPasswordPage";
 import VerifyEmailPage from "./components/auth/VerifyEmailPage";
 import { useAuth } from "./contexts/useAuth";
 import { navigate, usePathname } from "./lib/router";
 
-const PUBLIC_PATHS = new Set(["/login", "/register", "/verify-email"]);
+const PUBLIC_PATHS = new Set([
+  "/login",
+  "/register",
+  "/verify-email",
+  "/forgot-password",
+  "/reset-password",
+]);
 const INVITE_PREFIX = "/invite/";
 
 export default function RootRouter() {
@@ -46,6 +54,8 @@ export default function RootRouter() {
 
   if (inviteToken) return <InvitePage token={inviteToken} />;
   if (path === "/verify-email") return <VerifyEmailPage />;
+  if (path === "/forgot-password") return <ForgotPasswordPage />;
+  if (path === "/reset-password") return <ResetPasswordPage />;
   if (path === "/login") return <LoginPage />;
   if (path === "/register") return <RegisterPage />;
 

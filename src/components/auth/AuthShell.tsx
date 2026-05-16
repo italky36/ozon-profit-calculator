@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { Eye, EyeOff } from "lucide-react";
 
 interface Props {
@@ -6,9 +6,31 @@ interface Props {
   subtitle?: string;
   children: ReactNode;
   footer?: ReactNode;
+  /** Optional accent override applied as a local CSS variable. Lets a variant
+   * (e.g. sysadmin) re-color the logo/button without touching global theme. */
+  accentColor?: string;
+  /** Optional replacement for the default «Oz» square logo. */
+  headerIcon?: ReactNode;
+  /** Optional banner above the form (e.g. «административная консоль»). */
+  banner?: ReactNode;
+  /** Optional background override for the page (full-bleed). */
+  background?: string;
 }
 
-export default function AuthShell({ title, subtitle, children, footer }: Props) {
+export default function AuthShell({
+  title,
+  subtitle,
+  children,
+  footer,
+  accentColor,
+  headerIcon,
+  banner,
+  background,
+}: Props) {
+  const cardStyle: CSSProperties = { width: "100%", maxWidth: 420 };
+  if (accentColor) {
+    (cardStyle as Record<string, string>)["--accent"] = accentColor;
+  }
   return (
     <div
       style={{
@@ -17,30 +39,33 @@ export default function AuthShell({ title, subtitle, children, footer }: Props) 
         alignItems: "center",
         justifyContent: "center",
         padding: 24,
-        background: "var(--bg, #f7f8fa)",
+        background: background ?? "var(--bg, #f7f8fa)",
       }}
     >
-      <div className="card" style={{ width: "100%", maxWidth: 420 }}>
+      <div className="card" style={cardStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <svg width="36" height="36" viewBox="0 0 32 32" aria-hidden>
-            <rect width="32" height="32" rx="8" fill="var(--accent)" />
-            <text
-              x="16"
-              y="22"
-              textAnchor="middle"
-              fill="white"
-              fontFamily="Inter, sans-serif"
-              fontWeight="800"
-              fontSize="14"
-            >
-              Oz
-            </text>
-          </svg>
+          {headerIcon ?? (
+            <svg width="36" height="36" viewBox="0 0 32 32" aria-hidden>
+              <rect width="32" height="32" rx="8" fill="var(--accent)" />
+              <text
+                x="16"
+                y="22"
+                textAnchor="middle"
+                fill="white"
+                fontFamily="Inter, sans-serif"
+                fontWeight="800"
+                fontSize="14"
+              >
+                Oz
+              </text>
+            </svg>
+          )}
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{title}</div>
             {subtitle && <div className="muted" style={{ fontSize: 12 }}>{subtitle}</div>}
           </div>
         </div>
+        {banner}
         {children}
         {footer && (
           <div style={{ marginTop: 16, fontSize: 13, textAlign: "center" }}>{footer}</div>

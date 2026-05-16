@@ -311,7 +311,12 @@ describe("auth routes", () => {
   describe("GET /api/auth/me", () => {
     it("returns current user when cookie is valid", async () => {
       createUserDirect(env.db, "u@x.com", "password123", "admin");
-      const cookie = await loginAndGetCookie(env.app, "u@x.com", "password123");
+      const cookie = await loginAndGetCookie(
+        env.app,
+        "u@x.com",
+        "password123",
+        "sysadmin",
+      );
       const res = await env.app.request("/api/auth/me", {
         headers: { Cookie: cookie },
       });

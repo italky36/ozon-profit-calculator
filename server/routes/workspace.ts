@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
+  sessions,
+  shopMember,
   shops,
   userSettings,
   users,
@@ -21,6 +23,11 @@ const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALLOWED_ROLES: readonly WorkspaceRole[] = ["owner", "manager", "member"];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const LOGO_DATA_URL_RE = /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/;
+/** ~200 KB cap on the data URL string (incl. prefix). Bigger logos should be
+ * resized client-side; the storage is meant for icons, not photos. */
+const LOGO_MAX_LEN = 200_000;
 
 const newToken = () => randomBytes(32).toString("hex");
 
@@ -34,6 +41,7 @@ interface MemberOut {
   email: string;
   role: WorkspaceRole;
   status: "active" | "suspended";
+  isBlocked: boolean;
   isYou: boolean;
   createdAt: number;
 }
@@ -54,6 +62,7 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
       email: users.email,
       role: workspaceMembers.role,
       status: workspaceMembers.status,
+      isBlocked: users.isBlocked,
       createdAt: workspaceMembers.createdAt,
     })
     .from(workspaceMembers)
@@ -66,6 +75,7 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
       email: r.email,
       role: r.role,
       status: r.status,
+      isBlocked: r.isBlocked,
       isYou: r.userId === currentUserId,
       createdAt: r.createdAt.getTime(),
     }))
@@ -138,6 +148,8 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       id: ws.id,
       name: ws.name,
       slug: ws.slug,
+      color: ws.color,
+      logoDataUrl: ws.logoDataUrl,
       createdAt: ws.createdAt.getTime(),
       updatedAt: ws.updatedAt.getTime(),
       role: user.workspaceRole,
@@ -157,7 +169,12 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     } catch {
       return c.json({ error: "Некорректный JSON" }, 400);
     }
-    const r = (body ?? {}) as { name?: unknown; slug?: unknown };
+    const r = (body ?? {}) as {
+      name?: unknown;
+      slug?: unknown;
+      color?: unknown;
+      logoDataUrl?: unknown;
+    };
 
     const patch: Partial<typeof workspaces.$inferInsert> = {};
     if (r.name !== undefined) {
@@ -187,6 +204,39 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       if (clash) return c.json({ error: "Такой slug уже занят" }, 409);
       patch.slug = slug;
     }
+    if (r.color !== undefined) {
+      if (r.color === null) {
+        patch.color = null;
+      } else if (typeof r.color === "string" && HEX_COLOR_RE.test(r.color)) {
+        patch.color = r.color.toLowerCase();
+      } else {
+        return c.json(
+          { error: "Цвет должен быть HEX-кодом (#RGB или #RRGGBB) или null" },
+          400,
+        );
+      }
+    }
+    if (r.logoDataUrl !== undefined) {
+      if (r.logoDataUrl === null) {
+        patch.logoDataUrl = null;
+      } else if (typeof r.logoDataUrl !== "string") {
+        return c.json({ error: "logoDataUrl должен быть строкой или null" }, 400);
+      } else if (!LOGO_DATA_URL_RE.test(r.logoDataUrl)) {
+        return c.json(
+          { error: "Логотип должен быть data URL формата PNG/JPEG/GIF/WebP/SVG" },
+          400,
+        );
+      } else if (r.logoDataUrl.length > LOGO_MAX_LEN) {
+        return c.json(
+          {
+            error: `Логотип слишком большой (макс. ${Math.floor(LOGO_MAX_LEN / 1024)} КБ закодированного размера)`,
+          },
+          400,
+        );
+      } else {
+        patch.logoDataUrl = r.logoDataUrl;
+      }
+    }
 
     if (Object.keys(patch).length === 0)
       return c.json({ error: "Нечего обновлять" }, 400);
@@ -202,8 +252,82 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       id: ws.id,
       name: ws.name,
       slug: ws.slug,
+      color: ws.color,
+      logoDataUrl: ws.logoDataUrl,
       createdAt: ws.createdAt.getTime(),
       updatedAt: ws.updatedAt.getTime(),
+    });
+  });
+
+  // Matrix view of «who has access to which shop» — single round-trip for the
+  // TeamPage UI. Owner sees + can edit everyone; manager can also edit but
+  // member is rejected (would let them see who else exists in the team).
+  app.get("/me/shop-access", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (!canManageWorkspace(user.workspaceRole))
+      return c.json(
+        { error: "Только владелец или менеджер видит матрицу доступа" },
+        403,
+      );
+
+    const members = db
+      .select({
+        userId: workspaceMembers.userId,
+        email: users.email,
+        role: workspaceMembers.role,
+      })
+      .from(workspaceMembers)
+      .innerJoin(users, eq(users.id, workspaceMembers.userId))
+      .where(eq(workspaceMembers.workspaceId, user.workspaceId))
+      .all();
+
+    // Owner sees every shop; manager only the shops THEY created — they have
+    // no business assigning others to a shop they don't manage.
+    const wsShops =
+      user.workspaceRole === "owner"
+        ? db
+            .select({
+              id: shops.id,
+              name: shops.name,
+              shortName: shops.shortName,
+              color: shops.color,
+            })
+            .from(shops)
+            .where(eq(shops.workspaceId, user.workspaceId))
+            .all()
+        : db
+            .select({
+              id: shops.id,
+              name: shops.name,
+              shortName: shops.shortName,
+              color: shops.color,
+            })
+            .from(shops)
+            .where(
+              and(
+                eq(shops.workspaceId, user.workspaceId),
+                eq(shops.createdBy, user.id),
+              ),
+            )
+            .all();
+
+    const visibleShopIds = new Set(wsShops.map((s) => s.id));
+    const assignments = db
+      .select({
+        userId: shopMember.userId,
+        shopId: shopMember.shopId,
+      })
+      .from(shopMember)
+      .innerJoin(shops, eq(shops.id, shopMember.shopId))
+      .where(eq(shops.workspaceId, user.workspaceId))
+      .all()
+      .filter((a) => visibleShopIds.has(a.shopId));
+
+    return c.json({
+      members,
+      shops: wsShops,
+      assignments,
     });
   });
 
@@ -456,6 +580,142 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       .where(eq(userSettings.userId, targetId))
       .run();
 
+    return c.json({ ok: true });
+  });
+
+  // Block / unblock a workspace member's account (owner only). Blocking
+  // toggles `users.is_blocked` and kills every session of the target so they
+  // can't reach any SPA. Reversible — unblock just clears the flag.
+  app.put("/me/members/:userId/blocked", async (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (user.workspaceRole !== "owner")
+      return c.json(
+        { error: "Только владелец команды может блокировать аккаунты" },
+        403,
+      );
+
+    const targetId = Number(c.req.param("userId"));
+    if (!Number.isInteger(targetId) || targetId <= 0)
+      return c.json({ error: "invalid id" }, 400);
+    if (targetId === user.id)
+      return c.json({ error: "Нельзя заблокировать самого себя" }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { blocked?: unknown };
+    if (typeof r.blocked !== "boolean")
+      return c.json({ error: "blocked должен быть boolean" }, 400);
+
+    // Target must be a member of the same workspace.
+    const member = db
+      .select()
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .get();
+    if (!member) return c.json({ error: "Участник не найден" }, 404);
+
+    // Don't lock out the last remaining owner — workspace would become
+    // unmanageable until a sysadmin intervenes.
+    if (
+      r.blocked &&
+      member.role === "owner" &&
+      ownerCount(db, user.workspaceId) <= 1
+    )
+      return c.json(
+        { error: "Нельзя заблокировать последнего владельца команды" },
+        400,
+      );
+
+    const target = db.select().from(users).where(eq(users.id, targetId)).get();
+    if (!target) return c.json({ error: "Пользователь не найден" }, 404);
+    // Sysadmin accounts shouldn't be in workspace_members in the first place
+    // but stay defensive: don't let a workspace owner lock out a sysadmin.
+    if (target.isSysadmin)
+      return c.json(
+        { error: "Sysadmin-аккаунт не блокируется из рабочей команды" },
+        403,
+      );
+
+    db.update(users)
+      .set({ isBlocked: r.blocked, updatedAt: new Date() })
+      .where(eq(users.id, targetId))
+      .run();
+    if (r.blocked) {
+      db.delete(sessions).where(eq(sessions.userId, targetId)).run();
+    }
+    return c.json({ ok: true, userId: targetId, blocked: r.blocked });
+  });
+
+  // Permanently delete the user account (owner only). Cascades remove their
+  // workspace_members row, sessions, products, finance, imports — everything.
+  // Reserve for actual departures; for temporary lock-out use `/blocked`.
+  app.delete("/me/members/:userId/account", (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (user.workspaceRole !== "owner")
+      return c.json(
+        { error: "Только владелец команды может удалять аккаунты" },
+        403,
+      );
+
+    const targetId = Number(c.req.param("userId"));
+    if (!Number.isInteger(targetId) || targetId <= 0)
+      return c.json({ error: "invalid id" }, 400);
+    if (targetId === user.id)
+      return c.json({ error: "Нельзя удалить самого себя" }, 400);
+
+    const member = db
+      .select()
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .get();
+    if (!member) return c.json({ error: "Участник не найден" }, 404);
+
+    if (member.role === "owner" && ownerCount(db, user.workspaceId) <= 1)
+      return c.json(
+        { error: "Нельзя удалить последнего владельца команды" },
+        400,
+      );
+
+    const target = db.select().from(users).where(eq(users.id, targetId)).get();
+    if (!target) return c.json({ error: "Пользователь не найден" }, 404);
+    if (target.isSysadmin)
+      return c.json(
+        { error: "Sysadmin-аккаунт не удаляется из рабочей команды" },
+        403,
+      );
+
+    // Transfer ownership of shops the target created → current owner.
+    // Without this, FK ON DELETE SET NULL would leave shops orphaned (only
+    // manageable by workspace owner via the canManageShop fallback). Explicit
+    // re-assignment is cleaner: the owner sees them as "Создан вами" instead
+    // of "Создатель удалён".
+    db.update(shops)
+      .set({ createdBy: user.id, updatedAt: new Date() })
+      .where(
+        and(
+          eq(shops.workspaceId, user.workspaceId),
+          eq(shops.createdBy, targetId),
+        ),
+      )
+      .run();
+
+    db.delete(users).where(eq(users.id, targetId)).run();
     return c.json({ ok: true });
   });
 

@@ -4,6 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { eq } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
+  sessions,
   shops,
   userSettings,
   users,
@@ -13,7 +14,10 @@ import {
 } from "../db/schema";
 import { readDefaultTaxSettings } from "../settings/defaults";
 import {
+  checkPasswordResetToken,
+  consumePasswordResetToken,
   consumeVerificationToken,
+  createPasswordResetToken,
   createSession,
   createVerificationToken,
   deleteSession,
@@ -22,8 +26,16 @@ import {
   type SessionUser,
 } from "../auth/utils";
 import { getEmailClient } from "../email/client";
-import { generateVerificationEmail } from "../email/templates";
-import { SESSION_COOKIE_NAME } from "../middleware/session";
+import {
+  generatePasswordResetEmail,
+  generateVerificationEmail,
+} from "../email/templates";
+import {
+  readAppScope,
+  SESSION_COOKIE_NAME,
+  SYSADMIN_COOKIE_NAME,
+  type AppScope,
+} from "../middleware/session";
 
 type AuthEnv = { Variables: { user?: SessionUser } };
 
@@ -59,12 +71,17 @@ function publicUser(u: SessionUser) {
   };
 }
 
+function cookieNameForScope(scope: AppScope): string {
+  return scope === "sysadmin" ? SYSADMIN_COOKIE_NAME : SESSION_COOKIE_NAME;
+}
+
 function setSessionCookie(
   c: Context,
   sessionId: string,
   expiresAt: Date,
+  scope: AppScope = "workspace",
 ): void {
-  setCookie(c, SESSION_COOKIE_NAME, sessionId, {
+  setCookie(c, cookieNameForScope(scope), sessionId, {
     httpOnly: true,
     sameSite: "Lax",
     path: "/",
@@ -403,6 +420,10 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     if (typeof parsed === "string")
       return c.json({ error: "Неверный email или пароль" }, 401);
 
+    // Scope drives both the cookie that gets set and the user-type that's
+    // allowed. Default is the workspace SPA scope.
+    const scope: AppScope = readAppScope(c) ?? "workspace";
+
     const row = db
       .select()
       .from(users)
@@ -422,8 +443,24 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     if (!row.isVerified)
       return c.json({ error: "Email не подтверждён. Проверьте почту." }, 403);
 
-    const { sessionId, expiresAt } = createSession(db, row.id);
-    setSessionCookie(c, sessionId, expiresAt);
+    // Scope/type gate: sysadmin can only log in via sysadmin SPA, workspace
+    // user only via workspace SPA. Localized hint tells them where to go.
+    if (scope === "sysadmin" && !row.isSysadmin)
+      return c.json(
+        {
+          error:
+            "Это форма входа в консоль администратора. Используйте основное приложение калькулятора.",
+        },
+        403,
+      );
+    if (scope === "workspace" && row.isSysadmin)
+      return c.json(
+        {
+          error:
+            "Sysadmin-аккаунты входят через консоль администратора, а не через основное приложение.",
+        },
+        403,
+      );
 
     const member = db
       .select({
@@ -433,6 +470,27 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       .from(workspaceMembers)
       .where(eq(workspaceMembers.userId, row.id))
       .get();
+
+    // Block non-sysadmin members of a suspended workspace at the door.
+    // Sysadmins aren't in workspaces and stay reachable for re-enabling.
+    if (!row.isSysadmin && member) {
+      const ws = db
+        .select({ suspendedAt: workspaces.suspendedAt })
+        .from(workspaces)
+        .where(eq(workspaces.id, member.workspaceId))
+        .get();
+      if (ws?.suspendedAt)
+        return c.json(
+          {
+            error:
+              "Доступ команды приостановлен администратором сервиса. Обратитесь к нему для возобновления.",
+          },
+          403,
+        );
+    }
+
+    const { sessionId, expiresAt } = createSession(db, row.id);
+    setSessionCookie(c, sessionId, expiresAt, scope);
     return c.json({
       user: publicUser({
         id: row.id,
@@ -446,9 +504,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
   });
 
   app.post("/logout", async (c) => {
-    const sid = getCookie(c, SESSION_COOKIE_NAME);
+    const scope: AppScope = readAppScope(c) ?? "workspace";
+    const cookieName = cookieNameForScope(scope);
+    const sid = getCookie(c, cookieName);
     if (sid) deleteSession(db, sid);
-    deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
+    deleteCookie(c, cookieName, { path: "/" });
     return c.json({ message: "logged out" });
   });
 
@@ -456,6 +516,113 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const user = c.get("user");
     if (!user) return c.json({ error: "unauthorized" }, 401);
     return c.json({ user: publicUser(user) });
+  });
+
+  // Generic OK message — kept identical for found / not-found / blocked /
+  // unverified to avoid leaking which addresses are registered. The reset
+  // link is only sent for an active, verified, non-blocked account.
+  const FORGOT_OK = {
+    message:
+      "Если такой email зарегистрирован, мы отправили на него ссылку для восстановления пароля.",
+  };
+
+  app.post("/forgot-password", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { email?: unknown };
+    if (typeof r.email !== "string" || !EMAIL_RE.test(r.email))
+      return c.json({ error: "Некорректный email" }, 400);
+    const email = r.email.trim().toLowerCase();
+
+    const row = db.select().from(users).where(eq(users.email, email)).get();
+    // No row, blocked, or unverified → return generic OK without sending.
+    // Unverified accounts must finish the verification flow first; sending a
+    // reset link would let an attacker bypass verification entirely.
+    if (!row || row.isBlocked || !row.isVerified) return c.json(FORGOT_OK);
+
+    const { token } = createPasswordResetToken(db, row.id);
+    try {
+      await getEmailClient().send(generatePasswordResetEmail(row.email, token));
+    } catch (e) {
+      console.error("[auth] failed to send password reset email:", e);
+    }
+    return c.json(FORGOT_OK);
+  });
+
+  app.get("/reset-password/:token", async (c) => {
+    const token = c.req.param("token");
+    if (!token) return c.json({ error: "Не указан токен" }, 400);
+    const status = checkPasswordResetToken(db, token);
+    if (!status.ok) {
+      const msg =
+        status.reason === "expired"
+          ? "Срок действия ссылки истёк. Запросите восстановление пароля заново."
+          : status.reason === "used"
+            ? "Эта ссылка уже была использована. Запросите восстановление пароля заново."
+            : "Ссылка недействительна. Запросите восстановление пароля заново.";
+      return c.json({ error: msg }, 400);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.post("/reset-password", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const r = (body ?? {}) as { token?: unknown; password?: unknown };
+    if (typeof r.token !== "string" || !r.token)
+      return c.json({ error: "Не указан токен" }, 400);
+    if (typeof r.password !== "string" || r.password.length < PASSWORD_MIN)
+      return c.json(
+        { error: `Пароль должен быть не короче ${PASSWORD_MIN} символов` },
+        400,
+      );
+
+    const status = checkPasswordResetToken(db, r.token);
+    if (!status.ok) {
+      const msg =
+        status.reason === "expired"
+          ? "Срок действия ссылки истёк. Запросите восстановление пароля заново."
+          : status.reason === "used"
+            ? "Эта ссылка уже была использована. Запросите восстановление пароля заново."
+            : "Ссылка недействительна. Запросите восстановление пароля заново.";
+      return c.json({ error: msg }, 400);
+    }
+
+    const target = db
+      .select()
+      .from(users)
+      .where(eq(users.id, status.userId))
+      .get();
+    if (!target)
+      return c.json({ error: "Пользователь не найден" }, 404);
+    if (target.isBlocked)
+      return c.json(
+        { error: "Учётная запись заблокирована администратором" },
+        403,
+      );
+
+    const passwordHash = await hashPassword(r.password);
+    const now = new Date();
+    db.update(users)
+      .set({ passwordHash, updatedAt: now })
+      .where(eq(users.id, target.id))
+      .run();
+    consumePasswordResetToken(db, r.token);
+    // Revoke all existing sessions: the user is logging in fresh.
+    db.delete(sessions).where(eq(sessions.userId, target.id)).run();
+
+    return c.json({
+      message:
+        "Пароль обновлён. Войдите с новым паролем.",
+    });
   });
 
   return app;

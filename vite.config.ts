@@ -3,7 +3,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = env.SERVER_URL ?? "http://localhost:3001";
+  // 127.0.0.1 (not "localhost") skips Node's IPv4/IPv6 happy-eyeballs probe
+  // that on Windows can surface as EACCES if the API isn't listening on ::1.
+  const target = env.SERVER_URL ?? "http://127.0.0.1:3001";
   return {
     plugins: [react()],
     server: {

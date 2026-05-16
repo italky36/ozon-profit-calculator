@@ -29,6 +29,10 @@ plans/
 /settings/
 settings*.zip
 
+# Design mockups (kept locally for reference, not source of truth)
+_mockups/
+workspace/
+
 # Local agent settings
 .claude/settings.local.json
 

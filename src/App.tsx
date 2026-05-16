@@ -589,7 +589,11 @@ export default function App() {
     );
   }
 
-  if (loadError || !refs || !taxSettings) {
+  // Note: taxSettings is intentionally NOT required here. When the user has 0
+  // assigned shops (typical right after joining a team via invite), activeShop
+  // is undefined → taxSettings is null. That's not a load failure — the inner
+  // tab UI handles it with a friendly «нет доступа к магазинам» card.
+  if (loadError || !refs) {
     return (
       <div className="app">
         <AppHeader accent={tweaks.accentColor} />
@@ -637,17 +641,19 @@ export default function App() {
 
         <div style={{ display: activeTab === "calc" ? undefined : "none" }}>
 
-            {shops.length === 0 ? (
+            {shops.length === 0 || !taxSettings ? (
               <div className="card" style={{ textAlign: "center", padding: 32 }}>
                 <h3 style={{ margin: "0 0 8px", fontSize: 16 }}>
                   {user?.workspaceRole === "member"
                     ? "Owner ещё не дал вам доступ к магазинам"
-                    : "У команды пока нет ни одного магазина"}
+                    : "У вас пока нет ни одного магазина"}
                 </h3>
                 <p className="muted" style={{ margin: "0 0 16px" }}>
                   {user?.workspaceRole === "member"
-                    ? "Попросите owner или manager команды назначить вам магазин — после этого здесь появятся товары и расчёт прибыли."
-                    : "Создайте первый магазин, чтобы начать импорт каталога и расчёт."}
+                    ? "Попросите owner или manager команды назначить вам магазин — после этого здесь появятся товары и расчёт прибыли. Откройте вкладку «Команда», чтобы увидеть, кто owner."
+                    : user?.workspaceRole === "manager"
+                      ? "Создайте свой магазин, чтобы начать импорт каталога и расчёт. Если у команды уже есть магазины — попросите владельца дать вам доступ."
+                      : "Создайте первый магазин, чтобы начать импорт каталога и расчёт."}
                 </p>
                 {user?.workspaceRole !== "member" && (
                   <button

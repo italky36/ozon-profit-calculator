@@ -61,8 +61,12 @@ const isMain = entry ? import.meta.url === pathToFileURL(entry).href : false;
 if (isMain || process.env.START_SERVER === "1") {
   const app = buildApp();
   const port = Number(process.env.PORT ?? 3001);
-  // HOST=0.0.0.0 exposes on all interfaces (LAN). Default localhost.
-  const hostname = process.env.HOST || "localhost";
+  // Default to 127.0.0.1 (loopback) because the API sits behind the Vite
+  // dev-proxy — Vite (on the same machine) calls localhost. If we also read
+  // the same `HOST` env var that Vite uses for LAN exposure, the API binds
+  // only to the LAN IP and Vite's proxy fails with EACCES. Use `API_HOST` if
+  // you need to override (e.g. for a remote backend); leave `HOST` for Vite.
+  const hostname = process.env.API_HOST ?? "127.0.0.1";
   serve({ fetch: app.fetch, port, hostname }, (info) => {
     console.log(`server: http://${hostname}:${info.port}`);
   });

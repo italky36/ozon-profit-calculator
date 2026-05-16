@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LogOut, Users } from "lucide-react";
 import { useAuth } from "../contexts/useAuth";
 import { api } from "../api";
+import WorkspaceBrandingPopover from "./WorkspaceBrandingPopover";
 
 interface Props {
   accent: string;
@@ -13,21 +14,37 @@ const ROLE_LABEL: Record<string, string> = {
   member: "участник",
 };
 
+interface WorkspaceState {
+  name: string;
+  color: string | null;
+  logoDataUrl: string | null;
+}
+
 export default function AppHeader({ accent }: Props) {
   const { user, logout } = useAuth();
-  const [workspaceName, setWorkspaceName] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [anchorRect, setAnchorRect] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+  const badgeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!user || !user.workspaceId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setWorkspaceName(null);
+      setWorkspace(null);
       return;
     }
     let cancelled = false;
     void api.workspace
       .me()
       .then((info) => {
-        if (!cancelled) setWorkspaceName(info.name);
+        if (!cancelled)
+          setWorkspace({
+            name: info.name,
+            color: info.color,
+            logoDataUrl: info.logoDataUrl,
+          });
       })
       .catch(() => {
         /* best-effort — header is non-critical */
@@ -36,6 +53,17 @@ export default function AppHeader({ accent }: Props) {
       cancelled = true;
     };
   }, [user]);
+
+  const openPopover = () => {
+    const rect = badgeRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setAnchorRect({ left: rect.left, top: rect.bottom });
+    setPopoverOpen(true);
+  };
+
+  const badgeColor = workspace?.color ?? accent;
+  const badgeBg = `color-mix(in srgb, ${badgeColor} 12%, transparent)`;
+
   return (
     <header className="app-header">
       <div className="app-header-inner">
@@ -70,25 +98,46 @@ export default function AppHeader({ accent }: Props) {
         </div>
         {user && (
           <div className="app-header-user">
-            {workspaceName && (
-              <div
+            {workspace && (
+              <button
+                ref={badgeRef}
+                type="button"
                 className="app-header-workspace"
-                title={`Команда: ${workspaceName}`}
+                title={`Команда: ${workspace.name} — нажмите, чтобы настроить брендинг`}
+                onClick={openPopover}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 6,
                   padding: "4px 10px",
                   borderRadius: 6,
-                  background: "color-mix(in srgb, var(--accent) 12%, transparent)",
-                  color: "var(--accent)",
+                  background: badgeBg,
+                  color: badgeColor,
                   fontSize: 12,
                   fontWeight: 600,
+                  border: "1px solid transparent",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontFamily: "inherit",
+                  lineHeight: 1.4,
                 }}
               >
-                <Users size={14} />
-                <span>{workspaceName}</span>
-              </div>
+                {workspace.logoDataUrl ? (
+                  <img
+                    src={workspace.logoDataUrl}
+                    alt=""
+                    style={{
+                      width: 16,
+                      height: 16,
+                      borderRadius: 3,
+                      objectFit: "cover",
+                    }}
+                  />
+                ) : (
+                  <Users size={14} />
+                )}
+                <span>{workspace.name}</span>
+              </button>
             )}
             <div className="app-header-user-text" style={{ textAlign: "right", lineHeight: 1.2 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>{user.email}</div>
@@ -110,6 +159,21 @@ export default function AppHeader({ accent }: Props) {
           </div>
         )}
       </div>
+      {popoverOpen && workspace && anchorRect && (
+        <WorkspaceBrandingPopover
+          workspaceName={workspace.name}
+          initialColor={workspace.color}
+          initialLogo={workspace.logoDataUrl}
+          canEdit={user?.workspaceRole === "owner"}
+          anchorRect={anchorRect}
+          onClose={() => setPopoverOpen(false)}
+          onUpdated={(next) =>
+            setWorkspace((prev) =>
+              prev ? { ...prev, color: next.color, logoDataUrl: next.logoDataUrl } : prev,
+            )
+          }
+        />
+      )}
     </header>
   );
 }
