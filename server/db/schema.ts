@@ -104,6 +104,12 @@ export const workspaces = sqliteTable("workspaces", {
    * fall back to UI accent / Users icon. */
   logoDataUrl: text("logo_data_url"),
   color: text("color"),
+  /** When true AND logoDataUrl is set, render the workspace logo in the main
+   * SPA header (replacing the default «Oz» tile). Off by default — most teams
+   * prefer the product mark; some want full white-label. */
+  useLogoAsAppIcon: integer("use_logo_as_app_icon", { mode: "boolean" })
+    .notNull()
+    .default(false),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
@@ -362,6 +368,10 @@ export const users = sqliteTable("users", {
   isBlocked: integer("is_blocked", { mode: "boolean" })
     .notNull()
     .default(false),
+  fullName: text("full_name").notNull().default(""),
+  jobTitle: text("job_title"),
+  /** Base64 data URL (≤200KB) — see lib/dataUrl.ts for validation. */
+  avatarDataUrl: text("avatar_data_url"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

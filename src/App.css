@@ -95,6 +95,68 @@ html, body, #root {
 .app-title-short { display: none; }
 .app-subtitle { font-size: 13px; color: var(--header-subtitle); margin-top: 2px; }
 
+.app-header-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--badge-color, var(--accent)) 12%, transparent);
+  color: var(--badge-color, var(--accent));
+  transition: background .15s, border-color .15s;
+}
+.app-header-workspace:hover {
+  border-color: color-mix(in srgb, var(--badge-color, var(--accent)) 45%, transparent);
+}
+.app-header-user-text { text-align: right; line-height: 1.2; color: var(--header-text); display: inline-flex; flex-direction: column; }
+.app-header-user-email { font-size: 13px; font-weight: 600; color: var(--header-text); }
+.app-header-user-role { font-size: 11px; color: var(--header-subtitle); }
+.app-header-user-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background .12s, border-color .12s;
+}
+.app-header-user-button:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+:root.dark-header .app-header-user-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.30);
+}
+
+:root.dark-header .app-header-workspace {
+  background: color-mix(in srgb, var(--badge-color, #ffffff) 22%, transparent);
+  color: #ffffff;
+  border-color: color-mix(in srgb, var(--badge-color, #ffffff) 45%, transparent);
+}
+:root.dark-header .app-header-workspace:hover {
+  background: color-mix(in srgb, var(--badge-color, #ffffff) 32%, transparent);
+  border-color: color-mix(in srgb, var(--badge-color, #ffffff) 70%, transparent);
+}
+:root.dark-header .app-header .btn-icon {
+  color: var(--header-text);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+:root.dark-header .app-header .btn-icon:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.55);
+}
+
 /* ── Tab bar ─────────────────────────────────────────────────────────────── */
 .tab-bar {
   background: #fff;
@@ -1970,6 +2032,10 @@ fieldset legend {
 @keyframes toast-in {
   from { transform: translateY(10px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
+}
+@keyframes team-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 @media (max-width: 640px) {
   .toast-container { right: 12px; bottom: 12px; left: 12px; align-items: stretch; }

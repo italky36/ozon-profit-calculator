@@ -1,9 +1,5 @@
 import type { EmailMessage } from "./client";
 
-function appUrl(): string {
-  return process.env.APP_URL ?? "http://localhost:5173";
-}
-
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -15,9 +11,8 @@ function escapeHtml(s: string): string {
 
 export function generateVerificationEmail(
   email: string,
-  token: string,
+  link: string,
 ): EmailMessage {
-  const link = `${appUrl()}/verify-email?token=${encodeURIComponent(token)}`;
   const safeLink = escapeHtml(link);
   return {
     to: email,
@@ -41,9 +36,8 @@ export function generateVerificationEmail(
 
 export function generatePasswordResetEmail(
   email: string,
-  token: string,
+  link: string,
 ): EmailMessage {
-  const link = `${appUrl()}/reset-password?token=${encodeURIComponent(token)}`;
   const safeLink = escapeHtml(link);
   return {
     to: email,

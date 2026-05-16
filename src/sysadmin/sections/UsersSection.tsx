@@ -525,10 +525,15 @@ function UserRow({
       </Td>
       <Td>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Avatar name={user.email} size={28} />
+          <Avatar
+            name={user.fullName || user.email}
+            avatarDataUrl={user.avatarDataUrl}
+            email={user.email}
+            size={32}
+          />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: 13, color: "#0f172a" }}>
-              {user.email}
+              {user.fullName || user.email}
               {isMe && (
                 <span
                   style={{
@@ -545,6 +550,16 @@ function UserRow({
                 </span>
               )}
             </div>
+            {user.jobTitle && (
+              <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                {user.jobTitle}
+              </div>
+            )}
+            {user.fullName && (
+              <div style={{ fontSize: 11, color: "var(--muted-2)" }}>
+                {user.email}
+              </div>
+            )}
           </div>
         </div>
       </Td>
@@ -685,7 +700,12 @@ function UserCard({
           disabled={isMe}
           ariaLabel={`Выделить ${user.email}`}
         />
-        <Avatar name={user.email} size={32} />
+        <Avatar
+          name={user.fullName || user.email}
+          avatarDataUrl={user.avatarDataUrl}
+          email={user.email}
+          size={36}
+        />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div
             style={{
@@ -703,7 +723,7 @@ function UserCard({
                 wordBreak: "break-all",
               }}
             >
-              {user.email}
+              {user.fullName || user.email}
             </span>
             {isMe && (
               <span
@@ -720,6 +740,16 @@ function UserCard({
               </span>
             )}
           </div>
+          {user.jobTitle && (
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+              {user.jobTitle}
+            </div>
+          )}
+          {user.fullName && (
+            <div style={{ fontSize: 11, color: "var(--muted-2)", marginTop: 2 }}>
+              {user.email}
+            </div>
+          )}
           <div
             style={{
               marginTop: 6,

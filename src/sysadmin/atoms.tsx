@@ -1,47 +1,7 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { Check as CheckIcon } from "lucide-react";
 
-export function Avatar({
-  name,
-  size = 32,
-}: {
-  name: string;
-  size?: number;
-}) {
-  const letters = (name || "?")
-    .split(/[\s@.+_-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0])
-    .join("")
-    .toUpperCase();
-  let h = 0;
-  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  const bg = `hsl(${h} 60% 92%)`;
-  const fg = `hsl(${h} 45% 30%)`;
-  return (
-    <div
-      aria-hidden
-      style={{
-        width: size,
-        height: size,
-        borderRadius: size,
-        background: bg,
-        color: fg,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontWeight: 600,
-        fontSize: Math.round(size * 0.4),
-        flex: "0 0 auto",
-        letterSpacing: 0.2,
-        userSelect: "none",
-      }}
-    >
-      {letters}
-    </div>
-  );
-}
+export { default as Avatar } from "../components/Avatar";
 
 export type PillTone = "ok" | "warn" | "off" | "bad";
 

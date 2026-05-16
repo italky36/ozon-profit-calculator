@@ -485,27 +485,31 @@ function LogisticsSection({
           <div className="gs-help">
             {hasMatrix
               ? `В базе: ${clusterStats!.count.toLocaleString("ru-RU")} тарифов · ${clusterStats!.fromCount} кластеров`
-              : "Матрица не загружена — загрузите .xlsx ниже"}
+              : shopId !== null
+                ? "Матрица не загружена — загрузите .xlsx ниже"
+                : "Выберите магазин, чтобы загрузить матрицу"}
           </div>
         </div>
-        <label
-          className={`gs-btn${uploading ? " gs-btn-disabled" : ""}`}
-          title="Загрузить таблицу Ozon (.xlsx)"
-        >
-          <input
-            type="file"
-            accept=".xlsx"
-            style={{ display: "none" }}
-            disabled={uploading}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onUploadCluster(f);
-              e.target.value = "";
-            }}
-          />
-          <IconUpload />
-          <span>{uploading ? "Загружаем…" : "Загрузить .xlsx"}</span>
-        </label>
+        {shopId !== null && (
+          <label
+            className={`gs-btn${uploading ? " gs-btn-disabled" : ""}`}
+            title="Загрузить таблицу Ozon (.xlsx) — создаст набор тарифов вашей команды"
+          >
+            <input
+              type="file"
+              accept=".xlsx"
+              style={{ display: "none" }}
+              disabled={uploading}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onUploadCluster(f);
+                e.target.value = "";
+              }}
+            />
+            <IconUpload />
+            <span>{uploading ? "Загружаем…" : "Загрузить .xlsx"}</span>
+          </label>
+        )}
       </div>
       {uploadMsg && <div className="gs-help gs-help-msg">{uploadMsg}</div>}
 
@@ -925,19 +929,31 @@ export default function ShopSettings({
     onChange({ ...value, [key]: v });
 
   useEffect(() => {
+    if (shopId == null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setClusterStats(null);
+      return;
+    }
+    let cancelled = false;
     void (async () => {
       try {
-        const s = await api.refs.clusterLogisticsStats();
+        const s = await api.refs.clusterLogisticsStats(shopId);
+        if (cancelled) return;
         setClusterStats({
           count: s.count,
           fromCount: s.fromClusters.length,
           toCount: s.toClusters.length,
         });
       } catch {
-        /* ignore */
+        /* ignore — keep prior stats so the UI doesn't flicker */
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+    // Re-runs when the active tariff set changes so the «matrix loaded»
+    // indicator reflects the currently-selected set, not the one at mount.
+  }, [shopId, currentTariffSetId]);
 
   useEffect(() => {
     if (!sheetOpen) return;
@@ -949,19 +965,47 @@ export default function ShopSettings({
   }, [sheetOpen]);
 
   const onUploadCluster = async (file: File) => {
+    if (shopId == null) {
+      setUploadMsg("Ошибка: выберите магазин перед загрузкой матрицы");
+      return;
+    }
     setUploading(true);
     setUploadMsg(null);
     try {
-      const r = await api.refs.uploadClusterLogistics(file);
+      // Auto-named workspace-scoped tariff set. The set lives at workspace
+      // level (server treats scope="shop" as "workspace, identified via
+      // shopId") and stays isolated from other workspaces. Timestamp in the
+      // name prevents collisions when multiple files are uploaded the same day.
+      const now = new Date();
+      const stamp =
+        now.toISOString().slice(0, 10) +
+        " " +
+        String(now.getHours()).padStart(2, "0") +
+        ":" +
+        String(now.getMinutes()).padStart(2, "0");
+      const created = await api.refs.tariffSets.upload({
+        file,
+        name: `Матрица от ${stamp}`,
+        scope: "shop",
+        shopId,
+      });
+      // Activate the new set on this shop. Owner/manager writes the shop
+      // default; everyone else gets a per-user override.
+      if (shopIsOwner) {
+        await api.shops.update(shopId, { tariffSetId: created.id });
+      } else {
+        await api.settings.putTariffSet(created.id, shopId);
+      }
       setUploadMsg(
-        `Загружено ${r.inserted} тарифов · ${r.fromClusters.length} кластеров отправки.`,
+        `Загружено ${created.rowCount} тарифов · ${created.fromClusters.length} кластеров отправки.`,
       );
       setClusterStats({
-        count: r.inserted,
-        fromCount: r.fromClusters.length,
-        toCount: r.toClusters.length,
+        count: created.rowCount,
+        fromCount: created.fromClusters.length,
+        toCount: created.toClusters.length,
       });
       await onRefsRefresh?.();
+      await onTariffChanged?.();
     } catch (e) {
       setUploadMsg(`Ошибка: ${(e as Error).message}`);
     } finally {

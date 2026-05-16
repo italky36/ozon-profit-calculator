@@ -177,7 +177,7 @@ export default function TariffSetsControl({
           </option>
           {sets.map((s) => {
             const date = new Date(s.uploadedAt).toLocaleDateString("ru-RU");
-            const scopeLabel = s.scope === "global" ? "общий" : "мой";
+            const scopeLabel = s.scope === "global" ? "общий" : "команда";
             return (
               <option key={s.id} value={s.id}>
                 {s.name} · {scopeLabel} · {date}
@@ -249,7 +249,7 @@ export default function TariffSetsControl({
                 checked={uploadScope === "shop"}
                 onChange={() => setUploadScope("shop")}
               />
-              Только для меня
+              Для команды
             </label>
             {userIsAdmin && (
               <label
@@ -266,7 +266,7 @@ export default function TariffSetsControl({
                   checked={uploadScope === "global"}
                   onChange={() => setUploadScope("global")}
                 />
-                Общий (всем пользователям)
+                Общий (всем командам платформы)
               </label>
             )}
           </div>

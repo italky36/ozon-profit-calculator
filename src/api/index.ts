@@ -214,8 +214,17 @@ export interface AuthUser {
   role: "admin" | "user";
   isSysadmin: boolean;
   isVerified: boolean;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
   workspaceId: number;
   workspaceRole: "owner" | "manager" | "member";
+}
+
+export interface ProfilePatchInput {
+  fullName?: string;
+  jobTitle?: string | null;
+  avatarDataUrl?: string | null;
 }
 
 export interface AdminUser extends AuthUser {
@@ -271,6 +280,9 @@ export type WorkspaceRole = "owner" | "manager" | "member";
 export interface WorkspaceMember {
   userId: number;
   email: string;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
   role: WorkspaceRole;
   status: "active" | "suspended";
   /** Account-level block (users.is_blocked) — affects all logins everywhere. */
@@ -287,6 +299,8 @@ export interface WorkspaceInfo {
   color: string | null;
   /** Header-badge logo data URL. NULL → use Users icon. */
   logoDataUrl: string | null;
+  /** When true, the SPA header uses this logo instead of the default «Oz» tile. */
+  useLogoAsAppIcon: boolean;
   createdAt: number;
   updatedAt: number;
   role: WorkspaceRole;
@@ -317,8 +331,16 @@ export interface ShopAccessMatrix {
     name: string;
     shortName: string;
     color: string | null;
+    createdByUserId: number | null;
+    createdByEmail: string | null;
+    canEdit: boolean;
   }>;
-  assignments: Array<{ userId: number; shopId: number }>;
+  assignments: Array<{
+    userId: number;
+    shopId: number;
+    grantedByUserId: number | null;
+    grantedByEmail: string | null;
+  }>;
 }
 
 export const api = {
@@ -329,19 +351,38 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ email, password }),
       }),
-    register: (
-      email: string,
-      password: string,
-      workspaceName: string,
-      inviteToken?: string,
-    ) =>
+    register: (input: {
+      email: string;
+      password: string;
+      fullName: string;
+      jobTitle?: string;
+      workspaceName?: string;
+      inviteToken?: string;
+    }) =>
       apiFetch<{ message: string }>("/auth/register", {
         method: "POST",
         body: JSON.stringify(
-          inviteToken
-            ? { email, password, inviteToken }
-            : { email, password, workspaceName },
+          input.inviteToken
+            ? {
+                email: input.email,
+                password: input.password,
+                inviteToken: input.inviteToken,
+                fullName: input.fullName,
+                jobTitle: input.jobTitle ?? null,
+              }
+            : {
+                email: input.email,
+                password: input.password,
+                workspaceName: input.workspaceName,
+                fullName: input.fullName,
+                jobTitle: input.jobTitle ?? null,
+              },
         ),
+      }),
+    updateProfile: (input: ProfilePatchInput) =>
+      apiFetch<{ user: AuthUser }>("/auth/me/profile", {
+        method: "PATCH",
+        body: JSON.stringify(input),
       }),
     verifyEmail: (token: string) =>
       apiFetch<{ user: AuthUser }>("/auth/verify-email", {
@@ -758,6 +799,7 @@ export const api = {
       slug?: string;
       color?: string | null;
       logoDataUrl?: string | null;
+      useLogoAsAppIcon?: boolean;
     }) =>
       apiFetch<{
         id: number;
@@ -765,6 +807,7 @@ export const api = {
         slug: string;
         color: string | null;
         logoDataUrl: string | null;
+        useLogoAsAppIcon: boolean;
       }>("/workspace/me", {
         method: "PATCH",
         body: JSON.stringify(patch),
@@ -788,6 +831,17 @@ export const api = {
         `/workspace/me/members/${userId}`,
         { method: "PATCH", body: JSON.stringify({ role }) },
       ),
+    updateMemberProfile: (userId: number, input: ProfilePatchInput) =>
+      apiFetch<{
+        userId: number;
+        email: string;
+        fullName: string;
+        jobTitle: string | null;
+        avatarDataUrl: string | null;
+      }>(`/workspace/me/members/${userId}/profile`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }),
     removeMember: (userId: number) =>
       apiFetch<{ ok: true }>(`/workspace/me/members/${userId}`, {
         method: "DELETE",

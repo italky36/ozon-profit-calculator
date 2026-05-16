@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { aliasedTable, and, eq, isNull, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
   sessions,
@@ -16,6 +16,10 @@ import type { SessionUser, WorkspaceRole } from "../auth/utils";
 import { canManageWorkspace, requireAuth } from "../middleware/session";
 import { getEmailClient } from "../email/client";
 import { generateInviteEmail } from "../email/templates";
+import { validateImageDataUrl } from "../lib/dataUrl";
+import { parseProfilePatch } from "../lib/profile";
+import { resolveAppUrl } from "../lib/appUrl";
+import type { Context } from "hono";
 
 type Env = { Variables: { user: SessionUser } };
 
@@ -24,21 +28,19 @@ const ALLOWED_ROLES: readonly WorkspaceRole[] = ["owner", "manager", "member"];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-const LOGO_DATA_URL_RE = /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/;
-/** ~200 KB cap on the data URL string (incl. prefix). Bigger logos should be
- * resized client-side; the storage is meant for icons, not photos. */
-const LOGO_MAX_LEN = 200_000;
 
 const newToken = () => randomBytes(32).toString("hex");
 
-function inviteLink(token: string): string {
-  const base = process.env.APP_URL ?? "http://localhost:5173";
-  return `${base}/invite/${encodeURIComponent(token)}`;
+function inviteLink(c: Context, token: string): string {
+  return `${resolveAppUrl(c)}/invite/${encodeURIComponent(token)}`;
 }
 
 interface MemberOut {
   userId: number;
   email: string;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
   role: WorkspaceRole;
   status: "active" | "suspended";
   isBlocked: boolean;
@@ -60,6 +62,9 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
     .select({
       userId: workspaceMembers.userId,
       email: users.email,
+      fullName: users.fullName,
+      jobTitle: users.jobTitle,
+      avatarDataUrl: users.avatarDataUrl,
       role: workspaceMembers.role,
       status: workspaceMembers.status,
       isBlocked: users.isBlocked,
@@ -73,6 +78,9 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
     .map((r) => ({
       userId: r.userId,
       email: r.email,
+      fullName: r.fullName,
+      jobTitle: r.jobTitle,
+      avatarDataUrl: r.avatarDataUrl,
       role: r.role,
       status: r.status,
       isBlocked: r.isBlocked,
@@ -150,6 +158,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       slug: ws.slug,
       color: ws.color,
       logoDataUrl: ws.logoDataUrl,
+      useLogoAsAppIcon: ws.useLogoAsAppIcon,
       createdAt: ws.createdAt.getTime(),
       updatedAt: ws.updatedAt.getTime(),
       role: user.workspaceRole,
@@ -174,6 +183,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       slug?: unknown;
       color?: unknown;
       logoDataUrl?: unknown;
+      useLogoAsAppIcon?: unknown;
     };
 
     const patch: Partial<typeof workspaces.$inferInsert> = {};
@@ -219,23 +229,19 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (r.logoDataUrl !== undefined) {
       if (r.logoDataUrl === null) {
         patch.logoDataUrl = null;
-      } else if (typeof r.logoDataUrl !== "string") {
-        return c.json({ error: "logoDataUrl должен быть строкой или null" }, 400);
-      } else if (!LOGO_DATA_URL_RE.test(r.logoDataUrl)) {
-        return c.json(
-          { error: "Логотип должен быть data URL формата PNG/JPEG/GIF/WebP/SVG" },
-          400,
-        );
-      } else if (r.logoDataUrl.length > LOGO_MAX_LEN) {
-        return c.json(
-          {
-            error: `Логотип слишком большой (макс. ${Math.floor(LOGO_MAX_LEN / 1024)} КБ закодированного размера)`,
-          },
-          400,
-        );
       } else {
-        patch.logoDataUrl = r.logoDataUrl;
+        const v = validateImageDataUrl(r.logoDataUrl);
+        if (!v.ok) return c.json({ error: `Логотип: ${v.error}` }, 400);
+        patch.logoDataUrl = v.value;
       }
+    }
+    if (r.useLogoAsAppIcon !== undefined) {
+      if (typeof r.useLogoAsAppIcon !== "boolean")
+        return c.json(
+          { error: "useLogoAsAppIcon должен быть boolean" },
+          400,
+        );
+      patch.useLogoAsAppIcon = r.useLogoAsAppIcon;
     }
 
     if (Object.keys(patch).length === 0)
@@ -254,14 +260,22 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       slug: ws.slug,
       color: ws.color,
       logoDataUrl: ws.logoDataUrl,
+      useLogoAsAppIcon: ws.useLogoAsAppIcon,
       createdAt: ws.createdAt.getTime(),
       updatedAt: ws.updatedAt.getTime(),
     });
   });
 
   // Matrix view of «who has access to which shop» — single round-trip for the
-  // TeamPage UI. Owner sees + can edit everyone; manager can also edit but
-  // member is rejected (would let them see who else exists in the team).
+  // TeamPage UI. Owner sees all workspace shops and can edit every assignment.
+  // Manager sees:
+  //   - shops they created (canEdit = true) + assignments to them
+  //   - shops they themselves are assigned to (canEdit = false), with creator
+  //     attribution; only their OWN assignment row is exposed for those (so
+  //     other members' presence on those shops is not leaked).
+  // Each shop row carries `createdByEmail` so the UI can render «создан X».
+  // Each assignment row carries `grantedByEmail` so «доступ от X» is renderable
+  // for read-only access.
   app.get("/me/shop-access", (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
@@ -282,47 +296,94 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       .where(eq(workspaceMembers.workspaceId, user.workspaceId))
       .all();
 
-    // Owner sees every shop; manager only the shops THEY created — they have
-    // no business assigning others to a shop they don't manage.
-    const wsShops =
-      user.workspaceRole === "owner"
-        ? db
-            .select({
-              id: shops.id,
-              name: shops.name,
-              shortName: shops.shortName,
-              color: shops.color,
-            })
-            .from(shops)
-            .where(eq(shops.workspaceId, user.workspaceId))
-            .all()
-        : db
-            .select({
-              id: shops.id,
-              name: shops.name,
-              shortName: shops.shortName,
-              color: shops.color,
-            })
-            .from(shops)
-            .where(
-              and(
-                eq(shops.workspaceId, user.workspaceId),
-                eq(shops.createdBy, user.id),
-              ),
-            )
-            .all();
+    type ShopRow = {
+      id: number;
+      name: string;
+      shortName: string;
+      color: string | null;
+      createdByUserId: number | null;
+      createdByEmail: string | null;
+      canEdit: boolean;
+    };
+
+    const baseShopSelect = {
+      id: shops.id,
+      name: shops.name,
+      shortName: shops.shortName,
+      color: shops.color,
+      createdByUserId: shops.createdBy,
+      createdByEmail: users.email,
+    };
+
+    let wsShops: ShopRow[];
+
+    if (user.workspaceRole === "owner") {
+      wsShops = db
+        .select(baseShopSelect)
+        .from(shops)
+        .leftJoin(users, eq(users.id, shops.createdBy))
+        .where(eq(shops.workspaceId, user.workspaceId))
+        .all()
+        .map((s) => ({ ...s, canEdit: true }));
+    } else {
+      // Manager: shops they created (canEdit), plus shops they're assigned to (read-only).
+      const own = db
+        .select(baseShopSelect)
+        .from(shops)
+        .leftJoin(users, eq(users.id, shops.createdBy))
+        .where(
+          and(
+            eq(shops.workspaceId, user.workspaceId),
+            eq(shops.createdBy, user.id),
+          ),
+        )
+        .all();
+      const assigned = db
+        .select(baseShopSelect)
+        .from(shops)
+        .innerJoin(shopMember, eq(shopMember.shopId, shops.id))
+        .leftJoin(users, eq(users.id, shops.createdBy))
+        .where(
+          and(
+            eq(shops.workspaceId, user.workspaceId),
+            eq(shopMember.userId, user.id),
+          ),
+        )
+        .all();
+      const byId = new Map<number, ShopRow>();
+      for (const s of own) byId.set(s.id, { ...s, canEdit: true });
+      for (const s of assigned) {
+        if (!byId.has(s.id)) byId.set(s.id, { ...s, canEdit: false });
+      }
+      wsShops = Array.from(byId.values());
+    }
 
     const visibleShopIds = new Set(wsShops.map((s) => s.id));
-    const assignments = db
+    const editableShopIds = new Set(
+      wsShops.filter((s) => s.canEdit).map((s) => s.id),
+    );
+
+    const grantorAlias = aliasedTable(users, "grantor");
+    const allAssignments = db
       .select({
         userId: shopMember.userId,
         shopId: shopMember.shopId,
+        grantedByUserId: shopMember.createdBy,
+        grantedByEmail: grantorAlias.email,
       })
       .from(shopMember)
       .innerJoin(shops, eq(shops.id, shopMember.shopId))
+      .leftJoin(grantorAlias, eq(grantorAlias.id, shopMember.createdBy))
       .where(eq(shops.workspaceId, user.workspaceId))
-      .all()
-      .filter((a) => visibleShopIds.has(a.shopId));
+      .all();
+    const assignments = allAssignments.filter((a) => {
+      if (!visibleShopIds.has(a.shopId)) return false;
+      if (editableShopIds.has(a.shopId)) return true;
+      // Non-editable shop: only the requester's own assignment row is exposed,
+      // so the manager's self-row reflects externally-granted access without
+      // revealing other members' assignments.
+      return a.userId === user.id;
+    });
 
     return c.json({
       members,
@@ -421,7 +482,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           workspaceName: ws?.name ?? "Команда",
           inviterEmail: user.email,
           role,
-          link: inviteLink(token),
+          link: inviteLink(c, token),
         }),
       );
     } catch (e) {
@@ -520,6 +581,65 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       )
       .run();
     return c.json({ ok: true, userId: targetId, role: nextRole });
+  });
+
+  // Owner-edit member profile (name / title / avatar). Owner-only by intent:
+  // editing someone else's identity is privileged. Self-edits go through
+  // POST /api/auth/me/profile instead.
+  app.patch("/me/members/:userId/profile", async (c) => {
+    const user = c.get("user");
+    if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
+    if (user.workspaceRole !== "owner")
+      return c.json(
+        { error: "Только владелец может редактировать профили участников" },
+        403,
+      );
+
+    const targetId = Number(c.req.param("userId"));
+    if (!Number.isInteger(targetId) || targetId <= 0)
+      return c.json({ error: "invalid id" }, 400);
+
+    // Confirm target is in this workspace.
+    const target = db
+      .select({ userId: workspaceMembers.userId })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.workspaceId, user.workspaceId),
+          eq(workspaceMembers.userId, targetId),
+        ),
+      )
+      .get();
+    if (!target) return c.json({ error: "Участник не найден" }, 404);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Некорректный JSON" }, 400);
+    }
+    const parsed = parseProfilePatch(body);
+    if (typeof parsed === "string") return c.json({ error: parsed }, 400);
+
+    if (Object.keys(parsed).length > 0) {
+      db.update(users)
+        .set({ ...parsed, updatedAt: new Date() })
+        .where(eq(users.id, targetId))
+        .run();
+    }
+
+    const updated = db
+      .select({
+        userId: users.id,
+        email: users.email,
+        fullName: users.fullName,
+        jobTitle: users.jobTitle,
+        avatarDataUrl: users.avatarDataUrl,
+      })
+      .from(users)
+      .where(eq(users.id, targetId))
+      .get();
+    return c.json(updated);
   });
 
   app.delete("/me/members/:userId", (c) => {

@@ -9,9 +9,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  Ban,
   Check as CheckIcon,
   ChevronDown,
   ChevronRight,
+  CircleCheck,
   Clock,
   Crown,
   Info,
@@ -19,7 +21,8 @@ import {
   Mail,
   MailPlus,
   Minus,
-  MoreHorizontal,
+  Pencil,
+  RefreshCw,
   Search,
   ShieldCheck,
   Store as StoreIcon,
@@ -38,6 +41,8 @@ import {
   type WorkspaceMember,
   type WorkspaceRole,
 } from "../api";
+import Avatar from "./Avatar";
+import ProfileEditor from "./ProfileEditor";
 
 // ===================================================================
 // Types & helpers
@@ -56,7 +61,12 @@ interface ShopMeta {
   name: string;
   shortName: string;
   color: string | null;
+  createdByUserId: number | null;
+  createdByEmail: string | null;
+  /** true if the current viewer can manage assignments to this shop. */
+  canEdit: boolean;
 }
+
 
 /** Unified row type for the «people» list — real members and pending
  * invites share the same column shape. */
@@ -66,6 +76,9 @@ type PersonRow =
       key: string; // "u-{userId}"
       userId: number;
       email: string;
+      fullName: string;
+      jobTitle: string | null;
+      avatarDataUrl: string | null;
       role: WorkspaceRole;
       isBlocked: boolean;
       createdAt: number;
@@ -108,6 +121,37 @@ function fmtDateShort(ms: number): string {
   }
 }
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Wraps every case-insensitive occurrence of `query` inside `text` in a
+ * highlighted `<mark>`. Returns the raw string when query is empty so callers
+ * stay text-only in the no-search path. */
+function highlight(text: string, query: string): ReactNode {
+  const q = query.trim();
+  if (!q) return text;
+  const re = new RegExp(`(${escapeRegex(q)})`, "ig");
+  const parts = text.split(re);
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <mark
+        key={i}
+        style={{
+          background: "color-mix(in srgb, var(--accent) 28%, transparent)",
+          color: "inherit",
+          padding: "0 1px",
+          borderRadius: 2,
+        }}
+      >
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
 /** Returns true if `query` viewport media-query is currently matched. */
 function useMediaQuery(query: string): boolean {
   const get = () =>
@@ -126,47 +170,6 @@ function useMediaQuery(query: string): boolean {
 // Atoms
 // ===================================================================
 
-function Avatar({
-  name,
-  size = 32,
-}: {
-  name: string;
-  size?: number;
-}) {
-  const letters = (name || "?")
-    .split(/[\s@.+_-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0])
-    .join("")
-    .toUpperCase();
-  let h = 0;
-  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  const bg = `hsl(${h} 60% 92%)`;
-  const fg = `hsl(${h} 45% 30%)`;
-  return (
-    <div
-      aria-hidden
-      style={{
-        width: size,
-        height: size,
-        borderRadius: size,
-        background: bg,
-        color: fg,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontWeight: 600,
-        fontSize: Math.round(size * 0.4),
-        flex: "0 0 auto",
-        letterSpacing: 0.2,
-        userSelect: "none",
-      }}
-    >
-      {letters}
-    </div>
-  );
-}
 
 const ROLE_PALETTE: Record<
   WorkspaceRole,
@@ -392,163 +395,52 @@ function RolePicker({
   );
 }
 
-interface MenuItem {
-  key: string;
-  label: string;
+function RowIconBtn({
+  icon,
+  title,
+  tone = "default",
+  onClick,
+  disabled,
+}: {
   icon: ReactNode;
-  danger?: boolean;
+  title: string;
+  tone?: "default" | "danger";
   onClick: () => void;
   disabled?: boolean;
-  hidden?: boolean;
-}
-
-/** Three-dot kebab menu rendered via portal so it isn't clipped by parent
- * `overflow: hidden`. Used in the row's Actions column. */
-function ActionsMenu({
-  items,
-  busy,
-  label = "Действия",
-}: {
-  items: MenuItem[];
-  busy?: boolean;
-  label?: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(
-    null,
-  );
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (btnRef.current?.contains(t)) return;
-      if (popRef.current?.contains(t)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    const onScroll = () => setOpen(false);
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
-    };
-  }, [open]);
-
-  const visible = items.filter((i) => !i.hidden);
-  if (visible.length === 0) return null;
-
-  const toggle = () => {
-    if (busy) return;
-    if (open) {
-      setOpen(false);
-      return;
-    }
-    const r = btnRef.current?.getBoundingClientRect();
-    if (r) setAnchor({ left: r.right - 200, bottom: r.bottom });
-    setOpen(true);
+  const [hover, setHover] = useState(false);
+  const tones = {
+    default: { fg: "var(--muted)", hoverBg: "#f1f5f9", hoverFg: "#0f172a", hoverBorder: "var(--border)" },
+    danger: { fg: "#b91c1c", hoverBg: "#fef2f2", hoverFg: "#991b1b", hoverBorder: "#fecaca" },
   };
-
+  const t = tones[tone];
   return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        title={label}
-        aria-label={label}
-        disabled={busy}
-        onClick={toggle}
-        style={{
-          width: 30,
-          height: 30,
-          borderRadius: 7,
-          padding: 0,
-          border: "1px solid " + (open ? "var(--border)" : "transparent"),
-          background: open ? "#f1f5f9" : "transparent",
-          color: open ? "#0f172a" : "var(--muted)",
-          cursor: busy ? "not-allowed" : "pointer",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: busy ? 0.5 : 1,
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
-      {open && anchor && createPortal(
-        <div
-          ref={popRef}
-          role="menu"
-          style={{
-            position: "fixed",
-            top: anchor.bottom + 4,
-            left: Math.max(8, anchor.left),
-            minWidth: 200,
-            background: "#fff",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            boxShadow: "0 8px 24px rgba(15,23,42,.12)",
-            padding: 4,
-            zIndex: 1200,
-            display: "flex",
-            flexDirection: "column",
-            gap: 1,
-            animation: "tp-popIn .12s ease-out",
-          }}
-        >
-          {visible.map((it) => (
-            <button
-              key={it.key}
-              type="button"
-              role="menuitem"
-              disabled={it.disabled}
-              onClick={() => {
-                setOpen(false);
-                if (!it.disabled) it.onClick();
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 9,
-                padding: "8px 10px",
-                borderRadius: 6,
-                background: "transparent",
-                color: it.danger ? "#b91c1c" : "#0f172a",
-                border: 0,
-                cursor: it.disabled ? "not-allowed" : "pointer",
-                fontFamily: "inherit",
-                fontSize: 12.5,
-                fontWeight: 500,
-                textAlign: "left",
-                opacity: it.disabled ? 0.45 : 1,
-              }}
-              onMouseEnter={(e) => {
-                if (!it.disabled)
-                  e.currentTarget.style.background = it.danger
-                    ? "#fef2f2"
-                    : "#f1f5f9";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "transparent";
-              }}
-            >
-              {it.icon}
-              <span>{it.label}</span>
-            </button>
-          ))}
-        </div>,
-        document.body,
-      )}
-    </>
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        width: 30,
+        height: 30,
+        borderRadius: 7,
+        padding: 0,
+        border: "1px solid " + (hover && !disabled ? t.hoverBorder : "transparent"),
+        background: hover && !disabled ? t.hoverBg : "transparent",
+        color: hover && !disabled ? t.hoverFg : t.fg,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        transition: "background .12s, color .12s, border-color .12s",
+      }}
+    >
+      {icon}
+    </button>
   );
 }
 
@@ -781,20 +673,34 @@ function ShopChip({
   );
 }
 
+/** Build the tooltip shown on a shop chip. If a grantor is known (the chip is
+ * on the viewer's own row for a shop they don't own), surface «доступ от X»;
+ * otherwise fall back to «создан X». */
+function shopChipTitle(shop: ShopMeta, grantorEmail?: string | null): string {
+  if (grantorEmail) return `${shop.name} · доступ от ${grantorEmail}`;
+  if (shop.createdByEmail) return `${shop.name} · создан ${shop.createdByEmail}`;
+  return shop.name;
+}
+
 /** «X из Y магазинов» pill with overlapping code chips. Click opens the
- * shop-access drawer/expander. */
+ * shop-access drawer/expander. Chips for shops the viewer can't manage are
+ * rendered muted with a lock indicator. */
 function AccessPill({
   count,
   total,
   accessed,
   disabled,
   onClick,
+  grantorByShopId,
 }: {
   count: number;
   total: number;
   accessed: ShopMeta[];
   disabled?: boolean;
   onClick?: () => void;
+  /** Per-shop grantor email — used on the viewer's own row to attribute
+   * externally-granted access. */
+  grantorByShopId?: Map<number, string | null>;
 }) {
   const previews = accessed.slice(0, 3);
   const more = Math.max(0, accessed.length - 3);
@@ -802,7 +708,7 @@ function AccessPill({
     <button
       type="button"
       onClick={onClick}
-      disabled={disabled}
+      disabled={disabled || !onClick}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -811,14 +717,14 @@ function AccessPill({
         borderRadius: 8,
         border: "1px solid var(--border)",
         background: "#fff",
-        cursor: disabled ? "default" : "pointer",
+        cursor: disabled || !onClick ? "default" : "pointer",
         fontFamily: "inherit",
         transition: "background .12s, border-color .12s",
         maxWidth: "100%",
         opacity: disabled ? 0.6 : 1,
       }}
       onMouseEnter={(e) => {
-        if (disabled) return;
+        if (disabled || !onClick) return;
         e.currentTarget.style.borderColor = "var(--accent)";
         e.currentTarget.style.background =
           "color-mix(in srgb, var(--accent) 6%, #fff)";
@@ -846,19 +752,46 @@ function AccessPill({
             —
           </span>
         ) : (
-          previews.map((s, i) => (
-            <span
-              key={s.id}
-              style={{
-                marginLeft: i > 0 ? -6 : 0,
-                border: "2px solid #fff",
-                borderRadius: 7,
-                display: "inline-flex",
-              }}
-            >
-              <ShopCode shop={s} size={22} />
-            </span>
-          ))
+          previews.map((s, i) => {
+            const grantor = grantorByShopId?.get(s.id);
+            const readOnly = !s.canEdit;
+            return (
+              <span
+                key={s.id}
+                title={shopChipTitle(s, grantor)}
+                style={{
+                  marginLeft: i > 0 ? -6 : 0,
+                  border: "2px solid #fff",
+                  borderRadius: 7,
+                  display: "inline-flex",
+                  position: "relative",
+                }}
+              >
+                <ShopCode shop={s} size={22} tone={readOnly ? "muted" : "default"} />
+                {readOnly && (
+                  <span
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      right: -2,
+                      bottom: -2,
+                      width: 11,
+                      height: 11,
+                      borderRadius: 11,
+                      background: "#fff",
+                      border: "1px solid #cbd5e1",
+                      color: "#64748b",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Lock size={7} strokeWidth={2.5} />
+                  </span>
+                )}
+              </span>
+            );
+          })
         )}
       </span>
       <span style={{ fontSize: 12.5, color: "#1e293b", fontWeight: 500 }}>
@@ -1020,6 +953,12 @@ interface ShopAccessBodyProps {
   saved: boolean;
   /** Pulled out as prop so mobile + desktop can style differently. */
   variant: "drawer" | "inline";
+  /** Read-only view (e.g. viewer opens their own access drawer). Disables
+   * toggles and hides bulk select/clear. */
+  readOnly?: boolean;
+  /** Per-shop grantor email — used to attribute «доступ от X» under each shop
+   * row when the viewer is looking at their own assignments. */
+  grantorByShopId?: Map<number, string | null>;
 }
 
 function ShopAccessBody({
@@ -1030,6 +969,8 @@ function ShopAccessBody({
   onClearAll,
   saved,
   variant,
+  readOnly,
+  grantorByShopId,
 }: ShopAccessBodyProps) {
   const [search, setSearch] = useState("");
   const filtered = shops.filter((s) => {
@@ -1099,36 +1040,54 @@ function ShopAccessBody({
           />
         </div>
         <div style={{ display: "flex", gap: 14, fontSize: 12 }}>
-          <button
-            type="button"
-            onClick={onSelectAll}
-            style={{
-              background: "transparent",
-              border: 0,
-              color: "var(--accent)",
-              fontWeight: 600,
-              cursor: "pointer",
-              padding: 0,
-              fontFamily: "inherit",
-            }}
-          >
-            Выбрать все
-          </button>
-          <button
-            type="button"
-            onClick={onClearAll}
-            style={{
-              background: "transparent",
-              border: 0,
-              color: "var(--muted)",
-              fontWeight: 500,
-              cursor: "pointer",
-              padding: 0,
-              fontFamily: "inherit",
-            }}
-          >
-            Снять все
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                type="button"
+                onClick={onSelectAll}
+                style={{
+                  background: "transparent",
+                  border: 0,
+                  color: "var(--accent)",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  padding: 0,
+                  fontFamily: "inherit",
+                }}
+              >
+                Выбрать все
+              </button>
+              <button
+                type="button"
+                onClick={onClearAll}
+                style={{
+                  background: "transparent",
+                  border: 0,
+                  color: "var(--muted)",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  padding: 0,
+                  fontFamily: "inherit",
+                }}
+              >
+                Снять все
+              </button>
+            </>
+          )}
+          {readOnly && (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: 11.5,
+                color: "var(--muted)",
+              }}
+            >
+              <Info size={12} />
+              просмотр без редактирования
+            </span>
+          )}
           <span style={{ flex: 1 }} />
           {saved && (
             <span
@@ -1169,6 +1128,14 @@ function ShopAccessBody({
         )}
         {filtered.map((s) => {
           const on = selected.has(s.id);
+          const toggleDisabled = readOnly || !s.canEdit;
+          const grantor = grantorByShopId?.get(s.id);
+          const attribution =
+            grantor != null
+              ? `доступ от ${grantor}`
+              : s.createdByEmail
+                ? `создан ${s.createdByEmail}`
+                : null;
           return (
             <label
               key={s.id}
@@ -1179,7 +1146,7 @@ function ShopAccessBody({
                 gap: 11,
                 padding: "9px 10px",
                 borderRadius: 8,
-                cursor: "pointer",
+                cursor: toggleDisabled ? "default" : "pointer",
                 background: on
                   ? "color-mix(in srgb, var(--accent) 8%, transparent)"
                   : "transparent",
@@ -1187,14 +1154,47 @@ function ShopAccessBody({
                 marginBottom: 1,
               }}
               onMouseEnter={(e) => {
-                if (!on) e.currentTarget.style.background = "#f8fafc";
+                if (!on && !toggleDisabled) e.currentTarget.style.background = "#f8fafc";
               }}
               onMouseLeave={(e) => {
                 if (!on) e.currentTarget.style.background = "transparent";
               }}
             >
-              <CheckBox checked={on} onChange={() => onToggle(s.id)} />
-              <ShopChip shop={s} size="md" tone={on ? "default" : "muted"} />
+              <CheckBox
+                checked={on}
+                onChange={toggleDisabled ? undefined : () => onToggle(s.id)}
+                disabled={toggleDisabled}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <ShopChip shop={s} size="md" tone={on ? "default" : "muted"} />
+                {attribution && (
+                  <div
+                    style={{
+                      marginTop: 3,
+                      marginLeft: 30,
+                      fontSize: 11,
+                      color: "var(--muted)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      maxWidth: "100%",
+                    }}
+                  >
+                    {!s.canEdit && <Lock size={10} strokeWidth={2} />}
+                    <span
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {attribution}
+                    </span>
+                  </div>
+                )}
+              </div>
             </label>
           );
         })}
@@ -1215,10 +1215,22 @@ interface DrawerProps {
   onSelectAll: () => void;
   onClearAll: () => void;
   saved: boolean;
+  readOnly?: boolean;
+  grantorByShopId?: Map<number, string | null>;
 }
 
 function ShopAccessDrawer(props: DrawerProps) {
-  const { member, shops, onClose, onToggle, onSelectAll, onClearAll, saved } = props;
+  const {
+    member,
+    shops,
+    onClose,
+    onToggle,
+    onSelectAll,
+    onClearAll,
+    saved,
+    readOnly,
+    grantorByShopId,
+  } = props;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1262,7 +1274,12 @@ function ShopAccessDrawer(props: DrawerProps) {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <Avatar name={member.email} size={40} />
+            <Avatar
+              name={member.fullName || member.email}
+              avatarDataUrl={member.avatarDataUrl}
+              email={member.email}
+              size={40}
+            />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div
                 style={{
@@ -1273,8 +1290,34 @@ function ShopAccessDrawer(props: DrawerProps) {
                   textOverflow: "ellipsis",
                 }}
               >
-                {member.email}
+                {member.fullName || member.email}
               </div>
+              {member.jobTitle && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--muted)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {member.jobTitle}
+                </div>
+              )}
+              {member.fullName && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--muted-2)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {member.email}
+                </div>
+              )}
               <div
                 style={{
                   marginTop: 4,
@@ -1341,6 +1384,8 @@ function ShopAccessDrawer(props: DrawerProps) {
             onClearAll={onClearAll}
             saved={saved}
             variant="drawer"
+            readOnly={readOnly}
+            grantorByShopId={grantorByShopId}
           />
         )}
 
@@ -1365,7 +1410,9 @@ function ShopAccessDrawer(props: DrawerProps) {
             }}
           >
             <Info size={12} />
-            Изменения сохраняются автоматически
+            {readOnly
+              ? "Управление доступом — у владельца команды или создателя магазина"
+              : "Изменения сохраняются автоматически"}
           </span>
           <button
             type="button"
@@ -1397,12 +1444,18 @@ interface MemberRowProps {
   isWorkspaceOwner: boolean;
   busy: boolean;
   selected: boolean;
+  /** Active search query — highlighted inside name/email/job title. */
+  searchQuery?: string;
+  /** When this row is the current viewer's own row — maps shopId → grantor email
+   * for shops the viewer didn't create. Used to attribute «доступ от X». */
+  grantorByShopId?: Map<number, string | null>;
   onToggleSelect: () => void;
   onOpenAccess: (userId: number) => void;
   onChangeRole: (userId: number, role: WorkspaceRole) => void;
   onSetBlocked: (userId: number, email: string, blocked: boolean) => void;
   onDeleteAccount: (userId: number, email: string) => void;
   onRevokeInvite: (token: string, email: string) => void;
+  onEditProfile: (userId: number) => void;
 }
 
 function MemberRow({
@@ -1414,13 +1467,17 @@ function MemberRow({
   isWorkspaceOwner,
   busy,
   selected,
+  searchQuery,
+  grantorByShopId,
   onToggleSelect,
   onOpenAccess,
   onChangeRole,
   onSetBlocked,
   onDeleteAccount,
   onRevokeInvite,
+  onEditProfile,
 }: MemberRowProps) {
+  const q = searchQuery ?? "";
   const isOwnerRow = row.kind === "member" && row.role === "owner";
   const isInvite = row.kind === "invite";
 
@@ -1446,7 +1503,7 @@ function MemberRow({
       style={{
         padding: "14px 18px",
         display: "grid",
-        gridTemplateColumns: "36px minmax(0,1.6fr) 140px minmax(0,1fr) 110px",
+        gridTemplateColumns: "36px minmax(0,1.6fr) 180px minmax(0,1fr) 110px",
         gap: 14,
         alignItems: "center",
         borderTop: !isFirst ? "1px solid var(--border-soft)" : "none",
@@ -1469,18 +1526,27 @@ function MemberRow({
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
-        <Avatar name={row.email} size={34} />
+        <Avatar
+          name={row.kind === "member" ? row.fullName || row.email : row.email}
+          avatarDataUrl={row.kind === "member" ? row.avatarDataUrl : null}
+          email={row.email}
+          size={36}
+        />
         <div style={{ minWidth: 0 }}>
           <div
             style={{
-              fontSize: 13,
-              fontWeight: 500,
+              fontSize: 14,
+              fontWeight: 600,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              lineHeight: 1.25,
             }}
           >
-            {row.email}
+            {highlight(
+              row.kind === "member" ? row.fullName || row.email : row.email,
+              q,
+            )}
             {row.kind === "member" && row.isYou && (
               <span
                 style={{
@@ -1516,9 +1582,40 @@ function MemberRow({
               </span>
             )}
           </div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+          {row.kind === "member" && row.jobTitle && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--muted)",
+                marginTop: 1,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {highlight(row.jobTitle, q)}
+            </div>
+          )}
+          <div
+            style={{
+              fontSize: 11.5,
+              color: "var(--muted-2)",
+              marginTop: 2,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
             {row.kind === "member" ? (
-              <>в команде с {fmtDate(row.createdAt)}</>
+              <>
+                {row.fullName ? (
+                  <>
+                    {highlight(row.email, q)}
+                    {" · "}
+                  </>
+                ) : null}
+                в команде с {fmtDate(row.createdAt)}
+              </>
             ) : (
               <>
                 приглашение от {row.invitedByEmail} · истекает {fmtDate(row.expiresAt)}
@@ -1528,7 +1625,7 @@ function MemberRow({
         </div>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", rowGap: 4, minWidth: 0 }}>
         {isInvite ? (
           <>
             <PendingBadge />
@@ -1574,6 +1671,9 @@ function MemberRow({
             total={shops.length}
             accessed={accessed}
             disabled={!allowManage}
+            grantorByShopId={
+              row.kind === "member" && row.isYou ? grantorByShopId : undefined
+            }
             onClick={
               allowManage && row.kind === "member"
                 ? () => onOpenAccess(row.userId)
@@ -1606,29 +1706,31 @@ function MemberRow({
             </button>
           )
         ) : row.kind === "member" && isWorkspaceOwner && !row.isYou ? (
-          <ActionsMenu
-            busy={busy}
-            items={[
-              {
-                key: "block",
-                label: row.isBlocked ? "Разблокировать" : "Заблокировать",
-                icon: row.isBlocked ? (
-                  <Unlock size={14} />
-                ) : (
-                  <Lock size={14} />
-                ),
-                onClick: () =>
-                  onSetBlocked(row.userId, row.email, !row.isBlocked),
-              },
-              {
-                key: "delete",
-                label: "Удалить сотрудника",
-                icon: <UserX size={14} />,
-                danger: true,
-                onClick: () => onDeleteAccount(row.userId, row.email),
-              },
-            ]}
-          />
+          <>
+            <RowIconBtn
+              title="Редактировать профиль"
+              icon={<Pencil size={14} />}
+              disabled={busy}
+              onClick={() => onEditProfile(row.userId)}
+            />
+            <RowIconBtn
+              title={row.isBlocked ? "Разблокировать" : "Заблокировать"}
+              icon={
+                row.isBlocked ? <CircleCheck size={14} /> : <Ban size={14} />
+              }
+              disabled={busy}
+              onClick={() =>
+                onSetBlocked(row.userId, row.email, !row.isBlocked)
+              }
+            />
+            <RowIconBtn
+              title="Удалить сотрудника"
+              icon={<Trash2 size={14} />}
+              tone="danger"
+              disabled={busy}
+              onClick={() => onDeleteAccount(row.userId, row.email)}
+            />
+          </>
         ) : (
           <span style={{ fontSize: 11.5, color: "#94a3b8" }}>—</span>
         )}
@@ -1650,6 +1752,10 @@ interface MemberCardProps {
   busy: boolean;
   saved: boolean;
   selected: boolean;
+  /** Active search query — highlighted inside name/email/job title. */
+  searchQuery?: string;
+  /** When this card is the current viewer's own — shopId → grantor email. */
+  grantorByShopId?: Map<number, string | null>;
   onToggleSelect: () => void;
   onToggleOpen: () => void;
   onToggleShop: (shopId: number) => void;
@@ -1670,6 +1776,8 @@ function MemberCard({
   busy,
   saved,
   selected,
+  searchQuery,
+  grantorByShopId,
   onToggleSelect,
   onToggleOpen,
   onToggleShop,
@@ -1680,6 +1788,8 @@ function MemberCard({
   onDeleteAccount,
   onRevokeInvite,
 }: MemberCardProps) {
+  const q = searchQuery ?? "";
+  const isSelfRow = row.kind === "member" && row.isYou;
   const isOwnerRow = row.kind === "member" && row.role === "owner";
   const isInvite = row.kind === "invite";
 
@@ -1737,7 +1847,12 @@ function MemberCard({
             size={18}
           />
         )}
-        <Avatar name={row.email} size={44} />
+        <Avatar
+          name={row.kind === "member" ? row.fullName || row.email : row.email}
+          avatarDataUrl={row.kind === "member" ? row.avatarDataUrl : null}
+          email={row.email}
+          size={44}
+        />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
@@ -1748,7 +1863,10 @@ function MemberCard({
               textOverflow: "ellipsis",
             }}
           >
-            {row.email}
+            {highlight(
+              row.kind === "member" ? row.fullName || row.email : row.email,
+              q,
+            )}
             {row.kind === "member" && row.isYou && (
               <span
                 style={{
@@ -1762,6 +1880,32 @@ function MemberCard({
               </span>
             )}
           </div>
+          {row.kind === "member" && row.jobTitle && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--muted)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {highlight(row.jobTitle, q)}
+            </div>
+          )}
+          {row.kind === "member" && row.fullName && (
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--muted-2)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {highlight(row.email, q)}
+            </div>
+          )}
           <div
             style={{
               display: "flex",
@@ -1970,6 +2114,8 @@ function MemberCard({
               onClearAll={onClearAll}
               saved={saved}
               variant="inline"
+              readOnly={isSelfRow}
+              grantorByShopId={isSelfRow ? grantorByShopId : undefined}
             />
           )}
 
@@ -2574,10 +2720,12 @@ export default function TeamPage() {
   const [matrix, setMatrix] = useState<ShopAccessMatrix | null>(null);
   const [invites, setInvites] = useState<WorkspaceInviteRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [openMemberId, setOpenMemberId] = useState<number | null>(null);
+  const [editingMemberId, setEditingMemberId] = useState<number | null>(null);
   const [savedTick, setSavedTick] = useState(false);
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | WorkspaceRole>("all");
@@ -2592,8 +2740,9 @@ export default function TeamPage() {
   );
   const savedTickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false) => {
+    if (silent) setRefreshing(true);
+    else setLoading(true);
     setError(null);
     try {
       const [i, sa, inv] = await Promise.all([
@@ -2621,7 +2770,8 @@ export default function TeamPage() {
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (silent) setRefreshing(false);
+      else setLoading(false);
     }
   }, []);
 
@@ -2641,6 +2791,20 @@ export default function TeamPage() {
     [shops],
   );
 
+  // Per-shop grantor email for the current user's own assignments. Surfaced on
+  // their self-row chips as «доступ от X» (matters when a manager is assigned
+  // to shops they didn't create).
+  const myGrantorByShopId = useMemo(() => {
+    if (!info || !matrix) return undefined;
+    const myId = info.members.find((m) => m.isYou)?.userId;
+    if (myId == null) return undefined;
+    const map = new Map<number, string | null>();
+    for (const a of matrix.assignments) {
+      if (a.userId === myId) map.set(a.shopId, a.grantedByEmail);
+    }
+    return map;
+  }, [info, matrix]);
+
   // Build the unified people list (members + invites), apply filters.
   const people = useMemo<PersonRow[]>(() => {
     if (!info) return [];
@@ -2649,6 +2813,9 @@ export default function TeamPage() {
       key: `u-${m.userId}`,
       userId: m.userId,
       email: m.email,
+      fullName: m.fullName,
+      jobTitle: m.jobTitle,
+      avatarDataUrl: m.avatarDataUrl,
       role: m.role,
       isBlocked: m.isBlocked,
       createdAt: m.createdAt,
@@ -2671,7 +2838,15 @@ export default function TeamPage() {
     const q = search.trim().toLowerCase();
     return people.filter((p) => {
       if (roleFilter !== "all" && p.role !== roleFilter) return false;
-      if (q && !p.email.toLowerCase().includes(q)) return false;
+      if (q) {
+        const haystacks: string[] = [p.email];
+        if (p.kind === "member") {
+          if (p.fullName) haystacks.push(p.fullName);
+          if (p.jobTitle) haystacks.push(p.jobTitle);
+        }
+        const match = haystacks.some((s) => s.toLowerCase().includes(q));
+        if (!match) return false;
+      }
       return true;
     });
   }, [people, search, roleFilter]);
@@ -3165,6 +3340,8 @@ export default function TeamPage() {
                 selected={
                   p.kind === "member" && selectedIds.has(p.userId)
                 }
+                searchQuery={search}
+                grantorByShopId={myGrantorByShopId}
                 onToggleSelect={() => {
                   if (p.kind === "member") toggleOneSelect(p.userId);
                 }}
@@ -3277,6 +3454,34 @@ export default function TeamPage() {
           count={people.length}
           headerRight={
             <>
+              <button
+                type="button"
+                onClick={() => void reload(true)}
+                disabled={refreshing || loading}
+                title="Обновить список"
+                aria-label="Обновить список"
+                style={{
+                  height: 30,
+                  width: 30,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: "1px solid var(--border)",
+                  borderRadius: 7,
+                  background: "#fff",
+                  color: "var(--muted-2)",
+                  cursor: refreshing || loading ? "not-allowed" : "pointer",
+                  opacity: refreshing || loading ? 0.6 : 1,
+                  transition: "background .15s, color .15s, border-color .15s",
+                }}
+              >
+                <RefreshCw
+                  size={14}
+                  style={{
+                    animation: refreshing ? "team-refresh-spin 0.8s linear infinite" : undefined,
+                  }}
+                />
+              </button>
               <div style={{ position: "relative", width: 220 }}>
                 <Search
                   size={13}
@@ -3293,7 +3498,7 @@ export default function TeamPage() {
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Поиск по email"
+                  placeholder="Поиск по имени или email"
                   style={{
                     width: "100%",
                     height: 30,
@@ -3345,7 +3550,7 @@ export default function TeamPage() {
               background: "#f8fafc",
               borderBottom: "1px solid var(--border-soft)",
               display: "grid",
-              gridTemplateColumns: "36px minmax(0,1.6fr) 140px minmax(0,1fr) 110px",
+              gridTemplateColumns: "36px minmax(0,1.6fr) 180px minmax(0,1fr) 110px",
               gap: 14,
               fontSize: 11,
               fontWeight: 600,
@@ -3383,6 +3588,8 @@ export default function TeamPage() {
               selected={
                 p.kind === "member" && selectedIds.has(p.userId)
               }
+              searchQuery={search}
+              grantorByShopId={myGrantorByShopId}
               onToggleSelect={() => {
                 if (p.kind === "member") toggleOneSelect(p.userId);
               }}
@@ -3391,6 +3598,7 @@ export default function TeamPage() {
               onSetBlocked={setMemberBlocked}
               onDeleteAccount={deleteMemberAccount}
               onRevokeInvite={revokeInvite}
+              onEditProfile={(userId) => setEditingMemberId(userId)}
             />
           ))}
           {filtered.length === 0 && (
@@ -3432,8 +3640,31 @@ export default function TeamPage() {
           onSelectAll={() => void selectAllShopsForMember(openMember.userId)}
           onClearAll={() => void clearAllShopsForMember(openMember.userId)}
           saved={savedTick}
+          readOnly={openMember.isYou}
+          grantorByShopId={openMember.isYou ? myGrantorByShopId : undefined}
         />
       )}
+      {editingMemberId != null &&
+        (() => {
+          const target = people.find(
+            (p) => p.kind === "member" && p.userId === editingMemberId,
+          );
+          if (!target || target.kind !== "member") return null;
+          return (
+            <ProfileEditor
+              mode="member"
+              userId={target.userId}
+              email={target.email}
+              initialFullName={target.fullName}
+              initialJobTitle={target.jobTitle}
+              initialAvatarDataUrl={target.avatarDataUrl}
+              onClose={() => setEditingMemberId(null)}
+              onSaved={() => {
+                void reload(true);
+              }}
+            />
+          );
+        })()}
     </>
   );
 }

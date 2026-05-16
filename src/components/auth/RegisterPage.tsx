@@ -15,6 +15,8 @@ export default function RegisterPage() {
   const { register } = useAuth();
   const inviteToken = getQueryParam("invite");
   const [email, setEmail] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [jobTitle, setJobTitle] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -37,17 +39,20 @@ export default function RegisterPage() {
   }, [inviteToken]);
 
   const { submitting, onSubmit } = useSubmit(async () => {
+    if (!fullName.trim()) throw new Error("Укажите имя");
     if (!inviteToken && !workspaceName.trim())
       throw new Error("Укажите название команды");
     if (password.length < 8)
       throw new Error("Пароль должен быть минимум 8 символов");
     if (password !== confirm) throw new Error("Пароли не совпадают");
-    const res = await register(
+    const res = await register({
       email,
       password,
-      workspaceName.trim(),
-      inviteToken ?? undefined,
-    );
+      fullName: fullName.trim(),
+      jobTitle: jobTitle.trim() || undefined,
+      workspaceName: inviteToken ? undefined : workspaceName.trim(),
+      inviteToken: inviteToken ?? undefined,
+    });
     setNotice(
       res.message || "Регистрация успешна. Проверьте почту для подтверждения.",
     );
@@ -127,6 +132,23 @@ export default function RegisterPage() {
           autoComplete="email"
           required
           disabled={!!invite}
+        />
+        <Field
+          label="Имя"
+          type="text"
+          value={fullName}
+          onChange={setFullName}
+          autoComplete="name"
+          maxLength={80}
+          required
+        />
+        <Field
+          label="Должность (опционально)"
+          type="text"
+          value={jobTitle}
+          onChange={setJobTitle}
+          autoComplete="organization-title"
+          maxLength={80}
         />
         {!invite && (
           <Field

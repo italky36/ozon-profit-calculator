@@ -59,6 +59,9 @@ export interface SessionUser {
   email: string;
   isSysadmin: boolean;
   isVerified: boolean;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
   /** The user's single workspace (Stage 2 invariant). 0 means «not yet
    * assigned» — used during registration before workspace creation; routes
    * that scope by workspace will reject with 403 until the user has one. */
@@ -78,6 +81,9 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
       isSysadmin: users.isSysadmin,
       isVerified: users.isVerified,
       isBlocked: users.isBlocked,
+      fullName: users.fullName,
+      jobTitle: users.jobTitle,
+      avatarDataUrl: users.avatarDataUrl,
     })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
@@ -121,6 +127,9 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
     email: row.email,
     isSysadmin: row.isSysadmin,
     isVerified: row.isVerified,
+    fullName: row.fullName,
+    jobTitle: row.jobTitle,
+    avatarDataUrl: row.avatarDataUrl,
     workspaceId: member?.workspaceId ?? 0,
     workspaceRole: member?.role ?? "member",
   };

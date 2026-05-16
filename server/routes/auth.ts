@@ -36,6 +36,8 @@ import {
   SYSADMIN_COOKIE_NAME,
   type AppScope,
 } from "../middleware/session";
+import { parseProfilePatch } from "../lib/profile";
+import { resolveAppUrl } from "../lib/appUrl";
 
 type AuthEnv = { Variables: { user?: SessionUser } };
 
@@ -66,6 +68,9 @@ function publicUser(u: SessionUser) {
     role: u.isSysadmin ? ("admin" as const) : ("user" as const),
     isSysadmin: u.isSysadmin,
     isVerified: u.isVerified,
+    fullName: u.fullName,
+    jobTitle: u.jobTitle,
+    avatarDataUrl: u.avatarDataUrl,
     workspaceId: u.workspaceId,
     workspaceRole: u.workspaceRole,
   };
@@ -199,11 +204,42 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const r = (body ?? {}) as {
       workspaceName?: unknown;
       inviteToken?: unknown;
+      fullName?: unknown;
+      jobTitle?: unknown;
     };
     const inviteToken =
       typeof r.inviteToken === "string" && r.inviteToken.trim()
         ? r.inviteToken.trim()
         : null;
+
+    // fullName: UX-required (форма требует), but API is defensive — if missing
+    // we derive from email prefix (mirror the migration backfill so existing
+    // and new users share the same fallback rule). Explicit empty string is
+    // rejected so client bugs surface loudly.
+    let fullName: string;
+    if (r.fullName === undefined) {
+      const prefix = parsed.email.split("@")[0] ?? "";
+      fullName =
+        prefix.charAt(0).toUpperCase() + prefix.slice(1) || parsed.email;
+    } else {
+      if (typeof r.fullName !== "string")
+        return c.json({ error: "Имя должно быть строкой" }, 400);
+      const trimmed = r.fullName.trim();
+      if (!trimmed) return c.json({ error: "Имя не может быть пустым" }, 400);
+      if (trimmed.length > 80)
+        return c.json({ error: "Имя не длиннее 80 символов" }, 400);
+      fullName = trimmed;
+    }
+
+    let jobTitle: string | null = null;
+    if (r.jobTitle != null && r.jobTitle !== "") {
+      if (typeof r.jobTitle !== "string")
+        return c.json({ error: "Должность должна быть строкой" }, 400);
+      const t = r.jobTitle.trim();
+      if (t.length > 80)
+        return c.json({ error: "Должность не длиннее 80 символов" }, 400);
+      jobTitle = t || null;
+    }
 
     let invite:
       | typeof workspaceInvites.$inferSelect
@@ -254,6 +290,8 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
           passwordHash,
           isSysadmin: false,
           isVerified: false,
+          fullName,
+          jobTitle,
           createdAt: now,
           updatedAt: now,
         })
@@ -343,9 +381,10 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     }
 
     const { token } = createVerificationToken(db, userId);
+    const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
       await getEmailClient().send(
-        generateVerificationEmail(parsed.email, token),
+        generateVerificationEmail(parsed.email, verifyLink),
       );
     } catch (e) {
       console.error("[auth] failed to send verification email:", e);
@@ -403,6 +442,9 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         email: row.email,
         isSysadmin: row.isSysadmin,
         isVerified: true,
+        fullName: row.fullName,
+        jobTitle: row.jobTitle,
+        avatarDataUrl: row.avatarDataUrl,
         workspaceId: member?.workspaceId ?? 0,
         workspaceRole: member?.role ?? "owner",
       }),
@@ -497,6 +539,9 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         email: row.email,
         isSysadmin: row.isSysadmin,
         isVerified: row.isVerified,
+        fullName: row.fullName,
+        jobTitle: row.jobTitle,
+        avatarDataUrl: row.avatarDataUrl,
         workspaceId: member?.workspaceId ?? 0,
         workspaceRole: member?.role ?? "member",
       }),
@@ -516,6 +561,46 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const user = c.get("user");
     if (!user) return c.json({ error: "unauthorized" }, 401);
     return c.json({ user: publicUser(user) });
+  });
+
+  // Self-edit profile: any authenticated user can update their own display
+  // name, job title, avatar. Email & password are not touched here.
+  app.patch("/me/profile", async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ error: "unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid json" }, 400);
+    }
+    const parsed = parseProfilePatch(body);
+    if (typeof parsed === "string") return c.json({ error: parsed }, 400);
+
+    if (Object.keys(parsed).length === 0) {
+      // Nothing to update — just echo current state.
+      return c.json({ user: publicUser(user) });
+    }
+
+    const now = new Date();
+    db.update(users)
+      .set({ ...parsed, updatedAt: now })
+      .where(eq(users.id, user.id))
+      .run();
+
+    return c.json({
+      user: publicUser({
+        ...user,
+        fullName: parsed.fullName ?? user.fullName,
+        jobTitle:
+          parsed.jobTitle !== undefined ? parsed.jobTitle : user.jobTitle,
+        avatarDataUrl:
+          parsed.avatarDataUrl !== undefined
+            ? parsed.avatarDataUrl
+            : user.avatarDataUrl,
+      }),
+    });
   });
 
   // Generic OK message — kept identical for found / not-found / blocked /
@@ -545,8 +630,9 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     if (!row || row.isBlocked || !row.isVerified) return c.json(FORGOT_OK);
 
     const { token } = createPasswordResetToken(db, row.id);
+    const resetLink = `${resolveAppUrl(c)}/reset-password?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generatePasswordResetEmail(row.email, token));
+      await getEmailClient().send(generatePasswordResetEmail(row.email, resetLink));
     } catch (e) {
       console.error("[auth] failed to send password reset email:", e);
     }

@@ -134,10 +134,12 @@ npx vitest run __tests__/server/         # все backend-тесты
 - `DELETE /api/shops/:id/members/:userId` — отозвать + cascade-delete per-user `products`/`finance_transactions`/`import_runs`/`shop_user_settings` этого юзера в этом shop'е.
 
 **Workspace endpoints** (`server/routes/workspace.ts`):
-- `GET /api/workspace/me` — текущая команда + members (любому участнику).
-- `PATCH /api/workspace/me` — name/slug (owner only).
-- `POST/GET/DELETE /api/workspace/me/invites` — приглашения (owner/manager). Email-токен TTL 7 дней; `inviteEmail` шаблон в `server/email/templates.ts`.
+- `GET /api/workspace/me` — текущая команда + members (любому участнику). Members несут `fullName / jobTitle / avatarDataUrl` для рендеринга в TeamPage.
+- `PATCH /api/workspace/me` — name/slug/color/logoDataUrl/`useLogoAsAppIcon` (owner only). Логотип валидируется через `validateImageDataUrl`. При сбросе логотипа (`logoDataUrl: null`) UI отправляет `useLogoAsAppIcon: false` в том же PATCH'е — сервер не сторожит orphan-флаг сам.
+- `POST/GET/DELETE /api/workspace/me/invites` — приглашения (owner/manager). Email-токен TTL 7 дней; `inviteEmail` шаблон в `server/email/templates.ts`. Ссылка строится через `resolveAppUrl(c) + /invite/:token`.
 - `PATCH /api/workspace/me/members/:userId` — смена роли (owner only для owner-promote/demote).
+- `PATCH /api/workspace/me/members/:userId/profile` — owner-edit профиля участника (fullName / jobTitle / avatarDataUrl). Owner-only по идее — редактировать чужую идентичность это привилегия. Self-edit идёт через `PATCH /api/auth/me/profile`. Тело валидирует тот же `parseProfilePatch`.
+- `GET /api/workspace/me/shop-access` — матрица «кто к каким shop'ам имеет доступ» для TeamPage. Owner видит все shops команды (canEdit=true для всех). Manager видит свои созданные shops (canEdit=true) + shops где он сам assigned (canEdit=false, только его собственная assignment-строка). Каждый shop несёт `createdByUserId / createdByEmail`, каждый assignment — `grantedByUserId / grantedByEmail`. Для read-only shops UI рендерит «доступ от X», для shops «создан X».
 - `DELETE /api/workspace/me/members/:userId` — удалить участника (owner/manager; нельзя удалить последнего owner'а).
 - `GET /api/invites/:token` (public) → `{workspaceName, role, email, expiresAt}`. `POST /api/invites/:token/accept` (auth) — присоединение.
 
@@ -150,6 +152,38 @@ npx vitest run __tests__/server/         # все backend-тесты
 1. В `server/db/schema.ts`: FK `shop_id` ON DELETE CASCADE + колонка `user_id NOT NULL` FK на users.
 2. В роуте: `userCanAccessShop` для reads/mutations, `eq(table.userId, currentUser.id)` всегда. Owner-only мутации — `canManageWorkspace(role)`. Sysadmin-only — `requireSysadmin`.
 3. В тестах создавай юзера + workspace + дефолтный shop через `loginAs(env, email, password)` (helper в `__tests__/server/_helpers.ts`); для assignment-кейсов — `POST /api/shops/:id/members`. См. `__tests__/server/shop-assignment.test.ts` и `multitenant.test.ts`.
+
+### Профили пользователей и брендинг команды (миграции 0026–0027)
+
+**`users.full_name` (NOT NULL DEFAULT '') + `users.job_title` (nullable) + `users.avatar_data_url` (nullable)** — миграция `0026_user_profile`. Backfill для existing rows: `full_name = Upper(emailPrefix)` (повторяет fallback в `POST /api/auth/register`, чтобы старые и новые юзеры жили под одной идентификационной логикой).
+
+**`workspaces.use_logo_as_app_icon` (boolean, default 0)** — миграция `0027`. Когда `true` AND `logoDataUrl` задан, основной SPA-header заменяет дефолтную «Oz»-плитку на лого команды (white-label). Off by default — большинство команд предпочитают продуктовую метку.
+
+**Регистрация**: форма `/register` обязательно требует `fullName` (плейсхолдер «Имя», `maxLength=80`). `jobTitle` опционален. Если API получает запрос без `fullName` — сервер делает defensive-fallback из email-префикса (то же правило, что в миграции). Пустая строка как `fullName` отклоняется (400).
+
+**Endpoints**:
+- `PATCH /api/auth/me/profile` — self-edit (любой залогиненный). Поля `{fullName?, jobTitle?, avatarDataUrl?}` все optional, отсутствие = no-op. `jobTitle: null` или `""` → очистка. `avatarDataUrl: null` → удаление аватара. Возвращает обновлённый `publicUser`.
+- `PATCH /api/workspace/me/members/:userId/profile` — owner-only (см. workspace endpoints выше).
+
+**Аватары + логотипы (общий контракт хранения)**:
+- Хранятся как **base64 data URL'ы** прямо в TEXT-колонках (`avatar_data_url`, `logo_data_url`). Допустимые форматы: `png | jpeg | gif | webp | svg+xml`.
+- Лимит — **200 КБ закодированного размера** (`IMAGE_DATA_URL_MAX_LEN`). Это sanity-cap, не первая линия защиты: клиент **обязан** ужать изображение перед отправкой через `src/lib/imageResize.ts:resizeImage(file, opts)`.
+  - Аватары: `mode: "crop-square"`, `outputType: "image/jpeg"`, `maxSize: 256px`, `jpegQuality: 0.85`.
+  - Логотипы: `mode: "fit"`, `outputType: "image/png"` (часто прозрачные), `maxSize: 256px` — пропорции сохраняются (некоторые лого — широкие wordmark'и).
+  - SVG проходит насквозь без растеризации — `fileToDataUrl` читает текст как есть.
+- Бэк-валидация — единственная точка истины `server/lib/dataUrl.ts:validateImageDataUrl(value)`; используется и в `workspace.update`, и в `parseProfilePatch`. Все user-facing ошибки на русском.
+
+**Frontend**:
+- `src/components/Avatar.tsx` — единая компонента. При наличии `avatarDataUrl` — `<img>` с `object-fit: cover` и круглым `border-radius`. Иначе — инициалы (1–2 буквы) на детерминированном пастельном фоне (HSL hash от `name || email`). Используется и в основном SPA (`AppHeader`, `TeamPage`), и в sysadmin SPA (`atoms.tsx` теперь реэкспорт).
+- `src/components/ProfileEditor.tsx` — portal-модалка для редактирования профиля. `mode: "self"` → `api.auth.updateProfile`, `mode: "member"` → `api.workspace.updateMemberProfile(userId, …)`. Используется из `AppHeader` (self), `TeamPage` (member-edit owner'ом), sysadmin `UsersSection`.
+- `AppHeader` справа: avatar + (fullName || email) + (jobTitle || роль). Клик — открывает `ProfileEditor` в `mode="self"`. После сохранения вызывается `refresh()` из `AuthContext`, чтобы `user.avatarDataUrl` и `fullName` в UI обновились.
+- `WorkspaceBrandingPopover` — управляет цветом, логотипом и `useLogoAsAppIcon`. Загрузка лого → автоматический resize через `resizeImage` (`fit / 256 / image/png`). Кнопка «Использовать логотип как иконку приложения» появляется только когда логотип уже загружен; снимается автоматически при удалении логотипа (одним PATCH'ем, чтобы сервер не держал orphan-флаг).
+
+**При добавлении новой профильной фичи**:
+1. Бэк-валидация — расширяй `parseProfilePatch` в `server/lib/profile.ts`, не дублируй inline в роутах.
+2. Если новое поле — изображение, используй `validateImageDataUrl` и `imageResize.ts` на клиенте; не дублируй регулярки/лимиты.
+3. `SessionUser` + `publicUser` + `AuthUser` в `src/api/index.ts` — синхронно. Любое новое поле в `SessionUser` должно попасть и в `validateSession` (initial select + finalize), и в `publicUser` (login/register/verify responses).
+4. Если поле визуально показывается в TeamPage members — добавь его в `listMembers` selector в `server/routes/workspace.ts` и в `WorkspaceMember` в `src/api/index.ts`.
 
 ### Версионирование тарифов логистики (миграция 0016)
 
@@ -168,7 +202,9 @@ npx vitest run __tests__/server/         # все backend-тесты
 - `GET /api/refs?shopId=…` отдаёт `logisticsClusterTariffs` (тарифы активного для пары (shop, user) набора) + `activeTariffSetId`.
 - Legacy `/refs/cluster-logistics/upload` под `requireSysadmin` — создаёт **новый** глобальный набор с автоименем «Глобальный набор от YYYY-MM-DD».
 
-UI: `src/components/TariffSetsControl.tsx` рендерится в секции «Логистика» в `ShopSettings` — селектор + загрузка (scope «мой» / «общий» — последнее только для sysadmin) + удаление. Принимает `isOwner` prop: owner/manager пишет выбор в `shops.tariffSetId` (PATCH /shops/:id), member — через `PUT /api/settings/tariff-set` (override).
+UI: `src/components/TariffSetsControl.tsx` рендерится в секции «Логистика» в `ShopSettings` — селектор + загрузка (scope «команда» / «общий» — последнее только для sysadmin) + удаление. **scope=shop в API эквивалентен workspace-scoped набору** (сервер берёт `workspace_id` из `shopId`), поэтому в UI лейбл — «Для команды», а не «Только для меня». «Общий (всем командам платформы)» — только sysadmin. Принимает `isOwner` prop: owner/manager пишет выбор в `shops.tariffSetId` (PATCH /shops/:id), member — через `PUT /api/settings/tariff-set` (override).
+
+`ShopSettings` (секция «Логистика», блок «Матрица тарифов Ozon») умеет создать workspace-scoped набор прямо из .xlsx-загрузчика: автоимя `Матрица от YYYY-MM-DD HH:MM`, после загрузки набор сразу активируется на текущем shop (owner — через `shops.tariffSetId`, member — через per-user override). Стат-карточка («В базе: N тарифов · K кластеров») перечитывается при смене активного набора (`useEffect` зависит от `[shopId, currentTariffSetId]`).
 
 ### Конвенции значений
 
@@ -201,17 +237,21 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
 
 ### Backend-структура
 
-- `server/db/schema.ts` — Drizzle-схема. Ключевые таблицы: `workspaces`, `workspace_members`, `workspace_invites`, `users` (с `is_sysadmin`, без `role`), `sessions`, `email_verification_tokens`, `smtp_settings`, `shops` (со `workspace_id`, без `user_id`), `shop_member`, `shop_user_settings`, `products` (PK/UNIQUE `(shop_id, user_id, article_id)`), `finance_transactions` (PK `(shop_id, user_id, operation_id)`), `import_runs` (с audit `user_id` + scope), `user_settings`, `logistics_cluster_tariff_sets` (со `workspace_id`), `logistics_cluster_tariffs`, `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`. Удалены в ходе SaaS-миграций: `shop_access` (0020), `api_credentials` (0018), `users.role` (0019).
+- `server/db/schema.ts` — Drizzle-схема. Ключевые таблицы: `workspaces` (с `logo_data_url`, `use_logo_as_app_icon`), `workspace_members`, `workspace_invites`, `users` (с `is_sysadmin`, `is_blocked`, `full_name` NOT NULL DEFAULT '', `job_title`, `avatar_data_url`; без `role`), `sessions`, `email_verification_tokens`, `smtp_settings`, `shops` (со `workspace_id`, без `user_id`), `shop_member`, `shop_user_settings`, `products` (PK/UNIQUE `(shop_id, user_id, article_id)`), `finance_transactions` (PK `(shop_id, user_id, operation_id)`), `import_runs` (с audit `user_id` + scope), `user_settings`, `logistics_cluster_tariff_sets` (со `workspace_id`), `logistics_cluster_tariffs`, `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`. Удалены в ходе SaaS-миграций: `shop_access` (0020), `api_credentials` (0018), `users.role` (0019).
 - `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
-- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations`). SaaS-миграции: `0019_workspaces`, `0020_workspace_cutover`, `0021_shop_assignment_and_overrides`.
+- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations`). SaaS-миграции: `0019_workspaces`, `0020_workspace_cutover`, `0021_shop_assignment_and_overrides`. Профиль-миграции: `0026_user_profile` (full_name/job_title/avatar_data_url + backfill full_name из email-префикса), `0027_workspace_logo_as_app_icon`.
 - `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireSysadmin` — гейты для роутов; `canManageWorkspace(role)` для owner/manager-only мутаций; `userCanAccessShop` / `visibleShopIds` для scoped reads.
-- `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout (шаблоны `verifyEmail`, `inviteEmail`).
-- `server/routes/{auth,admin,workspace,refs,shops,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов. `shops.ts` — CRUD магазинов + assignment endpoints. `workspace.ts` — управление командой и invite-флоу.
+- `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `SessionUser` несёт `fullName / jobTitle / avatarDataUrl`. `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout (шаблоны `verifyEmail`, `inviteEmail`, `passwordReset`); шаблоны теперь принимают **готовую ссылку**, а не токен — построение ссылки на стороне роута (см. `server/lib/appUrl.ts`).
+- `server/lib/` — переиспользуемые валидаторы / билдеры между роутами:
+  - `dataUrl.ts` → `validateImageDataUrl(value)` + константы `IMAGE_DATA_URL_RE`, `IMAGE_DATA_URL_MAX_LEN` (~200 КБ). Используется для аватаров и логотипа workspace.
+  - `profile.ts` → `parseProfilePatch(raw)` — единая валидация PATCH-payload'а для self-edit и owner-edit (fullName ≤ 80, jobTitle nullable ≤ 80, avatarDataUrl через `validateImageDataUrl`).
+  - `appUrl.ts` → `resolveAppUrl(c)` для построения базовых URL писем: `process.env.APP_URL` → заголовок `Origin` (только в non-production, чтобы phishing-Origin не подменил ссылки) → `http://localhost:5173`. Применяется ко всем письмам (verify, reset, invite).
+- `server/routes/{auth,admin,workspace,refs,shops,products,settings,credentials,import,finance,analytics}.ts` — по роуту на тему. `import.ts` экспортирует `runCatalogImport` и `runFinanceImport` для тестов. `shops.ts` — CRUD магазинов + assignment endpoints. `workspace.ts` — управление командой + invite-флоу + owner-edit профилей.
 - `server/settings/tariffSets.ts` — `resolveTariffSetId(db, shopId, userId?)`: override → shop default → последний global → null.
 - `server/settings/shopSettings.ts` — `resolveShopSettings(db, shopId, userId)` / `upsertShopUserSettings` / `clearShopUserSettings` / `userHasShopOverrides`. Per-user overrides поверх shops.
 - `server/settings/defaults.ts` — `readDefaultTaxSettings(db)` для seed/новых shops.
 - `server/ozon/` — клиент Seller API (`client.ts` с throttle 700мс + retry на 429/5xx), обёртки эндпоинтов (`catalog.ts`, `finance.ts`), маппинг (`mapToProduct.ts`), классификация операций (`classifyOperation.ts`), типы (`types.ts`). `resolveCredentials(db, shopId)` — только shop-уровень (глобальный fallback удалён в 0018).
-- `src/sysadmin/` — отдельный SPA для платформенных админов. Свой `vite.config.sysadmin.ts`, dev-port 5174, build → `dist/sysadmin/`. Не имеет доступа к workspace-функционалу (calc/finance/import); только users, workspaces, SMTP, system.
+- `src/sysadmin/` — отдельный SPA для платформенных админов. Свой `vite.config.sysadmin.ts`, dev-port 5174, build → `dist/sysadmin/`. Не имеет доступа к workspace-функционалу (calc/finance/import); только users, workspaces, SMTP, system. Аватарную / профильную логику переиспользует через `src/components/Avatar.tsx` (sysadmin-локальная копия в `atoms.tsx` удалена — реэкспорт).
 
 ### Импорт из Ozon (Фазы 2–3)
 
@@ -255,7 +295,9 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
   - Env-переменная `SMTP_SECURE` (опциональная) — поддержана `readSmtpFromEnv`.
   - `POST /api/admin/smtp/test` принимает опциональный `subject` и при `describeEmailSource() === "console"` сразу возвращает 400 с предупреждением «SMTP не настроен — письма пишутся в stdout, а не отправляются» (без попытки отправки), плюс пробрасывает в ответ полные поля nodemailer-ошибки (`code`, `responseCode`, `response`, `command`) — UI показывает их в alert, чтобы не лезть в логи сервера.
   - В UI: автозеркалирование `User → From` (пока `From` пустой или совпадает с предыдущим `User`); placeholder порта подстраивается под выбранный `secure`-режим. Mail.ru/Yandex/Gmail требуют, чтобы email в `From` совпадал с `User` — об этом подсказка прямо в форме.
-- **Email-шаблон** `server/email/templates.ts` уже на русском. При добавлении новых писем держи единообразный стиль (Noto-friendly inline CSS, кнопка `var(--accent)`-цвета, fallback ссылка для Plain text).
+- **Email-шаблон** `server/email/templates.ts` уже на русском. При добавлении новых писем держи единообразный стиль (Noto-friendly inline CSS, кнопка `var(--accent)`-цвета, fallback ссылка для Plain text). **Шаблоны принимают готовую ссылку**, а не raw-токен — построение базовой URL централизовано в `server/lib/appUrl.ts:resolveAppUrl(c)`.
+- **База URL писем** — `resolveAppUrl(c)` строится по приоритету: `process.env.APP_URL` (явный override для прода) → заголовок `Origin` запроса (только в non-production, чтобы dev по LAN — `http://192.168.1.50:5173` — работал без env-тюнинга) → `http://localhost:5173`. В проде Origin **намеренно не доверяется** — иначе атакующий мог бы сгенерировать phishing-grade ссылку через подменённый заголовок. Все три типа писем (verify, password reset, invite) идут через этот резолвер.
+- **Self-profile** (`PATCH /api/auth/me/profile`) — см. секцию «Профили пользователей и брендинг команды». Email и пароль через этот endpoint не меняются.
 - **Password reveal toggle** — компонент `Field` в `src/components/auth/AuthShell.tsx` для `type="password"` рендерит иконку-глазик внутри инпута (`Eye` / `EyeOff` из lucide). Каждое поле управляет своим состоянием независимо; кнопка `tabIndex={-1}`, чтобы Tab её пропускал.
 - **При добавлении пути в sysadmin-консоли**: `requireSysadmin` в `server/middleware/session.ts` уже отсеивает не-sysadmin'ов. Не дублируй проверку в роуте; защищай через монтирование (`app.route('/admin', adminRoutes)` уже под `requireSysadmin`). UI пиши в `src/sysadmin/`, не в основном SPA — у обычных юзеров доступа к админке нет.
 
@@ -271,3 +313,5 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
 - При расширении `OzonCommissions` (новые поля API) обнови оба места: `src/types/index.ts` и `server/ozon/types.ts:OzonPriceItem.commissions` (последний импортирует из первого).
 - При добавлении новой схемы поставки или поля в `ProductInput` — синхронно правь `products` в `server/db/schema.ts`, валидацию в `server/routes/products.ts:validateInput`, маппер `dbToRow`/`inputToColumns` и `seed.mjs`. Не забудь про `user_id` колонку в `products` — у каждого assignee свои manual-поля.
 - При работе с `MappedCatalogEntry` помни различие: **`patch` — поля, всегда обновляемые из Ozon**; **`costPrice` и `ozonSku` — отдельные опциональные поля рядом** (записываются только при `> 0` / `!= null` через условный спред). Не клади их в `patch`, иначе сломаешь логику «не затирать локальное значение, когда Ozon не отдал данных».
+- Для аватаров/логотипов **не сериализуй data URL'ы из бэка в UI как обычные строки в местах, где они не показываются** — они весят до 200 КБ и легко раздуют JSON-ответы. `WorkspaceMember.avatarDataUrl` и `users.avatar_data_url` целенаправленно сюда уже включены (UI их рендерит), не размножай это для эндпоинтов, где аватар не нужен.
+- Интеграционные тесты профилей и email-link'ов: `__tests__/server/profile.test.ts` (register с fullName/jobTitle, self-PATCH, owner-PATCH, валидаторы), `__tests__/server/email-links.test.ts` (env → Origin → fallback, Origin блокируется в production), `__tests__/server/credentials-isolation.test.ts` (cross-workspace изоляция Ozon-кредов).

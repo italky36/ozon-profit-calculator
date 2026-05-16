@@ -206,7 +206,7 @@ export default function SysadminApp() {
                 textOverflow: "ellipsis",
               }}
             >
-              {user.email}
+              {user.fullName || user.email}
             </div>
           )}
         </div>
@@ -221,8 +221,13 @@ export default function SysadminApp() {
           {!narrow && (
             <div style={{ textAlign: "right", lineHeight: 1.2 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a" }}>
-                {user.email}
+                {user.fullName || user.email}
               </div>
+              {user.jobTitle && (
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {user.jobTitle}
+                </div>
+              )}
               <div
                 style={{
                   fontSize: 11,
@@ -238,7 +243,12 @@ export default function SysadminApp() {
               </div>
             </div>
           )}
-          <Avatar name={user.email} size={narrow ? 32 : 36} />
+          <Avatar
+            name={user.fullName || user.email}
+            avatarDataUrl={user.avatarDataUrl}
+            email={user.email}
+            size={narrow ? 32 : 36}
+          />
           {narrow ? (
             <button
               type="button"

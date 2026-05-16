@@ -5,12 +5,14 @@ export interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (
-    email: string,
-    password: string,
-    workspaceName: string,
-    inviteToken?: string,
-  ) => Promise<{ message: string }>;
+  register: (input: {
+    email: string;
+    password: string;
+    fullName: string;
+    jobTitle?: string;
+    workspaceName?: string;
+    inviteToken?: string;
+  }) => Promise<{ message: string }>;
   verifyEmail: (token: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;

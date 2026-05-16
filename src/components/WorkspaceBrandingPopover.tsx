@@ -1,14 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import { Trash2, Upload, X } from "lucide-react";
+import { Eye, EyeOff, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
+import {
+  IMAGE_DATA_URL_MAX_LEN,
+  resizeImage,
+} from "../lib/imageResize";
 
 interface Props {
   workspaceName: string;
   initialColor: string | null;
   initialLogo: string | null;
+  initialUseLogoAsAppIcon: boolean;
   canEdit: boolean;
   onClose: () => void;
-  onUpdated: (next: { color: string | null; logoDataUrl: string | null }) => void;
+  onUpdated: (next: {
+    color: string | null;
+    logoDataUrl: string | null;
+    useLogoAsAppIcon: boolean;
+  }) => void;
   /** Anchor coordinates (badge bottom-left) so we don't depend on layout libs. */
   anchorRect: { left: number; top: number };
 }
@@ -29,25 +38,17 @@ const COLOR_PRESETS = [
 ];
 
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-/** Same cap as backend. Encoded length, not file bytes — base64 inflates ~33%. */
-const LOGO_MAX_LEN = 200_000;
-
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") resolve(reader.result);
-      else reject(new Error("Не удалось прочитать файл"));
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Ошибка чтения"));
-    reader.readAsDataURL(file);
-  });
-}
+const LOGO_MAX_LEN = IMAGE_DATA_URL_MAX_LEN;
+/** Output max dimension for the rasterised logo. Header chip & list previews
+ * never render above ~64px, so 256 leaves plenty of room for retina + future
+ * surfaces (auth shell, breadcrumbs) without bloating storage. */
+const LOGO_OUT_PX = 256;
 
 export default function WorkspaceBrandingPopover({
   workspaceName,
   initialColor,
   initialLogo,
+  initialUseLogoAsAppIcon,
   canEdit,
   onClose,
   onUpdated,
@@ -56,6 +57,9 @@ export default function WorkspaceBrandingPopover({
   const [color, setColor] = useState(initialColor ?? "");
   const [hexInput, setHexInput] = useState(initialColor ?? "");
   const [logo, setLogo] = useState<string | null>(initialLogo);
+  const [useLogoAsAppIcon, setUseLogoAsAppIcon] = useState<boolean>(
+    initialUseLogoAsAppIcon,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -82,17 +86,27 @@ export default function WorkspaceBrandingPopover({
   const persist = async (patch: {
     color?: string | null;
     logoDataUrl?: string | null;
+    useLogoAsAppIcon?: boolean;
   }) => {
     setBusy(true);
     setError(null);
     try {
       const res = await api.workspace.update(patch);
-      onUpdated({ color: res.color, logoDataUrl: res.logoDataUrl });
+      onUpdated({
+        color: res.color,
+        logoDataUrl: res.logoDataUrl,
+        useLogoAsAppIcon: res.useLogoAsAppIcon,
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const toggleLogoAsAppIcon = async (next: boolean) => {
+    setUseLogoAsAppIcon(next);
+    await persist({ useLogoAsAppIcon: next });
   };
 
   const applyColor = (next: string | null) => {
@@ -119,10 +133,16 @@ export default function WorkspaceBrandingPopover({
       return;
     }
     try {
-      const dataUrl = await fileToDataUrl(file);
+      // Logos commonly have transparency — keep PNG output. Aspect ratio is
+      // preserved (some logos are wide wordmarks). SVGs pass through as text.
+      const dataUrl = await resizeImage(file, {
+        mode: "fit",
+        maxSize: LOGO_OUT_PX,
+        outputType: "image/png",
+      });
       if (dataUrl.length > LOGO_MAX_LEN) {
         setError(
-          `Файл слишком большой (макс. ~${Math.floor(LOGO_MAX_LEN / 1024)} КБ закодированного размера). Уменьшите изображение.`,
+          `Файл слишком большой (макс. ~${Math.floor(LOGO_MAX_LEN / 1024)} КБ). Попробуйте другой файл или SVG.`,
         );
         return;
       }
@@ -135,7 +155,10 @@ export default function WorkspaceBrandingPopover({
 
   const removeLogo = () => {
     setLogo(null);
-    void persist({ logoDataUrl: null });
+    setUseLogoAsAppIcon(false);
+    // Clear both in one round-trip so the server doesn't keep an orphaned
+    // "use logo as app icon" flag pointing at a now-missing image.
+    void persist({ logoDataUrl: null, useLogoAsAppIcon: false });
   };
 
   // Position: just below the badge, aligned to its left edge, but clamped to
@@ -388,9 +411,45 @@ export default function WorkspaceBrandingPopover({
           className="muted"
           style={{ margin: 0, fontSize: 11, lineHeight: 1.35 }}
         >
-          PNG/SVG/JPEG, до ~{Math.floor(LOGO_MAX_LEN / 1024)} КБ. Квадратное
-          изображение смотрится лучше.
+          PNG/JPEG/SVG. Файл ужимается автоматически до {LOGO_OUT_PX}px по
+          длинной стороне, пропорции сохраняются.
         </p>
+        {logo && canEdit && (
+          <button
+            type="button"
+            onClick={() => void toggleLogoAsAppIcon(!useLogoAsAppIcon)}
+            disabled={busy}
+            title={
+              useLogoAsAppIcon
+                ? "Логотип отображается в шапке. Нажмите, чтобы выключить."
+                : "Логотип скрыт. Нажмите, чтобы показать в шапке вместо «Oz»."
+            }
+            aria-pressed={useLogoAsAppIcon}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              padding: "5px 9px 5px 7px",
+              borderRadius: 6,
+              cursor: busy ? "not-allowed" : "pointer",
+              background: useLogoAsAppIcon
+                ? "color-mix(in srgb, var(--accent) 12%, #fff)"
+                : "transparent",
+              border: "1px solid "
+                + (useLogoAsAppIcon ? "var(--accent)" : "var(--border)"),
+              color: useLogoAsAppIcon ? "var(--accent)" : "var(--muted)",
+              fontFamily: "inherit",
+              fontSize: 12,
+              fontWeight: 500,
+              lineHeight: 1.2,
+              alignSelf: "flex-start",
+              transition: "background .12s, color .12s, border-color .12s",
+            }}
+          >
+            {useLogoAsAppIcon ? <Eye size={14} /> : <EyeOff size={14} />}
+            <span>Логотип в шапке</span>
+          </button>
+        )}
         <input
           ref={fileRef}
           type="file"

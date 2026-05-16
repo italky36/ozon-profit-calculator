@@ -18,6 +18,7 @@ import {
   invalidateEmailClient,
 } from "../email/client";
 import { generateVerificationEmail } from "../email/templates";
+import { resolveAppUrl } from "../lib/appUrl";
 import { requireSysadmin } from "../middleware/session";
 
 type AdminEnv = { Variables: { user?: SessionUser } };
@@ -32,6 +33,9 @@ const userPayload = (u: typeof users.$inferSelect) => ({
   isSysadmin: u.isSysadmin,
   isVerified: u.isVerified,
   isBlocked: u.isBlocked,
+  fullName: u.fullName,
+  jobTitle: u.jobTitle,
+  avatarDataUrl: u.avatarDataUrl,
   createdAt: u.createdAt.toISOString(),
   updatedAt: u.updatedAt.toISOString(),
 });
@@ -193,8 +197,9 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       return c.json({ error: "user already verified" }, 400);
 
     const { token } = createVerificationToken(db, row.id);
+    const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generateVerificationEmail(row.email, token));
+      await getEmailClient().send(generateVerificationEmail(row.email, verifyLink));
     } catch (e) {
       console.error("[admin] failed to send verification email:", e);
       return c.json({ error: "failed to send email" }, 500);
