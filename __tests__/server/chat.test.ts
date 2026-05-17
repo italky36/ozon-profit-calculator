@@ -226,8 +226,8 @@ describe("chat: cross-workspace isolation", () => {
   it("pub/sub fans out only to subscribers of the same workspace", () => {
     const aEvents: ChatServerEvent[] = [];
     const bEvents: ChatServerEvent[] = [];
-    subscribe(a.workspaceId, (e) => aEvents.push(e));
-    subscribe(b.workspaceId, (e) => bEvents.push(e));
+    subscribe(a.workspaceId, (e) => aEvents.push(e), a.userId);
+    subscribe(b.workspaceId, (e) => bEvents.push(e), b.userId);
     publish(a.workspaceId, {
       type: "message.created",
       channelId: 1,
@@ -543,7 +543,7 @@ describe("chat: pub/sub event delivery", () => {
 
   it("POST message publishes a message.created event to the workspace bus", async () => {
     const events: ChatServerEvent[] = [];
-    subscribe(owner.workspaceId, (e) => events.push(e));
+    subscribe(owner.workspaceId, (e) => events.push(e), owner.userId);
     await env.app.request(`/api/chat/channels/${channelId}/messages`, {
       method: "POST",
       headers: j(owner.cookie),

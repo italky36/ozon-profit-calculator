@@ -37,6 +37,9 @@ interface ComposerProps {
   onSendWithAttachments: (text: string, files: File[]) => Promise<void>;
   onTypingStart?: () => void;
   onTypingStop?: () => void;
+  /** Suppress "Enter — отправить · Shift+Enter — новая строка" hint. Set
+   *  true on touch devices where keyboard shortcuts don't apply. */
+  hideHints?: boolean;
 }
 
 export default function Composer({
@@ -47,6 +50,7 @@ export default function Composer({
   onSendWithAttachments,
   onTypingStart,
   onTypingStop,
+  hideHints,
 }: ComposerProps) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState<File[]>([]);
@@ -431,9 +435,11 @@ export default function Composer({
         >
           <Smile size={16} />
         </button>
-        <span style={{ fontSize: 11, color: "var(--muted, #888)" }}>
-          Enter — отправить · Shift+Enter — новая строка
-        </span>
+        {!hideHints && (
+          <span style={{ fontSize: 11, color: "var(--muted, #888)" }}>
+            Enter — отправить · Shift+Enter — новая строка
+          </span>
+        )}
         <button
           type="button"
           className="btn-primary"

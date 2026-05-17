@@ -1,10 +1,16 @@
 import { useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
-import { Pencil, Trash2 } from "lucide-react";
-import type { ChatMessage } from "../../api";
+import { MessageSquare, Pencil, Trash2 } from "lucide-react";
+import type { ChatMessage, WorkspaceMember } from "../../api";
 import Avatar from "../Avatar";
 import Attachment from "./Attachment";
 import ReactionsBar from "./ReactionsBar";
+import ReadByIndicator from "./ReadByIndicator";
+import ReadStatusTicks from "./ReadStatusTicks";
+import MessageActionsSheet from "./MessageActionsSheet";
+import UserPopover from "./UserPopover";
+import { useLongPress } from "../../lib/useLongPress";
+import { useSwipe } from "../../lib/useSwipe";
 
 const URL_RE = /(https?:\/\/[^\s<>]+)/g;
 const MENTION_RE = /@([\p{L}\p{N}_.-]{2,40})/gu;
@@ -75,6 +81,10 @@ function formatTime(ts: number): string {
 interface RenderOpts {
   mentionedKeys: Set<string>;
   myMentionKey: string | null;
+  /** Lookup `token-normalized → mention.userId`. Used to resolve a click
+   *  back to the workspace member for the popover. */
+  mentionByKey: Map<string, number>;
+  onMentionClick?: (userId: number, anchor: DOMRect) => void;
 }
 
 function renderMentionToken(
@@ -86,19 +96,43 @@ function renderMentionToken(
   const isResolved = opts.mentionedKeys.has(tokenKey);
   const isMine = opts.myMentionKey === tokenKey;
   if (!isResolved) return raw;
+  const resolvedUserId = opts.mentionByKey.get(tokenKey);
+  const baseStyle: React.CSSProperties = {
+    color: "var(--accent)",
+    fontWeight: isMine ? 700 : 500,
+    background: isMine ? "var(--accent-soft, #eef)" : undefined,
+    padding: isMine ? "0 4px" : undefined,
+    borderRadius: isMine ? 4 : undefined,
+  };
+  if (resolvedUserId == null || !opts.onMentionClick) {
+    return (
+      <span key={key} style={baseStyle}>
+        {raw}
+      </span>
+    );
+  }
   return (
-    <span
+    <button
       key={key}
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        opts.onMentionClick!(
+          resolvedUserId,
+          (e.currentTarget as HTMLElement).getBoundingClientRect(),
+        );
+      }}
       style={{
-        color: "var(--accent)",
-        fontWeight: isMine ? 700 : 500,
-        background: isMine ? "var(--accent-soft, #eef)" : undefined,
-        padding: isMine ? "0 4px" : undefined,
-        borderRadius: isMine ? 4 : undefined,
+        ...baseStyle,
+        border: "none",
+        background: baseStyle.background ?? "transparent",
+        cursor: "pointer",
+        font: "inherit",
+        padding: baseStyle.padding ?? 0,
       }}
     >
       {raw}
-    </span>
+    </button>
   );
 }
 
@@ -161,6 +195,23 @@ interface Props {
   onDelete: (id: number) => void;
   onEdit: (id: number, body: string) => Promise<void>;
   onToggleReaction: (messageId: number, emoji: string, mine: boolean) => void;
+  /** Open the thread panel for this message. Omitted when the message is
+   * already inside a thread (ThreadPanel doesn't show a nested-thread button). */
+  onOpenThread?: (messageId: number) => void;
+  /** Workspace roster — used for read-status tooltip + reader avatars. */
+  members?: WorkspaceMember[];
+  /** Count of other workspace members (total − author). Drives the
+   * «прочитано всеми» heuristic. Pass 0 (or omit) to suppress ticks. */
+  otherMembersCount?: number;
+  /** Touch-device mode: hide hover icons, enable long-press → bottom-sheet
+   *  and swipe-left → open thread. Desktop pass false. */
+  isTouch?: boolean;
+  /** Open / find-or-create a DM with the given workspace member. Wired
+   *  through ChatPage → ChatLayout → MessageStream. When omitted, the
+   *  «Написать в личку» button hides from the avatar / mention popover. */
+  onOpenDm?: (userId: number) => void;
+  /** Online userIds set — drives the presence dot on UserPopover avatars. */
+  onlineUsers?: Set<number>;
 }
 
 export default function MessageItem({
@@ -172,18 +223,31 @@ export default function MessageItem({
   onDelete,
   onEdit,
   onToggleReaction,
+  onOpenThread,
+  members,
+  otherMembersCount = 0,
+  isTouch = false,
+  onOpenDm,
+  onlineUsers,
 }: Props) {
   const isDeleted = message.deletedAt != null;
   const author = message.author;
   const displayName = author.fullName || author.email || "—";
   const role = author.jobTitle?.trim() || null;
   const mentionedKeys = new Set<string>();
+  const mentionByKey = new Map<string, number>();
   let myMentionKey: string | null = null;
   for (const m of message.mentions) {
     const nameKey = normalizeMention(m.name);
     const emailKey = normalizeMention(m.email.split("@")[0] ?? "");
-    if (nameKey) mentionedKeys.add(nameKey);
-    if (emailKey) mentionedKeys.add(emailKey);
+    if (nameKey) {
+      mentionedKeys.add(nameKey);
+      mentionByKey.set(nameKey, m.userId);
+    }
+    if (emailKey) {
+      mentionedKeys.add(emailKey);
+      mentionByKey.set(emailKey, m.userId);
+    }
     if (m.userId === currentUserId) {
       myMentionKey = nameKey || emailKey || null;
     }
@@ -192,6 +256,96 @@ export default function MessageItem({
   const [draft, setDraft] = useState(message.body);
   const [saving, setSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [popover, setPopover] = useState<{
+    user: {
+      userId: number;
+      email: string;
+      fullName: string;
+      jobTitle?: string | null;
+      avatarDataUrl?: string | null;
+    };
+    anchor: DOMRect;
+  } | null>(null);
+
+  /** Resolve a userId to a workspace member for popover content. Falls
+   *  back to author identity (for the avatar click case) or to a minimal
+   *  shell (for mention case when the user isn't in the cached roster). */
+  const resolveUserForPopover = (
+    userId: number,
+  ): {
+    userId: number;
+    email: string;
+    fullName: string;
+    jobTitle?: string | null;
+    avatarDataUrl?: string | null;
+  } | null => {
+    if (userId === author.userId) {
+      return {
+        userId: author.userId,
+        email: author.email,
+        fullName: author.fullName,
+        jobTitle: author.jobTitle,
+        avatarDataUrl: author.avatarDataUrl,
+      };
+    }
+    const m = members?.find((x) => x.userId === userId);
+    if (m) {
+      return {
+        userId: m.userId,
+        email: m.email,
+        fullName: m.fullName,
+        jobTitle: m.jobTitle,
+        avatarDataUrl: m.avatarDataUrl,
+      };
+    }
+    return null;
+  };
+
+  const openPopoverFor = (userId: number, anchor: DOMRect) => {
+    const u = resolveUserForPopover(userId);
+    if (!u) return;
+    setPopover({ user: u, anchor });
+  };
+
+  const canReplyInThread =
+    onOpenThread != null && message.parentMessageId == null && !isDeleted;
+  const longPress = useLongPress({
+    onLongPress: () => {
+      // Suppress when the message is already in edit mode — the user is
+      // interacting with the textarea, long-press would feel like a trap.
+      if (editing || isDeleted) return;
+      setSheetOpen(true);
+    },
+  });
+  const swipe = useSwipe({
+    onSwipeLeft: canReplyInThread
+      ? () => onOpenThread?.(message.id)
+      : undefined,
+    threshold: 60,
+    maxAngleDeg: 25,
+  });
+  // Compose touch handlers — long-press monitors hold, swipe monitors end.
+  // Both safely run together; clearing long-press timer on touchmove also
+  // protects against accidental fire when starting a swipe.
+  const touchHandlers = isTouch
+    ? {
+        onTouchStart: (e: React.TouchEvent) => {
+          longPress.onTouchStart(e);
+          swipe.onTouchStart(e);
+        },
+        onTouchMove: (e: React.TouchEvent) => {
+          longPress.onTouchMove(e);
+          swipe.onTouchMove(e);
+        },
+        onTouchEnd: (e: React.TouchEvent) => {
+          longPress.onTouchEnd();
+          swipe.onTouchEnd(e);
+        },
+        onTouchCancel: longPress.onTouchCancel,
+        onContextMenu: longPress.onContextMenu,
+      }
+    : {};
 
   const beginEdit = () => {
     setDraft(message.body);
@@ -242,17 +396,54 @@ export default function MessageItem({
         padding: "8px 12px",
         borderRadius: 8,
         alignItems: "flex-start",
+        // Disable native text selection only on touch — otherwise long-press
+        // would trigger the iOS "select word" popup instead of our sheet.
+        userSelect: isTouch ? "none" : "auto",
+        WebkitUserSelect: isTouch ? "none" : "auto",
+        WebkitTouchCallout: isTouch ? "none" : "default",
       }}
       className="chat-message"
+      {...touchHandlers}
     >
       <div style={{ flex: "0 0 auto", paddingTop: 2 }}>
-        <Avatar
-          name={author.fullName}
-          email={author.email}
-          avatarDataUrl={author.avatarDataUrl}
-          size={36}
-          isOnline={isAuthorOnline}
-        />
+        {author.userId > 0 ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              openPopoverFor(
+                author.userId,
+                (e.currentTarget as HTMLElement).getBoundingClientRect(),
+              );
+            }}
+            title={author.fullName || author.email}
+            style={{
+              border: "none",
+              background: "transparent",
+              padding: 0,
+              cursor: "pointer",
+              borderRadius: "50%",
+              lineHeight: 0,
+            }}
+            aria-label={`Профиль ${author.fullName || author.email}`}
+          >
+            <Avatar
+              name={author.fullName}
+              email={author.email}
+              avatarDataUrl={author.avatarDataUrl}
+              size={36}
+              isOnline={isAuthorOnline}
+            />
+          </button>
+        ) : (
+          <Avatar
+            name={author.fullName}
+            email={author.email}
+            avatarDataUrl={author.avatarDataUrl}
+            size={36}
+            isOnline={isAuthorOnline}
+          />
+        )}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
@@ -277,8 +468,18 @@ export default function MessageItem({
               </span>
             )}
           </span>
-          {!isDeleted && !editing && (
+          {!isDeleted && !editing && !isTouch && (
             <div style={{ marginLeft: "auto", display: "inline-flex", gap: 2 }}>
+              {onOpenThread && message.parentMessageId == null && (
+                <button
+                  type="button"
+                  className="btn-icon"
+                  onClick={() => onOpenThread(message.id)}
+                  title="Ответить в треде"
+                >
+                  <MessageSquare size={14} />
+                </button>
+              )}
               {canEdit && (
                 <button
                   type="button"
@@ -383,7 +584,12 @@ export default function MessageItem({
                     marginTop: jumboPx ? 4 : 2,
                   }}
                 >
-                  {linkify(message.body, { mentionedKeys, myMentionKey })}
+                  {linkify(message.body, {
+                    mentionedKeys,
+                    myMentionKey,
+                    mentionByKey,
+                    onMentionClick: openPopoverFor,
+                  })}
                 </div>
               );
             })()}
@@ -401,16 +607,99 @@ export default function MessageItem({
                 ))}
               </div>
             )}
-            <ReactionsBar
-              reactions={message.reactions}
-              currentUserId={currentUserId}
-              onToggle={(emoji, mine) =>
-                onToggleReaction(message.id, emoji, mine)
-              }
-            />
+            {(() => {
+              const isOwn = message.author.userId === currentUserId;
+              const showStatus =
+                isOwn &&
+                members &&
+                otherMembersCount > 0 &&
+                message.parentMessageId == null;
+              const prefix = showStatus ? (
+                <>
+                  <ReadStatusTicks
+                    readerUserIds={message.readerUserIds}
+                    otherMembersCount={otherMembersCount}
+                    members={members}
+                    authorUserId={message.author.userId}
+                  />
+                  <ReadByIndicator
+                    readerUserIds={message.readerUserIds}
+                    members={members}
+                  />
+                </>
+              ) : null;
+              return (
+                <ReactionsBar
+                  reactions={message.reactions}
+                  currentUserId={currentUserId}
+                  onToggle={(emoji, mine) =>
+                    onToggleReaction(message.id, emoji, mine)
+                  }
+                  prefix={prefix}
+                />
+              );
+            })()}
+            {onOpenThread &&
+              message.parentMessageId == null &&
+              message.replyCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onOpenThread(message.id)}
+                  style={{
+                    marginTop: 4,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "3px 8px",
+                    fontSize: 12,
+                    color: "var(--accent)",
+                    background: "transparent",
+                    border: "1px solid var(--accent-soft, #cce)",
+                    borderRadius: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  <MessageSquare size={12} />
+                  {message.replyCount}{" "}
+                  {message.replyCount === 1
+                    ? "ответ"
+                    : message.replyCount < 5
+                      ? "ответа"
+                      : "ответов"}
+                </button>
+              )}
           </>
         )}
       </div>
+      <MessageActionsSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        canEdit={canEdit && !isDeleted}
+        canDelete={canDelete && !isDeleted}
+        canReplyInThread={canReplyInThread}
+        onReact={(emoji) => {
+          const existing = message.reactions.find((r) => r.emoji === emoji);
+          const mine = existing?.userIds.includes(currentUserId) ?? false;
+          onToggleReaction(message.id, emoji, mine);
+        }}
+        onOpenThread={() => onOpenThread?.(message.id)}
+        onEdit={beginEdit}
+        onDelete={() => onDelete(message.id)}
+      />
+      {popover && (
+        <UserPopover
+          user={popover.user}
+          anchor={popover.anchor}
+          open
+          isSelf={popover.user.userId === currentUserId}
+          isOnline={onlineUsers?.has(popover.user.userId)}
+          onClose={() => setPopover(null)}
+          onOpenDm={(userId) => {
+            setPopover(null);
+            onOpenDm?.(userId);
+          }}
+        />
+      )}
     </div>
   );
 }

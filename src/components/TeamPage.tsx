@@ -20,6 +20,7 @@ import {
   Lock,
   Mail,
   MailPlus,
+  MessageSquare,
   Minus,
   Pencil,
   RefreshCw,
@@ -1456,6 +1457,9 @@ interface MemberRowProps {
   onDeleteAccount: (userId: number, email: string) => void;
   onRevokeInvite: (token: string, email: string) => void;
   onEditProfile: (userId: number) => void;
+  /** Open / find-or-create a DM with this user, then navigate to the chat
+   *  tab. Hidden when row is the current user. */
+  onOpenDm?: (userId: number) => void;
 }
 
 function MemberRow({
@@ -1476,6 +1480,7 @@ function MemberRow({
   onDeleteAccount,
   onRevokeInvite,
   onEditProfile,
+  onOpenDm,
 }: MemberRowProps) {
   const q = searchQuery ?? "";
   const isOwnerRow = row.kind === "member" && row.role === "owner";
@@ -1705,31 +1710,47 @@ function MemberRow({
               <span style={{ fontSize: 12 }}>Отозвать</span>
             </button>
           )
-        ) : row.kind === "member" && isWorkspaceOwner && !row.isYou ? (
+        ) : row.kind === "member" && !row.isYou ? (
           <>
-            <RowIconBtn
-              title="Редактировать профиль"
-              icon={<Pencil size={14} />}
-              disabled={busy}
-              onClick={() => onEditProfile(row.userId)}
-            />
-            <RowIconBtn
-              title={row.isBlocked ? "Разблокировать" : "Заблокировать"}
-              icon={
-                row.isBlocked ? <CircleCheck size={14} /> : <Ban size={14} />
-              }
-              disabled={busy}
-              onClick={() =>
-                onSetBlocked(row.userId, row.email, !row.isBlocked)
-              }
-            />
-            <RowIconBtn
-              title="Удалить сотрудника"
-              icon={<Trash2 size={14} />}
-              tone="danger"
-              disabled={busy}
-              onClick={() => onDeleteAccount(row.userId, row.email)}
-            />
+            {onOpenDm && (
+              <RowIconBtn
+                title="Написать в личку"
+                icon={<MessageSquare size={14} />}
+                disabled={busy}
+                onClick={() => onOpenDm(row.userId)}
+              />
+            )}
+            {isWorkspaceOwner && (
+              <>
+                <RowIconBtn
+                  title="Редактировать профиль"
+                  icon={<Pencil size={14} />}
+                  disabled={busy}
+                  onClick={() => onEditProfile(row.userId)}
+                />
+                <RowIconBtn
+                  title={row.isBlocked ? "Разблокировать" : "Заблокировать"}
+                  icon={
+                    row.isBlocked ? (
+                      <CircleCheck size={14} />
+                    ) : (
+                      <Ban size={14} />
+                    )
+                  }
+                  disabled={busy}
+                  onClick={() =>
+                    onSetBlocked(row.userId, row.email, !row.isBlocked)
+                  }
+                />
+                <RowIconBtn
+                  title="Удалить сотрудника"
+                  icon={<Trash2 size={14} />}
+                  tone="danger"
+                  disabled={busy}
+                  onClick={() => onDeleteAccount(row.userId, row.email)}
+                />
+              </>
+            )}
           </>
         ) : (
           <span style={{ fontSize: 11.5, color: "#94a3b8" }}>—</span>
@@ -2713,7 +2734,14 @@ function TeamSummary({
 // Main TeamPage
 // ===================================================================
 
-export default function TeamPage() {
+export interface TeamPageProps {
+  /** Optional handler invoked when the user clicks «Написать в личку» next
+   *  to a team member. Parent (App) is expected to find-or-create the DM
+   *  channel and navigate to the chat tab. */
+  onOpenDm?: (userId: number) => void;
+}
+
+export default function TeamPage({ onOpenDm }: TeamPageProps = {}) {
   const isMobile = useMediaQuery(`(max-width: ${MOBILE_BREAKPOINT}px)`);
 
   const [info, setInfo] = useState<WorkspaceInfo | null>(null);
@@ -3599,6 +3627,7 @@ export default function TeamPage() {
               onDeleteAccount={deleteMemberAccount}
               onRevokeInvite={revokeInvite}
               onEditProfile={(userId) => setEditingMemberId(userId)}
+              onOpenDm={onOpenDm}
             />
           ))}
           {filtered.length === 0 && (

@@ -88,6 +88,11 @@ export default function Avatar({
         width: size,
         height: size,
         flex: "0 0 auto",
+        verticalAlign: "middle",
+        // Suppress text-baseline contribution from inner inline-flex/text
+        // content — keeps the avatar's baseline at bottom-edge so it lines
+        // up identically with photo-variant (which has no text).
+        lineHeight: 0,
       }}
     >
       <span

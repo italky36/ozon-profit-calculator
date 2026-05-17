@@ -225,6 +225,34 @@
       "when": 1780200000000,
       "tag": "0031_chat_search",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1780300000000,
+      "tag": "0032_chat_reads",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1780400000000,
+      "tag": "0033_chat_threads",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1780500000000,
+      "tag": "0034_chat_dms",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1780600000000,
+      "tag": "0035_private_channels",
+      "breakpoints": true
     }
   ]
 }

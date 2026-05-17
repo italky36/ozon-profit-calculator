@@ -8,16 +8,21 @@ import {
 } from "../../api";
 import { useAuth } from "../../contexts/useAuth";
 import { ChatSocket } from "../../lib/chatSocket";
-import { Search } from "lucide-react";
-import ChannelList from "./ChannelList";
-import MessageStream from "./MessageStream";
-import Composer from "./Composer";
-import TypingIndicator from "./TypingIndicator";
-import SearchPanel from "./SearchPanel";
+import ChatLayout from "./layout/ChatLayout";
 
 const PAGE_SIZE = 50;
 
-export default function ChatPage() {
+export interface ChatPageProps {
+  /** Cross-tab intent: when set, ChatPage opens a DM with this user on the
+   *  next render and then calls onDmConsumed to clear it. */
+  pendingDmUserId?: number | null;
+  onDmConsumed?: () => void;
+}
+
+export default function ChatPage({
+  pendingDmUserId,
+  onDmConsumed,
+}: ChatPageProps = {}) {
   const { user } = useAuth();
   const canManage =
     user?.workspaceRole === "owner" || user?.workspaceRole === "manager";
@@ -48,6 +53,11 @@ export default function ChatPage() {
   /** Кэш members команды — для @-autocomplete и будущих DM-flyout'ов. */
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
+  /** When non-null, the right-side ThreadPanel is open for this root message. */
+  const [threadParentId, setThreadParentId] = useState<number | null>(null);
+  /** Recent ChatMessage events forwarded from WS for the open ThreadPanel.
+   * Trimmed to the last 50 — ThreadPanel merges idempotently by id. */
+  const [threadUpdates, setThreadUpdates] = useState<ChatMessage[]>([]);
 
   const socketRef = useRef<ChatSocket | null>(null);
   // Keep the active channel id in a ref so the WS event handler (registered
@@ -90,25 +100,119 @@ export default function ChatPage() {
     };
   }, [chatAvailable]);
 
+  // Cross-tab DM intent: when App sets pendingDmUserId (from TeamPage's
+  // «Написать» button), find-or-create the DM channel and switch to it.
+  // Cleared via onDmConsumed so we don't loop. Waits until channels are
+  // loaded — otherwise the freshly-created channel would be missing from
+  // the local list on render.
+  useEffect(() => {
+    if (!chatAvailable || pendingDmUserId == null || loadingChannels) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dm = await api.chat.openDm(pendingDmUserId);
+        if (cancelled) return;
+        setChannels((prev) =>
+          prev.some((c) => c.id === dm.id) ? prev : [...prev, dm],
+        );
+        setActiveChannelId(dm.id);
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      } finally {
+        if (!cancelled) onDmConsumed?.();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatAvailable, pendingDmUserId, loadingChannels, onDmConsumed]);
+
   // WS lifecycle: one socket per ChatPage mount.
   useEffect(() => {
     if (!chatAvailable) return;
     const handle = (event: ChatServerEvent) => {
       if (event.type === "message.created") {
-        if (event.channelId !== activeChannelIdRef.current) return;
         const payload = event.payload as ChatMessage;
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === payload.id)) return prev;
-          return [...prev, payload];
-        });
+        // Skip thread-replies in the channel feed; ThreadPanel listens
+        // separately. Reply rows still bump replyCount on the parent via the
+        // matching message.updated event.
+        const isReply = payload.parentMessageId != null;
+        if (event.channelId === activeChannelIdRef.current && !isReply) {
+          setMessages((prev) =>
+            prev.some((m) => m.id === payload.id) ? prev : [...prev, payload],
+          );
+        }
+        // Forward thread-relevant events to ThreadPanel (when it's open).
+        if (isReply || payload.replyCount > 0) {
+          setThreadUpdates((prev) => {
+            const next = [...prev, payload];
+            return next.length > 50 ? next.slice(-50) : next;
+          });
+        }
+        // Update unreadCount: bump on non-active channels for non-own,
+        // non-reply messages. Skip own messages — author already saw them.
+        if (
+          !isReply &&
+          payload.author.userId !== currentUserId &&
+          event.channelId !== activeChannelIdRef.current
+        ) {
+          setChannels((prev) =>
+            prev.map((c) =>
+              c.id === event.channelId
+                ? { ...c, unreadCount: c.unreadCount + 1 }
+                : c,
+            ),
+          );
+        }
         return;
       }
       if (event.type === "message.updated") {
-        if (event.channelId !== activeChannelIdRef.current) return;
         const payload = event.payload as ChatMessage;
-        setMessages((prev) =>
-          prev.map((m) => (m.id === payload.id ? payload : m)),
-        );
+        if (event.channelId === activeChannelIdRef.current) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === payload.id ? payload : m)),
+          );
+        }
+        // Forward to ThreadPanel: updates to parent (replyCount changed) and
+        // edits to thread replies both flow through here.
+        if (payload.parentMessageId != null || payload.replyCount > 0) {
+          setThreadUpdates((prev) => {
+            const next = [...prev, payload];
+            return next.length > 50 ? next.slice(-50) : next;
+          });
+        }
+        return;
+      }
+      if (event.type === "read.advanced") {
+        const { userId, messageId } = event.payload;
+        // Reflect own reads from other tabs / devices in the channel badge.
+        if (userId === currentUserId) {
+          setChannels((prev) =>
+            prev.map((c) =>
+              c.id === event.channelId
+                ? {
+                    ...c,
+                    unreadCount: 0,
+                    lastReadMessageId: messageId,
+                  }
+                : c,
+            ),
+          );
+        }
+        // Update readerUserIds on local messages — any message with id ≤
+        // messageId (in the same channel) gains this reader, except own
+        // messages of THAT user (server filters this on initial load; we
+        // mirror the same rule). Idempotent: skip if already present.
+        if (event.channelId === activeChannelIdRef.current) {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id > messageId) return m;
+              if (m.author.userId === userId) return m;
+              if (m.readerUserIds.includes(userId)) return m;
+              return { ...m, readerUserIds: [...m.readerUserIds, userId] };
+            }),
+          );
+        }
         return;
       }
       if (event.type === "reaction.added") {
@@ -266,6 +370,7 @@ export default function ChatPage() {
     setMessages([]);
     setHasMore(false);
     setLoadingMessages(true);
+    setThreadParentId(null);
     // Typing state — drop entries for non-active channels to avoid stale UI.
     setTypingByChannel((prev) => {
       const me = prev.get(activeChannelId);
@@ -326,6 +431,56 @@ export default function ChatPage() {
       );
     },
     [activeChannelId],
+  );
+
+  /** Debounced bump of the read pointer. The IntersectionObserver inside
+   * MessageStream fires on every viewport-intersecting tail message; we
+   * dedupe both inside the component (only the latest id matters) and here
+   * (drop calls that are not strictly greater than the local lastRead). */
+  /** Find-or-create a DM with a workspace member and switch to it.
+   *  Wired from in-feed avatar / mention popovers; the cross-tab variant
+   *  (TeamPage → App → ChatPage) goes through the pendingDmUserId effect
+   *  above which calls the same api. */
+  const openDmFor = useCallback(async (userId: number) => {
+    if (!userId || userId <= 0) return;
+    try {
+      const dm = await api.chat.openDm(userId);
+      setChannels((prev) =>
+        prev.some((c) => c.id === dm.id) ? prev : [...prev, dm],
+      );
+      setActiveChannelId(dm.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+
+  const onMarkRead = useCallback(
+    async (channelId: number, messageId: number) => {
+      const channel = channels.find((c) => c.id === channelId);
+      if (!channel) return;
+      if (
+        channel.lastReadMessageId != null &&
+        channel.lastReadMessageId >= messageId
+      ) {
+        return;
+      }
+      // Optimistic local update — server will publish read.advanced for any
+      // other tabs of this user.
+      setChannels((prev) =>
+        prev.map((c) =>
+          c.id === channelId
+            ? { ...c, unreadCount: 0, lastReadMessageId: messageId }
+            : c,
+        ),
+      );
+      try {
+        await api.chat.markRead(channelId, messageId);
+      } catch {
+        // Best-effort — next viewport intersection will retry. Don't surface
+        // the error: stale read pointers are not user-visible failures.
+      }
+    },
+    [channels],
   );
 
   const onSendWithAttachments = useCallback(
@@ -392,13 +547,19 @@ export default function ChatPage() {
     socketRef.current?.send({ type: "typing.stop", channelId: activeChannelId });
   }, [activeChannelId]);
 
-  const onCreateChannel = useCallback(async (name: string) => {
-    const ch = await api.chat.createChannel(name);
-    setChannels((prev) =>
-      prev.some((c) => c.id === ch.id) ? prev : [...prev, ch],
-    );
-    setActiveChannelId(ch.id);
-  }, []);
+  const onCreateChannel = useCallback(
+    async (
+      name: string,
+      opts: { isPrivate: boolean; memberIds: number[] },
+    ) => {
+      const ch = await api.chat.createChannel(name, opts);
+      setChannels((prev) =>
+        prev.some((c) => c.id === ch.id) ? prev : [...prev, ch],
+      );
+      setActiveChannelId(ch.id);
+    },
+    [],
+  );
 
   const activeChannel = activeChannelId
     ? channels.find((c) => c.id === activeChannelId) ?? null
@@ -435,139 +596,41 @@ export default function ChatPage() {
   }
 
   return (
-    <div
-      className="card"
-      style={{
-        display: "flex",
-        gap: 0,
-        height: "calc(100vh - 200px)",
-        minHeight: 400,
-        padding: 0,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          borderRight: "1px solid var(--border, #e2e2e2)",
-          background: "var(--bg-soft, #fafafa)",
-          minWidth: 220,
-        }}
-      >
-        <ChannelList
-          channels={channels}
-          activeChannelId={activeChannelId}
-          canManage={canManage}
-          onSelect={setActiveChannelId}
-          onCreate={onCreateChannel}
-        />
-      </div>
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        {activeChannel && (
-          <div
-            style={{
-              padding: "10px 16px",
-              borderBottom: "1px solid var(--border, #e2e2e2)",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <strong style={{ fontSize: 15 }}>#{activeChannel.name}</strong>
-            <button
-              type="button"
-              className="btn-icon"
-              onClick={() => setSearchOpen((v) => !v)}
-              title="Поиск по сообщениям"
-              style={{ marginLeft: "auto" }}
-            >
-              <Search size={16} />
-            </button>
-            <span
-              style={{
-                fontSize: 11,
-                color:
-                  connectionState === "open"
-                    ? "var(--muted, #888)"
-                    : "var(--danger, #c33)",
-              }}
-            >
-              {connectionState === "open"
-                ? "в реальном времени"
-                : connectionState === "connecting"
-                  ? "соединение…"
-                  : "оффлайн"}
-            </span>
-          </div>
-        )}
-        {searchOpen && activeChannel && (
-          <SearchPanel
-            channelId={activeChannel.id}
-            channelName={activeChannel.name}
-            onJump={(chId) => {
-              setActiveChannelId(chId);
-              setSearchOpen(false);
-            }}
-            onClose={() => setSearchOpen(false)}
-          />
-        )}
-        {error && (
-          <div
-            style={{
-              padding: "6px 12px",
-              background: "var(--danger-soft, #fee)",
-              color: "var(--danger, #c33)",
-              fontSize: 12,
-            }}
-          >
-            {error}{" "}
-            <button
-              type="button"
-              className="btn-icon"
-              onClick={() => setError(null)}
-              style={{ marginLeft: 8 }}
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        {loadingMessages ? (
-          <p className="muted" style={{ padding: 16 }}>
-            Загрузка…
-          </p>
-        ) : (
-          <MessageStream
-            messages={messages}
-            currentUserId={currentUserId}
-            canModerate={canManage}
-            hasMore={hasMore}
-            loadingOlder={loadingOlder}
-            onlineUsers={onlineUsers}
-            onLoadOlder={() => void onLoadOlder()}
-            onDelete={onDelete}
-            onEdit={onEdit}
-            onToggleReaction={onToggleReaction}
-          />
-        )}
-        {activeChannel && (
-          <TypingIndicator
-            people={
-              [...(typingByChannel.get(activeChannel.id)?.values() ?? [])]
-            }
-          />
-        )}
-        {activeChannel && !activeChannel.archivedAt && (
-          <div style={{ padding: 10, borderTop: "1px solid var(--border, #e2e2e2)" }}>
-            <Composer
-              channelName={activeChannel.name}
-              members={members}
-              onSendText={onSendText}
-              onSendWithAttachments={onSendWithAttachments}
-              onTypingStart={onTypingStart}
-              onTypingStop={onTypingStop}
-            />
-          </div>
-        )}
-      </div>
-    </div>
+    <ChatLayout
+      currentUserId={currentUserId}
+      canManage={canManage}
+      channels={channels}
+      activeChannelId={activeChannelId}
+      activeChannel={activeChannel}
+      messages={messages}
+      loadingMessages={loadingMessages}
+      loadingOlder={loadingOlder}
+      hasMore={hasMore}
+      onlineUsers={onlineUsers}
+      members={members}
+      typingByChannel={typingByChannel}
+      connectionState={connectionState}
+      threadParentId={threadParentId}
+      threadUpdates={threadUpdates}
+      searchOpen={searchOpen}
+      error={error}
+      onSelectChannel={setActiveChannelId}
+      onCreateChannel={onCreateChannel}
+      onSendText={onSendText}
+      onSendWithAttachments={onSendWithAttachments}
+      onDelete={onDelete}
+      onEdit={onEdit}
+      onToggleReaction={onToggleReaction}
+      onMarkRead={onMarkRead}
+      onOpenThread={(messageId) => setThreadParentId(messageId)}
+      onCloseThread={() => setThreadParentId(null)}
+      onLoadOlder={() => void onLoadOlder()}
+      onTypingStart={onTypingStart}
+      onTypingStop={onTypingStop}
+      onToggleSearch={() => setSearchOpen((v) => !v)}
+      onCloseSearch={() => setSearchOpen(false)}
+      onClearError={() => setError(null)}
+      onOpenDm={(userId) => void openDmFor(userId)}
+    />
   );
 }

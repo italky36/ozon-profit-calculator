@@ -334,7 +334,7 @@ describe("chat stage 1.3 — typing TTL", () => {
     const { bumpTyping, clearTyping } = await import("../../server/chat/typing");
     const { subscribe } = await import("../../server/chat/pubsub");
     const events: Array<{ type: string }> = [];
-    subscribe(owner.workspaceId, (e) => events.push(e));
+    subscribe(owner.workspaceId, (e) => events.push(e), owner.userId);
 
     bumpTyping(
       { workspaceId: owner.workspaceId, channelId: 1, userId: owner.userId },

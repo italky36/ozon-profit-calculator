@@ -483,9 +483,22 @@ export const chatChannels = sqliteTable("chat_channels", {
     .notNull()
     .references(() => workspaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
+  /** Channel kind. 'channel' — обычный workspace-канал (видимость = быть
+   * членом workspace'а); 'dm' — личная переписка 1-на-1 (видимость = быть
+   * в chat_channel_members). Имя у DM в БД — placeholder («—»),
+   * человекочитаемое имя синтезируется UI / роутом из peer'а. */
+  type: text("type", { enum: ["channel", "dm"] })
+    .notNull()
+    .default("channel"),
   /** Дефолтный канал команды («общий»); создаётся миграцией для existing
    * workspace'ов и при создании нового workspace. */
   isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  /** Приватный канал — видимость через chat_channel_members (Slack-style).
+   * Применимо только к type='channel'; type='dm' всегда фактически
+   * приватный через свою membership-таблицу. */
+  isPrivate: integer("is_private", { mode: "boolean" })
+    .notNull()
+    .default(false),
   /** Создатель канала. NULL после удаления юзера (ON DELETE SET NULL) — UI
    * показывает «автор удалён». */
   createdBy: integer("created_by").references(() => users.id, {
@@ -494,6 +507,24 @@ export const chatChannels = sqliteTable("chat_channels", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   archivedAt: integer("archived_at", { mode: "timestamp_ms" }),
 });
+
+/** DM membership. Used only when chat_channels.type = 'dm'. Workspace
+ * channels rely on workspace_members for visibility. */
+export const chatChannelMembers = sqliteTable(
+  "chat_channel_members",
+  {
+    channelId: integer("channel_id")
+      .notNull()
+      .references(() => chatChannels.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.channelId, t.userId] }),
+  }),
+);
 
 export const chatMessages = sqliteTable("chat_messages", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -505,6 +536,11 @@ export const chatMessages = sqliteTable("chat_messages", {
   authorUserId: integer("author_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
+  /** Thread parent. NULL для root-сообщений канала; non-NULL — ответ в треде.
+   * Только один уровень — сервер валидирует, что parent сам не имеет parent'а
+   * (одноуровневые треды, как Slack). FK self-ref, ON DELETE CASCADE — hard-
+   * delete root'а уносит все ответы. */
+  parentMessageId: integer("parent_message_id"),
   body: text("body").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   editedAt: integer("edited_at", { mode: "timestamp_ms" }),
@@ -512,6 +548,26 @@ export const chatMessages = sqliteTable("chat_messages", {
    * физически роутом. */
   deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
 });
+
+/** Per-user read pointer. Bump-only (PUT /channels/:id/read валидирует
+ * messageId > current). UI считает unread как `id > last_read_message_id
+ * AND author != currentUser` — за рядом нужно делать ещё join на messages. */
+export const chatChannelReads = sqliteTable(
+  "chat_channel_reads",
+  {
+    channelId: integer("channel_id")
+      .notNull()
+      .references(() => chatChannels.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    lastReadMessageId: integer("last_read_message_id"),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.channelId, t.userId] }),
+  }),
+);
 
 /** Реакции на сообщения. PK составной (message, user, emoji) — у одного юзера
  * не может быть двух одинаковых реакций на одно сообщение, но он может

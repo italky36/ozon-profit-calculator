@@ -65,6 +65,85 @@ const ROLE_LABEL: Record<string, string> = {
   member: "участник",
 };
 
+export interface MentionDigestItem {
+  messageId: number;
+  channelId: number;
+  channelName: string;
+  authorName: string;
+  body: string;
+  createdAt: number;
+  link: string;
+}
+
+function truncate(s: string, max = 200): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1).trimEnd() + "…";
+}
+
+function formatRuTime(ts: number): string {
+  const d = new Date(ts);
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function generateMentionDigest(input: {
+  to: string;
+  recipientName: string;
+  items: MentionDigestItem[];
+}): EmailMessage {
+  const safeName = escapeHtml(input.recipientName);
+  const count = input.items.length;
+  const noun =
+    count === 1 ? "упоминание" : count < 5 ? "упоминания" : "упоминаний";
+
+  const textLines = [
+    `Здравствуйте, ${input.recipientName}!`,
+    "",
+    `За последние минуты вас упомянули в командном чате (${count} ${noun}):`,
+    "",
+    ...input.items.map(
+      (it) =>
+        `· #${it.channelName} — ${it.authorName} в ${formatRuTime(it.createdAt)}\n  ${truncate(it.body)}\n  ${it.link}`,
+    ),
+    "",
+    "Письмо отправлено, потому что в момент упоминания вас не было в сети. Если включить уведомления в браузере, такие письма приходить не будут.",
+  ];
+
+  const htmlItems = input.items
+    .map(
+      (it) => `
+        <div style="margin: 16px 0; padding: 12px; border: 1px solid #e2e2e2; border-radius: 8px;">
+          <div style="font-size: 12px; color: #666; margin-bottom: 6px;">
+            <b>#${escapeHtml(it.channelName)}</b> · ${escapeHtml(it.authorName)} · ${escapeHtml(formatRuTime(it.createdAt))}
+          </div>
+          <div style="font-size: 14px; color: #222; white-space: pre-wrap;">${escapeHtml(truncate(it.body))}</div>
+          <div style="margin-top: 10px;">
+            <a href="${escapeHtml(it.link)}" style="color: #005bff; text-decoration: none; font-size: 13px;">Открыть сообщение →</a>
+          </div>
+        </div>
+      `,
+    )
+    .join("");
+
+  return {
+    to: input.to,
+    subject: `${count} ${noun} в командном чате — Ozon Profit Calculator`,
+    text: textLines.join("\n"),
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 640px; margin: 0 auto; padding: 24px;">
+        <h2 style="margin: 0 0 8px;">Вас упоминали в чате</h2>
+        <p style="color: #555;">Здравствуйте, <b>${safeName}</b>! За последние минуты вы получили ${count} ${noun}, пока были не в сети.</p>
+        ${htmlItems}
+        <p style="color: #888; font-size: 12px; margin-top: 24px;">Письмо отправлено, потому что в момент упоминания вас не было в сети. Чтобы получать уведомления мгновенно, оставайтесь онлайн или включите push-уведомления в браузере.</p>
+      </div>
+    `.trim(),
+  };
+}
+
 export function generateInviteEmail(input: {
   to: string;
   workspaceName: string;

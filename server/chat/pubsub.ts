@@ -42,38 +42,70 @@ export interface ChatPresenceEvent {
   payload: { userId: number };
 }
 
+export interface ChatReadEvent {
+  type: "read.advanced";
+  channelId: number;
+  workspaceId: number;
+  payload: { userId: number; messageId: number };
+}
+
 export type ChatServerEvent =
   | ChatMessageEvent
   | ChatChannelEvent
   | ChatReactionEvent
   | ChatTypingEvent
-  | ChatPresenceEvent;
+  | ChatPresenceEvent
+  | ChatReadEvent;
 
 type Listener = (event: ChatServerEvent) => void;
 
-const subscribers = new Map<number, Set<Listener>>();
+interface Subscriber {
+  cb: Listener;
+  /** userId of the subscribing session — used by publish() to filter
+   * recipients when an event is restricted to a known set (DM events). */
+  userId: number;
+}
 
-export function subscribe(workspaceId: number, cb: Listener): () => void {
+const subscribers = new Map<number, Set<Subscriber>>();
+
+export function subscribe(
+  workspaceId: number,
+  cb: Listener,
+  userId: number,
+): () => void {
   let set = subscribers.get(workspaceId);
   if (!set) {
     set = new Set();
     subscribers.set(workspaceId, set);
   }
-  set.add(cb);
+  const entry: Subscriber = { cb, userId };
+  set.add(entry);
   return () => {
     const current = subscribers.get(workspaceId);
     if (!current) return;
-    current.delete(cb);
+    current.delete(entry);
     if (current.size === 0) subscribers.delete(workspaceId);
   };
 }
 
-export function publish(workspaceId: number, event: ChatServerEvent): void {
+/** Publish an event to subscribers of a workspace.
+ *
+ * Optional `allowedUserIds` restricts delivery — used for DM events where
+ * only the two participants should ever see the payload. Without it, every
+ * workspace subscriber gets the event (current behaviour for regular
+ * channels). The filter is **the** mechanism that keeps DM contents out of
+ * non-participants' sockets — do not bypass. */
+export function publish(
+  workspaceId: number,
+  event: ChatServerEvent,
+  allowedUserIds?: ReadonlySet<number>,
+): void {
   const set = subscribers.get(workspaceId);
   if (!set) return;
-  for (const cb of set) {
+  for (const e of set) {
+    if (allowedUserIds && !allowedUserIds.has(e.userId)) continue;
     try {
-      cb(event);
+      e.cb(event);
     } catch {
       // Subscriber errors must not break sibling deliveries.
     }

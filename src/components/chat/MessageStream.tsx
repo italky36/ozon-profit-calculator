@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef } from "react";
-import type { ChatMessage } from "../../api";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import type { ChatMessage, WorkspaceMember } from "../../api";
 import MessageItem from "./MessageItem";
 
 interface MessageStreamProps {
@@ -8,15 +8,25 @@ interface MessageStreamProps {
   canModerate: boolean;
   hasMore: boolean;
   loadingOlder: boolean;
+  channelId: number | null;
   onlineUsers: Set<number>;
+  /** Workspace roster — passed to MessageItem for read-indicator avatars. */
+  members: WorkspaceMember[];
+  /** Touch-device mode — forwarded to MessageItem (long-press / swipe). */
+  isTouch?: boolean;
   onLoadOlder: () => void;
   onDelete: (id: number) => void;
   onEdit: (id: number, body: string) => Promise<void>;
   onToggleReaction: (messageId: number, emoji: string, mine: boolean) => void;
+  onMarkRead: (channelId: number, messageId: number) => void;
+  onOpenThread: (messageId: number) => void;
+  /** Forwarded to MessageItem for avatar / mention popovers. */
+  onOpenDm?: (userId: number) => void;
 }
 
 const STICK_THRESHOLD_PX = 80;
 const LOAD_OLDER_THRESHOLD_PX = 80;
+const MARK_READ_DEBOUNCE_MS = 800;
 
 /** Scrolling discipline:
  *   - stick to bottom while user is at bottom (auto-scroll on new tail);
@@ -34,18 +44,55 @@ export default function MessageStream({
   canModerate,
   hasMore,
   loadingOlder,
+  channelId,
   onlineUsers,
+  members,
+  isTouch = false,
   onLoadOlder,
   onDelete,
   onEdit,
   onToggleReaction,
+  onMarkRead,
+  onOpenThread,
+  onOpenDm,
 }: MessageStreamProps) {
+  // Other-members count for the «✓✓ all read» heuristic. Author is always
+  // current user for own messages (the only rows that get ticks), so
+  // subtract 1 from total members.
+  const otherMembersCount = Math.max(0, members.length - 1);
   const containerRef = useRef<HTMLDivElement | null>(null);
   /** True when the user is (approximately) at the bottom. Defaults to true so
    * initial mount auto-scrolls. Updated by the scroll handler on user action. */
   const stickToBottomRef = useRef(true);
   const prevFirstIdRef = useRef<number | null>(null);
   const prevScrollHeightRef = useRef(0);
+  /** Highest visible messageId we've seen (any author). Debounced mark-read
+   * publishes this. */
+  const maxVisibleIdRef = useRef<number>(0);
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced read pointer bump. Re-scheduled on every visibility change.
+  const scheduleMarkRead = (id: number) => {
+    if (id <= maxVisibleIdRef.current) return;
+    maxVisibleIdRef.current = id;
+    if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    markReadTimerRef.current = setTimeout(() => {
+      markReadTimerRef.current = null;
+      if (channelId != null && maxVisibleIdRef.current > 0) {
+        onMarkRead(channelId, maxVisibleIdRef.current);
+      }
+    }, MARK_READ_DEBOUNCE_MS);
+  };
+
+  // Reset the read tracker when the channel switches; otherwise we'd treat
+  // the previous channel's lastReadId as already-known for the new one.
+  useEffect(() => {
+    maxVisibleIdRef.current = 0;
+    if (markReadTimerRef.current) {
+      clearTimeout(markReadTimerRef.current);
+      markReadTimerRef.current = null;
+    }
+  }, [channelId]);
 
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -81,7 +128,26 @@ export default function MessageStream({
     if (el.scrollTop < LOAD_OLDER_THRESHOLD_PX && hasMore && !loadingOlder) {
       onLoadOlder();
     }
+    // When user is near the bottom of the feed, mark the latest message as
+    // read. Cheap heuristic — proper IntersectionObserver per-row would be
+    // more precise but the bottom-of-feed semantic matches user intent
+    // («I see what's new»).
+    if (distanceFromBottom < STICK_THRESHOLD_PX && messages.length > 0) {
+      const lastId = messages[messages.length - 1]!.id;
+      scheduleMarkRead(lastId);
+    }
   };
+
+  // Also mark-read on mount / new tail when the user is already at the
+  // bottom (auto-scroll keeps them there for active conversations).
+  useEffect(() => {
+    if (messages.length === 0 || channelId == null) return;
+    if (!stickToBottomRef.current) return;
+    const lastId = messages[messages.length - 1]!.id;
+    scheduleMarkRead(lastId);
+    // scheduleMarkRead is stable enough — only channelId / messages drive this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, channelId]);
 
   return (
     <div
@@ -143,6 +209,12 @@ export default function MessageStream({
           onDelete={onDelete}
           onEdit={onEdit}
           onToggleReaction={onToggleReaction}
+          onOpenThread={onOpenThread}
+          members={members}
+          otherMembersCount={otherMembersCount}
+          isTouch={isTouch}
+          onOpenDm={onOpenDm}
+          onlineUsers={onlineUsers}
         />
       ))}
     </div>

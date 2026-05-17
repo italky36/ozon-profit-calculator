@@ -326,10 +326,42 @@ export interface PublicInviteInfo {
 
 export interface ChatChannel {
   id: number;
+  /** For type='channel' — administrator-set channel name. For type='dm' —
+   *  server-synthesized from the peer (full name / email prefix). */
   name: string;
+  /** Kind. UI groups by this — «Каналы» / «Личные сообщения». */
+  type: "channel" | "dm";
+  /** Private channel — visibility through explicit membership. Always
+   *  false for DMs (the type already implies privacy). */
+  isPrivate: boolean;
   isDefault: boolean;
   createdAt: number;
   archivedAt: number | null;
+  /** True when current user can rename / archive / edit roster. Workspace
+   *  owner/manager → always; channel creator → for their own. Always
+   *  false for DMs. */
+  canManage: boolean;
+  /** Number of messages in this channel newer than the user's last_read
+   * pointer, excluding their own messages and thread-replies. 0 = caught up. */
+  unreadCount: number;
+  /** The id of the last message the user marked as read. NULL = never read. */
+  lastReadMessageId: number | null;
+  /** For type='dm' — the other participant's identity. NULL for type='channel'. */
+  peer: {
+    userId: number;
+    email: string;
+    fullName: string;
+    jobTitle: string | null;
+    avatarDataUrl: string | null;
+  } | null;
+}
+
+export interface ChatChannelMember {
+  userId: number;
+  email: string;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
 }
 
 export interface ChatAuthor {
@@ -363,6 +395,14 @@ export interface ChatMention {
 export interface ChatMessage {
   id: number;
   channelId: number;
+  /** Root-message id, or NULL when this is itself a root message. */
+  parentMessageId: number | null;
+  /** Number of (non-deleted) replies. 0 for root-сообщений без ответов и для
+   *  reply-сообщений (треды одноуровневые). */
+  replyCount: number;
+  /** UserIds (без автора), у которых last_read pointer ≥ this.id. UI рисует
+   *  «прочитано» только под последним собственным сообщением — иначе шум. */
+  readerUserIds: number[];
   body: string;
   createdAt: number;
   editedAt: number | null;
@@ -427,6 +467,12 @@ export type ChatServerEvent =
       channelId: number;
       workspaceId: number;
       payload: ChatChannel;
+    }
+  | {
+      type: "read.advanced";
+      channelId: number;
+      workspaceId: number;
+      payload: { userId: number; messageId: number };
     }
   | { type: "hello"; workspaceId: number; onlineUserIds: number[] }
   | { type: "pong" };
@@ -974,11 +1020,32 @@ export const api = {
   },
   chat: {
     listChannels: () => apiFetch<ChatChannel[]>("/chat/channels"),
-    createChannel: (name: string) =>
+    createChannel: (
+      name: string,
+      opts: { isPrivate?: boolean; memberIds?: number[] } = {},
+    ) =>
       apiFetch<ChatChannel>("/chat/channels", {
         method: "POST",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({
+          name,
+          isPrivate: opts.isPrivate ?? false,
+          memberIds: opts.memberIds ?? [],
+        }),
       }),
+    listChannelMembers: (channelId: number) =>
+      apiFetch<{ members: ChatChannelMember[] }>(
+        `/chat/channels/${channelId}/members`,
+      ),
+    addChannelMember: (channelId: number, userId: number) =>
+      apiFetch<{ ok: true }>(`/chat/channels/${channelId}/members`, {
+        method: "POST",
+        body: JSON.stringify({ userId }),
+      }),
+    removeChannelMember: (channelId: number, userId: number) =>
+      apiFetch<{ ok: true }>(
+        `/chat/channels/${channelId}/members/${userId}`,
+        { method: "DELETE" },
+      ),
     updateChannel: (
       id: number,
       patch: { name?: string; archived?: boolean },
@@ -999,16 +1066,33 @@ export const api = {
         `/chat/channels/${channelId}/messages${qs ? `?${qs}` : ""}`,
       );
     },
-    sendMessage: (channelId: number, body: string) =>
+    sendMessage: (
+      channelId: number,
+      body: string,
+      opts: { parentMessageId?: number } = {},
+    ) =>
       apiFetch<ChatMessage>(`/chat/channels/${channelId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ body }),
+        body: JSON.stringify(
+          opts.parentMessageId != null
+            ? { body, parentMessageId: opts.parentMessageId }
+            : { body },
+        ),
       }),
     editMessage: (id: number, body: string) =>
       apiFetch<ChatMessage>(`/chat/messages/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ body }),
       }),
+    markRead: (channelId: number, messageId: number) =>
+      apiFetch<{ channelId: number; lastReadMessageId: number }>(
+        `/chat/channels/${channelId}/read`,
+        { method: "PUT", body: JSON.stringify({ messageId }) },
+      ),
+    getThread: (parentMessageId: number) =>
+      apiFetch<{ parent: ChatMessage; replies: ChatMessage[] }>(
+        `/chat/messages/${parentMessageId}/thread`,
+      ),
     addReaction: (messageId: number, emoji: string) =>
       apiFetch<{ reactions: ChatReactionAggregate[] }>(
         `/chat/messages/${messageId}/reactions`,
@@ -1024,10 +1108,12 @@ export const api = {
       ),
     sendMessageWithAttachments: async (
       channelId: number,
-      input: { body?: string; files: File[] },
+      input: { body?: string; files: File[]; parentMessageId?: number },
     ): Promise<ChatMessage> => {
       const fd = new FormData();
       if (input.body) fd.append("body", input.body);
+      if (input.parentMessageId != null)
+        fd.append("parentMessageId", String(input.parentMessageId));
       for (const f of input.files) fd.append("file", f);
       const res = await fetch(
         `${BASE}/chat/channels/${channelId}/messages/with-attachments`,
@@ -1055,6 +1141,15 @@ export const api = {
     attachmentUrl: (id: number): string => `${BASE}/chat/attachments/${id}`,
     presence: () =>
       apiFetch<{ onlineUserIds: number[] }>("/chat/presence"),
+    /** Find-or-create a 1-on-1 DM channel with the given workspace member.
+     *  Returns the existing channel if a 2-person DM with this user already
+     *  exists, otherwise creates one. Both flows return the same ChatChannel
+     *  shape with `type: 'dm'` and `peer` populated. */
+    openDm: (userId: number) =>
+      apiFetch<ChatChannel>("/chat/dms", {
+        method: "POST",
+        body: JSON.stringify({ userId }),
+      }),
     search: (q: string, opts: { channelId?: number; limit?: number } = {}) => {
       const params = new URLSearchParams({ q });
       if (opts.channelId != null)

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { SmilePlus } from "lucide-react";
 import type { ChatReactionAggregate } from "../../api";
 
@@ -8,12 +9,16 @@ interface Props {
   reactions: ChatReactionAggregate[];
   currentUserId: number;
   onToggle: (emoji: string, mine: boolean) => void;
+  /** Inline content rendered to the left of reactions on the same row
+   *  (read-status ticks + reader avatars in MessageItem). */
+  prefix?: ReactNode;
 }
 
 export default function ReactionsBar({
   reactions,
   currentUserId,
   onToggle,
+  prefix,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -24,11 +29,12 @@ export default function ReactionsBar({
       style={{
         display: "flex",
         flexWrap: "wrap",
-        gap: 4,
-        marginTop: hasAny ? 6 : 2,
+        gap: 6,
+        marginTop: hasAny || prefix ? 6 : 2,
         alignItems: "center",
       }}
     >
+      {prefix}
       {reactions.map((r) => {
         const mine = r.userIds.includes(currentUserId);
         return (

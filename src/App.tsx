@@ -242,6 +242,15 @@ export default function App() {
       /* ignore */
     }
   }, [activeTab]);
+  // One-shot signal: «when ChatPage mounts/refreshes, open a DM with this
+  // user». Set from TeamPage's «Написать» button; ChatPage consumes and
+  // clears via onConsumed below. Lives in App so it survives the tab
+  // switch without unmounting ChatPage's existing state.
+  const [pendingDmUserId, setPendingDmUserId] = useState<number | null>(null);
+  const openDmWithUser = (userId: number) => {
+    setPendingDmUserId(userId);
+    setActiveTab("chat");
+  };
   const [channelFilter, setChannelFilter] = useState<FilterValue>("Все");
   const ACTIVE_ONLY_KEY = "ozon-calc.active-only";
   const [activeOnly, setActiveOnly] = useState<boolean>(() => {
@@ -830,13 +839,16 @@ export default function App() {
 
         {activeTab === "team" && (
           <Suspense fallback={<p className="muted">Загрузка…</p>}>
-            <TeamPage />
+            <TeamPage onOpenDm={openDmWithUser} />
           </Suspense>
         )}
 
         {activeTab === "chat" && (
           <Suspense fallback={<p className="muted">Загрузка…</p>}>
-            <ChatPage />
+            <ChatPage
+              pendingDmUserId={pendingDmUserId}
+              onDmConsumed={() => setPendingDmUserId(null)}
+            />
           </Suspense>
         )}
       </main>
