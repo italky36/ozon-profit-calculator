@@ -473,5 +473,96 @@ export const importRuns = sqliteTable("import_runs", {
   params: text("params", { mode: "json" }),
 });
 
+// === Chat (workspace-scoped) ===
+// Каналы принадлежат workspace'у; изоляция через FK на workspaces. Сообщения
+// и вложения — через chat_channels.workspace_id. Sysadmin к чату отношения
+// не имеет — это командный инструмент.
+export const chatChannels = sqliteTable("chat_channels", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  workspaceId: integer("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  /** Дефолтный канал команды («общий»); создаётся миграцией для existing
+   * workspace'ов и при создании нового workspace. */
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  /** Создатель канала. NULL после удаления юзера (ON DELETE SET NULL) — UI
+   * показывает «автор удалён». */
+  createdBy: integer("created_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  archivedAt: integer("archived_at", { mode: "timestamp_ms" }),
+});
+
+export const chatMessages = sqliteTable("chat_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  channelId: integer("channel_id")
+    .notNull()
+    .references(() => chatChannels.id, { onDelete: "cascade" }),
+  /** Автор сообщения. NULL после удаления юзера (ON DELETE SET NULL) — UI
+   * сохраняет историю и рендерит «удалённый пользователь». */
+  authorUserId: integer("author_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  body: text("body").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  editedAt: integer("edited_at", { mode: "timestamp_ms" }),
+  /** Soft-delete. UI рендерит сообщение как «удалено», вложения зачищаются
+   * физически роутом. */
+  deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
+});
+
+/** Реакции на сообщения. PK составной (message, user, emoji) — у одного юзера
+ * не может быть двух одинаковых реакций на одно сообщение, но он может
+ * поставить разные эмодзи. */
+export const chatMessageReactions = sqliteTable(
+  "chat_message_reactions",
+  {
+    messageId: integer("message_id")
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    emoji: text("emoji").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }),
+  }),
+);
+
+/** @mentions → users. Парсятся на сервере при POST'е сообщения; используются
+ * для подсветки и (в Stage 2) для триггера уведомлений офлайн-юзерам. */
+export const chatMessageMentions = sqliteTable(
+  "chat_message_mentions",
+  {
+    messageId: integer("message_id")
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.messageId, t.userId] }),
+  }),
+);
+
+export const chatAttachments = sqliteTable("chat_attachments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  messageId: integer("message_id")
+    .notNull()
+    .references(() => chatMessages.id, { onDelete: "cascade" }),
+  /** Путь внутри FileStorage. Для LocalFileStorage:
+   * "{workspaceId}/{yyyy-mm}/{attachmentId}_{safeName}". */
+  storageKey: text("storage_key").notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export type ProductRow = typeof products.$inferSelect;
 export type ProductInsert = typeof products.$inferInsert;

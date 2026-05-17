@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n web,api,admin -c blue,green,magenta \"vite\" \"tsx watch server/index.ts\" \"vite --config vite.config.sysadmin.ts\"",
-    "dev:lan": "cross-env HOST=0.0.0.0 concurrently -n web,api,admin -c blue,green,magenta \"vite --host\" \"tsx watch server/index.ts\" \"vite --config vite.config.sysadmin.ts --host\"",
+    "dev": "concurrently -kn api,web,admin -c green,blue,magenta \"tsx watch server/index.ts\" \"wait-on -t 30000 tcp:3001 && vite\" \"wait-on -t 30000 tcp:3001 && vite --config vite.config.sysadmin.ts\"",
+    "dev:lan": "cross-env HOST=0.0.0.0 concurrently -kn api,web,admin -c green,blue,magenta \"tsx watch server/index.ts\" \"wait-on -t 30000 tcp:3001 && vite --host\" \"wait-on -t 30000 tcp:3001 && vite --config vite.config.sysadmin.ts --host\"",
     "dev:web": "vite",
     "dev:api": "tsx watch server/index.ts",
     "dev:sysadmin": "vite --config vite.config.sysadmin.ts",
@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.0.1",
+    "@hono/node-ws": "^1.3.1",
     "@tanstack/react-virtual": "^3.13.24",
     "@vitest/ui": "^4.1.5",
     "bcryptjs": "^3.0.3",
@@ -37,6 +38,7 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "vitest": "^4.1.5",
+    "ws": "^8.20.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -47,6 +49,7 @@
     "@types/nodemailer": "^8.0.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
@@ -58,6 +61,7 @@
     "tsx": "^4.21.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "wait-on": "^9.0.10"
   }
 }

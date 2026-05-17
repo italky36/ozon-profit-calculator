@@ -324,6 +324,113 @@ export interface PublicInviteInfo {
   expiresAt: number;
 }
 
+export interface ChatChannel {
+  id: number;
+  name: string;
+  isDefault: boolean;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+export interface ChatAuthor {
+  userId: number;
+  email: string;
+  fullName: string;
+  jobTitle: string | null;
+  avatarDataUrl: string | null;
+}
+
+export interface ChatAttachment {
+  id: number;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  url: string;
+}
+
+export interface ChatReactionAggregate {
+  emoji: string;
+  count: number;
+  userIds: number[];
+}
+
+export interface ChatMention {
+  userId: number;
+  name: string;
+  email: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  channelId: number;
+  body: string;
+  createdAt: number;
+  editedAt: number | null;
+  deletedAt: number | null;
+  author: ChatAuthor;
+  attachments: ChatAttachment[];
+  reactions: ChatReactionAggregate[];
+  mentions: ChatMention[];
+}
+
+export interface ChatMessagesPage {
+  messages: ChatMessage[];
+  hasMore: boolean;
+}
+
+export type ChatServerEvent =
+  | {
+      type: "message.created" | "message.updated";
+      channelId: number;
+      messageId: number;
+      workspaceId: number;
+      payload: ChatMessage;
+    }
+  | {
+      type: "message.deleted";
+      channelId: number;
+      messageId: number;
+      workspaceId: number;
+      payload: { id: number; deletedAt: number };
+    }
+  | {
+      type: "reaction.added" | "reaction.removed";
+      channelId: number;
+      messageId: number;
+      workspaceId: number;
+      payload: { emoji: string; userId: number };
+    }
+  | {
+      type: "typing.start";
+      channelId: number;
+      workspaceId: number;
+      payload: {
+        userId: number;
+        fullName: string;
+        email: string;
+        avatarDataUrl: string | null;
+      };
+    }
+  | {
+      type: "typing.stop";
+      channelId: number;
+      workspaceId: number;
+      payload: { userId: number };
+    }
+  | {
+      type: "presence.online" | "presence.offline";
+      workspaceId: number;
+      payload: { userId: number };
+    }
+  | {
+      type: "channel.created" | "channel.updated" | "channel.archived";
+      channelId: number;
+      workspaceId: number;
+      payload: ChatChannel;
+    }
+  | { type: "hello"; workspaceId: number; onlineUserIds: number[] }
+  | { type: "pong" };
+
 export interface ShopAccessMatrix {
   members: Array<{ userId: number; email: string; role: WorkspaceRole }>;
   shops: Array<{
@@ -864,6 +971,99 @@ export const api = {
         `/invites/${encodeURIComponent(token)}/accept`,
         { method: "POST" },
       ),
+  },
+  chat: {
+    listChannels: () => apiFetch<ChatChannel[]>("/chat/channels"),
+    createChannel: (name: string) =>
+      apiFetch<ChatChannel>("/chat/channels", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    updateChannel: (
+      id: number,
+      patch: { name?: string; archived?: boolean },
+    ) =>
+      apiFetch<ChatChannel>(`/chat/channels/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      }),
+    listMessages: (
+      channelId: number,
+      opts: { before?: number; limit?: number } = {},
+    ) => {
+      const params = new URLSearchParams();
+      if (opts.before != null) params.set("before", String(opts.before));
+      if (opts.limit != null) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return apiFetch<ChatMessagesPage>(
+        `/chat/channels/${channelId}/messages${qs ? `?${qs}` : ""}`,
+      );
+    },
+    sendMessage: (channelId: number, body: string) =>
+      apiFetch<ChatMessage>(`/chat/channels/${channelId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ body }),
+      }),
+    editMessage: (id: number, body: string) =>
+      apiFetch<ChatMessage>(`/chat/messages/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+      }),
+    addReaction: (messageId: number, emoji: string) =>
+      apiFetch<{ reactions: ChatReactionAggregate[] }>(
+        `/chat/messages/${messageId}/reactions`,
+        {
+          method: "POST",
+          body: JSON.stringify({ emoji }),
+        },
+      ),
+    removeReaction: (messageId: number, emoji: string) =>
+      apiFetch<{ reactions: ChatReactionAggregate[] }>(
+        `/chat/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`,
+        { method: "DELETE" },
+      ),
+    sendMessageWithAttachments: async (
+      channelId: number,
+      input: { body?: string; files: File[] },
+    ): Promise<ChatMessage> => {
+      const fd = new FormData();
+      if (input.body) fd.append("body", input.body);
+      for (const f of input.files) fd.append("file", f);
+      const res = await fetch(
+        `${BASE}/chat/channels/${channelId}/messages/with-attachments`,
+        {
+          method: "POST",
+          body: fd,
+          credentials: "include",
+          headers: { "X-App-Scope": appScope },
+        },
+      );
+      if (res.status === 401) for (const l of authErrorListeners) l();
+      const text = await res.text();
+      const parsed = text ? (JSON.parse(text) as unknown) : null;
+      if (!res.ok) {
+        const msg =
+          parsed && typeof parsed === "object" && "error" in parsed
+            ? String((parsed as { error: unknown }).error)
+            : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      return parsed as ChatMessage;
+    },
+    deleteMessage: (id: number) =>
+      apiFetch<{ ok: true }>(`/chat/messages/${id}`, { method: "DELETE" }),
+    attachmentUrl: (id: number): string => `${BASE}/chat/attachments/${id}`,
+    presence: () =>
+      apiFetch<{ onlineUserIds: number[] }>("/chat/presence"),
+    search: (q: string, opts: { channelId?: number; limit?: number } = {}) => {
+      const params = new URLSearchParams({ q });
+      if (opts.channelId != null)
+        params.set("channelId", String(opts.channelId));
+      if (opts.limit != null) params.set("limit", String(opts.limit));
+      return apiFetch<{ results: Array<ChatMessage & { snippet: string }> }>(
+        `/chat/search?${params.toString()}`,
+      );
+    },
   },
 };
 

@@ -45,8 +45,14 @@ export function readAppScope(c: { req: { header(name: string): string | undefine
  *     have `isSysadmin=true` or treat as anon.
  *   - explicit `X-App-Scope: workspace` → read workspace cookie only; user
  *     must NOT be a sysadmin or treat as anon.
- *   - no header (tests, curl) → try both cookies; pick whichever resolves to a
- *     user matching its expected type. */
+ *   - no header → prefer workspace cookie. **Order matters**: browser image
+ *     loads (`<img src=/api/chat/attachments/123>`), WebSocket upgrades, and
+ *     direct nav can't set custom headers. When the user is logged into BOTH
+ *     the workspace SPA (5173) and the sysadmin SPA (5174), both cookies live
+ *     in the same browser/origin. Preferring workspace first means
+ *     chat-attachment downloads and WS connections from the workspace tab pick
+ *     the correct identity. The sysadmin SPA always sends X-App-Scope, so it
+ *     never falls into this branch. */
 export function sessionMiddleware(db: DB): MiddlewareHandler {
   return async (c, next) => {
     const scope = readAppScope(c);
@@ -69,7 +75,7 @@ export function sessionMiddleware(db: DB): MiddlewareHandler {
         ? trySysadmin()
         : scope === "workspace"
           ? tryWorkspace()
-          : (trySysadmin() ?? tryWorkspace());
+          : (tryWorkspace() ?? trySysadmin());
 
     if (user) c.set("user", user);
     await next();

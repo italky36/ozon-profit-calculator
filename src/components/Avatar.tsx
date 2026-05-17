@@ -9,6 +9,29 @@ export interface AvatarProps {
   /** Fallback identifier when `name` is empty — typically the user's email. */
   email?: string;
   size?: number;
+  /** When true, renders a green presence dot in the bottom-right corner. */
+  isOnline?: boolean;
+}
+
+function PresenceDot({ size }: { size: number }) {
+  const dot = Math.max(8, Math.round(size * 0.28));
+  return (
+    <span
+      aria-hidden
+      title="онлайн"
+      style={{
+        position: "absolute",
+        right: 0,
+        bottom: 0,
+        width: dot,
+        height: dot,
+        borderRadius: dot,
+        background: "#22c55e",
+        border: "2px solid var(--bg, #fff)",
+        boxSizing: "border-box",
+      }}
+    />
+  );
 }
 
 export default function Avatar({
@@ -16,22 +39,33 @@ export default function Avatar({
   avatarDataUrl,
   email,
   size = 32,
+  isOnline,
 }: AvatarProps) {
   if (avatarDataUrl) {
     return (
-      <img
-        src={avatarDataUrl}
-        alt=""
-        aria-hidden
+      <span
         style={{
+          position: "relative",
+          display: "inline-block",
           width: size,
           height: size,
-          borderRadius: size,
-          objectFit: "cover",
           flex: "0 0 auto",
-          display: "inline-block",
         }}
-      />
+      >
+        <img
+          src={avatarDataUrl}
+          alt=""
+          aria-hidden
+          style={{
+            width: size,
+            height: size,
+            borderRadius: size,
+            objectFit: "cover",
+            display: "block",
+          }}
+        />
+        {isOnline && <PresenceDot size={size} />}
+      </span>
     );
   }
   const source = (name || email || "?").trim();
@@ -47,25 +81,35 @@ export default function Avatar({
   const bg = `hsl(${h} 60% 92%)`;
   const fg = `hsl(${h} 45% 30%)`;
   return (
-    <div
-      aria-hidden
+    <span
       style={{
+        position: "relative",
+        display: "inline-block",
         width: size,
         height: size,
-        borderRadius: size,
-        background: bg,
-        color: fg,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontWeight: 600,
-        fontSize: Math.round(size * 0.4),
         flex: "0 0 auto",
-        letterSpacing: 0.2,
-        userSelect: "none",
       }}
     >
-      {letters}
-    </div>
+      <span
+        aria-hidden
+        style={{
+          width: size,
+          height: size,
+          borderRadius: size,
+          background: bg,
+          color: fg,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontWeight: 600,
+          fontSize: Math.round(size * 0.4),
+          letterSpacing: 0.2,
+          userSelect: "none",
+        }}
+      >
+        {letters}
+      </span>
+      {isOnline && <PresenceDot size={size} />}
+    </span>
   );
 }

@@ -38,6 +38,7 @@ import {
 } from "../middleware/session";
 import { parseProfilePatch } from "../lib/profile";
 import { resolveAppUrl } from "../lib/appUrl";
+import { ensureDefaultChannel } from "../chat/defaultChannel";
 
 type AuthEnv = { Variables: { user?: SessionUser } };
 
@@ -367,6 +368,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         tx.insert(userSettings)
           .values({ userId: u.id, activeShopId: shop.id, updatedAt: now })
           .run();
+
+        // Seed default chat channel for this new workspace. Idempotent — the
+        // migration also seeds for existing workspaces, but runtime-created
+        // workspaces need this here.
+        ensureDefaultChannel(tx as unknown as DB, ws.id, u.id, now);
       }
 
       return u.id;

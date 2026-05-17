@@ -1,0 +1,455 @@
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
+import { Paperclip, Send, Smile, X } from "lucide-react";
+import type { WorkspaceMember } from "../../api";
+import MentionAutocomplete from "./MentionAutocomplete";
+import EmojiPicker from "./EmojiPicker";
+
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_FILES = 10;
+const TYPING_REFRESH_MS = 3_000;
+const MENTION_MAX_RESULTS = 8;
+const TRIGGER_RE = /(?:^|\s)@([\p{L}\p{N}_.-]*)$/u;
+
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/[\s._-]+/g, "");
+}
+
+function mentionInsertName(m: WorkspaceMember): string {
+  const candidate = m.fullName.trim() || m.email.split("@")[0];
+  // Replace spaces with `.` so the resulting token matches our server regex
+  // (`@([\p{L}\p{N}_.-]{2,40})`).
+  return `@${candidate.replace(/\s+/g, ".")}`;
+}
+
+interface ComposerProps {
+  channelName: string;
+  disabled?: boolean;
+  members: WorkspaceMember[];
+  onSendText: (text: string) => Promise<void>;
+  onSendWithAttachments: (text: string, files: File[]) => Promise<void>;
+  onTypingStart?: () => void;
+  onTypingStop?: () => void;
+}
+
+export default function Composer({
+  channelName,
+  disabled,
+  members,
+  onSendText,
+  onSendWithAttachments,
+  onTypingStart,
+  onTypingStop,
+}: ComposerProps) {
+  const [text, setText] = useState("");
+  const [pending, setPending] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionSelectedIdx, setMentionSelectedIdx] = useState(0);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const typingRefreshAt = useRef<number>(0);
+
+  /** Where to place the caret after the *next* React commit. Set by
+   * insertEmoji, consumed by useLayoutEffect below. Using a ref (not state)
+   * avoids triggering an extra render. */
+  const pendingCaretRef = useRef<number | null>(null);
+
+  const insertEmoji = useCallback((emoji: string) => {
+    const el = textareaRef.current;
+    if (!el) {
+      setText((prev) => prev + emoji);
+      return;
+    }
+    // Read from DOM, not the closure: `text` state lags behind rapid clicks
+    // (React batches setState; the closure stays on the version of `text`
+    // captured when the callback ran). `el.value` is always the latest.
+    const current = el.value;
+    const start = el.selectionStart ?? current.length;
+    const end = el.selectionEnd ?? current.length;
+    pendingCaretRef.current = start + emoji.length;
+    setText(current.slice(0, start) + emoji + current.slice(end));
+  }, []);
+
+  useLayoutEffect(() => {
+    // Runs synchronously after React commits the new `text` and before paint
+    // — caret is set on the freshly-rendered DOM, no race with rAF.
+    if (pendingCaretRef.current == null || !textareaRef.current) return;
+    const pos = pendingCaretRef.current;
+    pendingCaretRef.current = null;
+    const el = textareaRef.current;
+    el.focus();
+    el.selectionStart = pos;
+    el.selectionEnd = pos;
+  }, [text]);
+
+  const mentionCandidates = useMemo<WorkspaceMember[]>(() => {
+    if (mentionQuery === null) return [];
+    const q = normalize(mentionQuery);
+    if (q.length === 0) {
+      return members.slice(0, MENTION_MAX_RESULTS);
+    }
+    const filtered = members.filter((m) => {
+      const nameKey = normalize(m.fullName);
+      const emailKey = normalize(m.email.split("@")[0] ?? "");
+      return nameKey.includes(q) || emailKey.includes(q);
+    });
+    return filtered.slice(0, MENTION_MAX_RESULTS);
+  }, [mentionQuery, members]);
+
+  useEffect(() => {
+    // Clamp selection when candidates list shrinks — derived state but
+    // local-only, so a setState is the simplest way to stay consistent.
+    if (mentionSelectedIdx >= mentionCandidates.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setMentionSelectedIdx(0);
+    }
+  }, [mentionCandidates.length, mentionSelectedIdx]);
+
+  // Stop typing when unmounting / switching channels.
+  useEffect(() => {
+    return () => {
+      if (typingRefreshAt.current > 0) {
+        typingRefreshAt.current = 0;
+        onTypingStop?.();
+      }
+    };
+  }, [onTypingStop]);
+
+  const bumpTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - typingRefreshAt.current > TYPING_REFRESH_MS) {
+      typingRefreshAt.current = now;
+      onTypingStart?.();
+    }
+  }, [onTypingStart]);
+
+  const stopTyping = useCallback(() => {
+    if (typingRefreshAt.current === 0) return;
+    typingRefreshAt.current = 0;
+    onTypingStop?.();
+  }, [onTypingStop]);
+
+  const acceptFiles = useCallback(
+    (incoming: File[]) => {
+      setError(null);
+      const next = [...pending];
+      for (const f of incoming) {
+        if (next.length >= MAX_FILES) {
+          setError(`Не более ${MAX_FILES} файлов за раз`);
+          break;
+        }
+        if (f.size > MAX_FILE_BYTES) {
+          setError(`Файл «${f.name}» больше 25 МБ`);
+          continue;
+        }
+        next.push(f);
+      }
+      setPending(next);
+    },
+    [pending],
+  );
+
+  const onFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length > 0) acceptFiles(files);
+    if (fileInput.current) fileInput.current.value = "";
+  };
+
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files: File[] = [];
+    for (const item of e.clipboardData.items) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      acceptFiles(files);
+    }
+  };
+
+  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length > 0) acceptFiles(files);
+  };
+
+  const onDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (!dragOver) setDragOver(true);
+  };
+
+  const onDragLeave = () => setDragOver(false);
+
+  const removePending = (idx: number) => {
+    setPending(pending.filter((_, i) => i !== idx));
+  };
+
+  const canSend = !busy && !disabled && (text.trim() !== "" || pending.length > 0);
+
+  const send = useCallback(async () => {
+    if (!canSend) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const body = text.trim();
+      if (pending.length > 0) {
+        await onSendWithAttachments(body, pending);
+      } else {
+        await onSendText(body);
+      }
+      setText("");
+      setPending([]);
+      stopTyping();
+      setEmojiOpen(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, [canSend, text, pending, onSendText, onSendWithAttachments, stopTyping]);
+
+  const insertMention = useCallback(
+    (m: WorkspaceMember) => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const caret = el.selectionStart;
+      const before = text.slice(0, caret);
+      const after = text.slice(caret);
+      const triggerMatch = before.match(TRIGGER_RE);
+      if (!triggerMatch) return;
+      const triggerStart = before.length - triggerMatch[0].length + (
+        // если триггер начинается с пробела, оставляем пробел перед @
+        triggerMatch[0].startsWith("@") ? 0 : 1
+      );
+      const insertion = `${mentionInsertName(m)} `;
+      const nextText = before.slice(0, triggerStart) + insertion + after;
+      setText(nextText);
+      setMentionQuery(null);
+      // Восстановить каретку после вставки.
+      requestAnimationFrame(() => {
+        if (!textareaRef.current) return;
+        const pos = triggerStart + insertion.length;
+        textareaRef.current.selectionStart = pos;
+        textareaRef.current.selectionEnd = pos;
+        textareaRef.current.focus();
+      });
+    },
+    [text],
+  );
+
+  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionQuery !== null && mentionCandidates.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionSelectedIdx((i) => (i + 1) % mentionCandidates.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionSelectedIdx(
+          (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertMention(mentionCandidates[mentionSelectedIdx]!);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void send();
+    }
+  };
+
+  return (
+    <div
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      style={{
+        position: "relative",
+        border: "1px solid var(--border, #e2e2e2)",
+        borderRadius: 8,
+        padding: 10,
+        background: dragOver ? "var(--bg-soft, #f5f5f5)" : "var(--bg, #fff)",
+      }}
+    >
+      {emojiOpen && (
+        <EmojiPicker
+          onPick={(e) => insertEmoji(e)}
+          onClose={() => setEmojiOpen(false)}
+        />
+      )}
+      {pending.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginBottom: 8,
+          }}
+        >
+          {pending.map((f, idx) => (
+            <span
+              key={`${f.name}-${idx}`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "3px 8px",
+                background: "var(--bg-soft, #f3f3f3)",
+                borderRadius: 14,
+                fontSize: 12,
+              }}
+            >
+              {f.name}
+              <button
+                type="button"
+                onClick={() => removePending(idx)}
+                title="Убрать"
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  padding: 2,
+                  display: "inline-flex",
+                }}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ position: "relative" }}>
+        {mentionQuery !== null && mentionCandidates.length > 0 && (
+          <MentionAutocomplete
+            candidates={mentionCandidates}
+            selectedIdx={mentionSelectedIdx}
+            onPick={(m) => insertMention(m)}
+            onHoverIdx={setMentionSelectedIdx}
+          />
+        )}
+        <textarea
+          ref={textareaRef}
+          value={text}
+          onChange={(e) => {
+            const next = e.target.value;
+            setText(next);
+            // Telegram-style UX: as soon as user starts typing, dismiss the
+            // emoji picker. Programmatic setText (from emoji insert) doesn't
+            // fire onChange, so picking emojis with the mouse stays open.
+            if (emojiOpen) setEmojiOpen(false);
+            if (next.trim()) bumpTyping();
+            else stopTyping();
+            // Detect @trigger by looking at caret position.
+            const caret = e.target.selectionStart;
+            const before = next.slice(0, caret);
+            const m = before.match(TRIGGER_RE);
+            if (m) {
+              setMentionQuery(m[1]);
+              setMentionSelectedIdx(0);
+            } else if (mentionQuery !== null) {
+              setMentionQuery(null);
+            }
+          }}
+          onBlur={() => {
+            stopTyping();
+            // Defer closing so mousedown on a popover item still fires.
+            setTimeout(() => setMentionQuery(null), 150);
+          }}
+          onKeyDown={onKeyDown}
+          onPaste={onPaste}
+          placeholder={`Сообщение в #${channelName}`}
+          rows={2}
+          disabled={disabled || busy}
+          style={{
+            width: "100%",
+            minHeight: 44,
+            resize: "vertical",
+            border: "none",
+            outline: "none",
+            fontFamily: "inherit",
+            fontSize: 14,
+            background: "transparent",
+            color: "inherit",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 6,
+        }}
+      >
+        <button
+          type="button"
+          className="btn-icon"
+          onClick={() => fileInput.current?.click()}
+          title="Прикрепить файл"
+          disabled={disabled || busy}
+        >
+          <Paperclip size={16} />
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          onChange={onFileChange}
+          style={{ display: "none" }}
+        />
+        <button
+          type="button"
+          className="btn-icon"
+          onClick={() => setEmojiOpen((v) => !v)}
+          title="Эмодзи"
+          disabled={disabled || busy}
+          style={emojiOpen ? { color: "var(--accent)" } : undefined}
+        >
+          <Smile size={16} />
+        </button>
+        <span style={{ fontSize: 11, color: "var(--muted, #888)" }}>
+          Enter — отправить · Shift+Enter — новая строка
+        </span>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => void send()}
+          disabled={!canSend}
+          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}
+        >
+          <Send size={14} />
+          Отправить
+        </button>
+      </div>
+      {error && (
+        <div style={{ marginTop: 6, color: "var(--danger, #c33)", fontSize: 12 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}

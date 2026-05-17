@@ -10,9 +10,11 @@ const OzonImportModal = lazy(() => import("./components/OzonImportModal"));
 const FinanceTab = lazy(() => import("./components/FinanceTab"));
 const ShopsModal = lazy(() => import("./components/ShopsModal"));
 const TeamPage = lazy(() => import("./components/TeamPage"));
+const ChatPage = lazy(() => import("./components/chat/ChatPage"));
 import { TWEAK_DEFAULTS, useTweaks } from "./lib/useTweaks";
 import { useAuth } from "./contexts/useAuth";
 import {
+  MessageSquare,
   Package,
   Wallet,
   Settings as SettingsIcon,
@@ -108,7 +110,7 @@ const uniqueArticleId = (base: string, taken: Set<string>): string => {
   return `${base}-${Date.now()}`;
 };
 
-type TabId = "calc" | "finance" | "team";
+type TabId = "calc" | "finance" | "team" | "chat";
 
 const BASE_TABS = [
   {
@@ -132,6 +134,14 @@ const BASE_TABS = [
     label: (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
         <Users size={16} /> Команда
+      </span>
+    ),
+  },
+  {
+    id: "chat" as const,
+    label: (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <MessageSquare size={16} /> Чат
       </span>
     ),
   },
@@ -218,7 +228,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === "calc" || v === "finance" || v === "team")
+      if (v === "calc" || v === "finance" || v === "team" || v === "chat")
         return v;
     } catch {
       /* ignore */
@@ -821,6 +831,12 @@ export default function App() {
         {activeTab === "team" && (
           <Suspense fallback={<p className="muted">Загрузка…</p>}>
             <TeamPage />
+          </Suspense>
+        )}
+
+        {activeTab === "chat" && (
+          <Suspense fallback={<p className="muted">Загрузка…</p>}>
+            <ChatPage />
           </Suspense>
         )}
       </main>

@@ -67,8 +67,8 @@ export async function resizeImage(
   let sy = 0;
   let sw = img.width;
   let sh = img.height;
-  let dw = img.width;
-  let dh = img.height;
+  let dw: number;
+  let dh: number;
   const max = opts.maxSize;
 
   if (opts.mode === "crop-square") {

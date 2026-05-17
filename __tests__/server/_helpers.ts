@@ -14,6 +14,7 @@ import {
   workspaces,
 } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
+import { ensureDefaultChannel } from "../../server/chat/defaultChannel";
 import { setEmailClient, type EmailClient, type EmailMessage } from "../../server/email/client";
 import type { TaxSettings } from "../../src/types";
 
@@ -116,6 +117,7 @@ export function createUserDirect(
       createdAt: now,
     })
     .run();
+  ensureDefaultChannel(db, ws.id, userId, now);
   return userId;
 }
 

@@ -21,6 +21,7 @@ data/*.db.bak
 data/*.bak
 data/*.bak-shm
 data/*.bak-wal
+data/uploads/
 .env
 .env.local
 

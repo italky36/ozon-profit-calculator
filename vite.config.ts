@@ -12,7 +12,8 @@ export default defineConfig(({ mode }) => {
       // HOST=0.0.0.0 to expose on all interfaces (LAN). Default localhost.
       host: env.HOST || undefined,
       proxy: {
-        "/api": { target, changeOrigin: false },
+        // ws: true forwards WebSocket upgrades (used by /api/chat/ws).
+        "/api": { target, changeOrigin: false, ws: true },
       },
     },
   };
