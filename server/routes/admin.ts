@@ -5,6 +5,7 @@ import {
   sessions,
   smtpSettings,
   users,
+  vapidSettings,
   workspaceMembers,
   workspaces,
 } from "../db/schema";
@@ -20,6 +21,12 @@ import {
 import { generateVerificationEmail } from "../email/templates";
 import { resolveAppUrl } from "../lib/appUrl";
 import { requireSysadmin } from "../middleware/session";
+import {
+  generateVapidKeys,
+  getVapidConfig,
+  invalidateVapid,
+  isPushConfigured,
+} from "../lib/webPush";
 
 type AdminEnv = { Variables: { user?: SessionUser } };
 
@@ -566,6 +573,93 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     // tariff sets, invites — all FK ON DELETE CASCADE to workspaces.id.
     db.delete(workspaces).where(eq(workspaces.id, id)).run();
     return c.json({ ok: true });
+  });
+
+  // === VAPID settings (Web Push) ===
+  // GET — current keys (private masked) + source descriptor.
+  // PUT — replace keys (sysadmin can paste fresh ones from CLI or click
+  // «сгенерировать»).
+  // DELETE — clear DB row → fallback to env vars.
+  // POST /generate — fresh keypair returned to UI (sysadmin chooses to save).
+  app.get("/vapid", (c) => {
+    const row = db
+      .select()
+      .from(vapidSettings)
+      .where(eq(vapidSettings.id, 1))
+      .get();
+    const cfg = getVapidConfig();
+    const envFallback =
+      !row && cfg != null
+        ? "env"
+        : row
+          ? "db"
+          : ("none" as const);
+    return c.json({
+      source: envFallback,
+      configured: isPushConfigured(),
+      publicKey: cfg?.publicKey ?? null,
+      subject: cfg?.subject ?? null,
+      // Never echo the private key — only confirm whether one is stored.
+      hasPrivateKey: cfg != null,
+      updatedAt: row?.updatedAt?.toISOString() ?? null,
+    });
+  });
+
+  app.put("/vapid", async (c) => {
+    let body: {
+      publicKey?: unknown;
+      privateKey?: unknown;
+      subject?: unknown;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "expected JSON" }, 400);
+    }
+    const publicKey = String(body.publicKey ?? "").trim();
+    const privateKey = String(body.privateKey ?? "").trim();
+    const subject = String(body.subject ?? "").trim();
+    if (!publicKey || !privateKey || !subject) {
+      return c.json(
+        { error: "publicKey + privateKey + subject обязательны" },
+        400,
+      );
+    }
+    if (!/^mailto:/i.test(subject) && !/^https?:\/\//i.test(subject)) {
+      return c.json(
+        { error: "subject должен быть mailto: или https:// URL" },
+        400,
+      );
+    }
+    const now = new Date();
+    const existing = db
+      .select({ id: vapidSettings.id })
+      .from(vapidSettings)
+      .where(eq(vapidSettings.id, 1))
+      .get();
+    if (existing) {
+      db.update(vapidSettings)
+        .set({ publicKey, privateKey, subject, updatedAt: now })
+        .where(eq(vapidSettings.id, 1))
+        .run();
+    } else {
+      db.insert(vapidSettings)
+        .values({ id: 1, publicKey, privateKey, subject, updatedAt: now })
+        .run();
+    }
+    invalidateVapid();
+    return c.json({ ok: true });
+  });
+
+  app.delete("/vapid", (c) => {
+    db.delete(vapidSettings).where(eq(vapidSettings.id, 1)).run();
+    invalidateVapid();
+    return c.json({ ok: true });
+  });
+
+  app.post("/vapid/generate", (c) => {
+    const { publicKey, privateKey } = generateVapidKeys();
+    return c.json({ publicKey, privateKey });
   });
 
   return app;

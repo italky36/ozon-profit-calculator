@@ -127,6 +127,33 @@ export default function ChatPage({
     };
   }, [chatAvailable, pendingDmUserId, loadingChannels, onDmConsumed]);
 
+  // Service worker → page bridge: when a push notification is clicked, the
+  // SW posts {type: 'notification.click', url} to focused clients. We parse
+  // the deep-link query (?chat=1&channel=N&message=M) and switch the
+  // active channel so the user lands on the right place without reloading.
+  useEffect(() => {
+    if (!chatAvailable || typeof navigator === "undefined") return;
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; url?: string } | undefined;
+      if (!data || data.type !== "notification.click" || !data.url) return;
+      try {
+        const u = new URL(data.url, window.location.origin);
+        const channelParam = u.searchParams.get("channel");
+        if (!channelParam) return;
+        const channelId = Number(channelParam);
+        if (Number.isFinite(channelId) && channelId > 0) {
+          setActiveChannelId(channelId);
+        }
+      } catch {
+        /* ignore malformed URL */
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () =>
+      navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [chatAvailable]);
+
   // WS lifecycle: one socket per ChatPage mount.
   useEffect(() => {
     if (!chatAvailable) return;

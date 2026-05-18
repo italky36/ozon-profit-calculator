@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Bell,
   Grid3x3,
   LogOut,
   Mail,
@@ -14,10 +15,11 @@ import { useNarrow } from "./utils";
 import UsersSection from "./sections/UsersSection";
 import WorkspacesSection from "./sections/WorkspacesSection";
 import SmtpSection from "./sections/SmtpSection";
+import VapidSection from "./sections/VapidSection";
 
 const ACCENT = "#1e293b";
 
-type TabId = "users" | "workspaces" | "smtp";
+type TabId = "users" | "workspaces" | "smtp" | "vapid";
 
 interface TabDef {
   id: TabId;
@@ -115,6 +117,7 @@ export default function SysadminApp() {
       count: workspacesCount,
     },
     { id: "smtp", label: "SMTP", icon: <Mail size={15} /> },
+    { id: "vapid", label: "Push (VAPID)", icon: <Bell size={15} /> },
   ];
 
   return (
@@ -383,6 +386,7 @@ export default function SysadminApp() {
           />
         )}
         {tab === "smtp" && <SmtpSection narrow={narrow} />}
+        {tab === "vapid" && <VapidSection narrow={narrow} />}
       </main>
     </div>
   );

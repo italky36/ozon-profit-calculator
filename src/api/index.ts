@@ -603,6 +603,31 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ to, subject }),
       }),
+    getVapid: () =>
+      apiFetch<{
+        source: "db" | "env" | "none";
+        configured: boolean;
+        publicKey: string | null;
+        subject: string | null;
+        hasPrivateKey: boolean;
+        updatedAt: string | null;
+      }>("/admin/vapid"),
+    putVapid: (cfg: {
+      publicKey: string;
+      privateKey: string;
+      subject: string;
+    }) =>
+      apiFetch<{ ok: true }>("/admin/vapid", {
+        method: "PUT",
+        body: JSON.stringify(cfg),
+      }),
+    deleteVapid: () =>
+      apiFetch<{ ok: true }>("/admin/vapid", { method: "DELETE" }),
+    generateVapid: () =>
+      apiFetch<{ publicKey: string; privateKey: string }>(
+        "/admin/vapid/generate",
+        { method: "POST" },
+      ),
     listWorkspaces: () => apiFetch<AdminWorkspace[]>("/admin/workspaces"),
     listWorkspaceMembers: (id: number) =>
       apiFetch<AdminWorkspaceMember[]>(

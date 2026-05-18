@@ -620,5 +620,34 @@ export const chatAttachments = sqliteTable("chat_attachments", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// === Web Push (Stage 4) ===
+// One row per browser/device subscription. `endpoint` is the push service
+// URL (FCM / Mozilla / Apple) — used both as the destination and the
+// dedup key. `p256dh_key`/`auth_key` are base64-url subscription material
+// from PushSubscription.getKey(). Rows are removed on HTTP 410 Gone.
+export const pushSubscriptions = sqliteTable("push_subscriptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  endpoint: text("endpoint").notNull().unique(),
+  p256dhKey: text("p256dh_key").notNull(),
+  authKey: text("auth_key").notNull(),
+  userAgent: text("user_agent"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+});
+
+// Single-row VAPID identity (id=1). Sysadmin-editable through admin UI;
+// falls back to env (VAPID_PUBLIC_KEY/PRIVATE_KEY/SUBJECT) when missing.
+// `subject` is mailto: URL — required by RFC 8292 for accountability.
+export const vapidSettings = sqliteTable("vapid_settings", {
+  id: integer("id").primaryKey().default(1),
+  publicKey: text("public_key").notNull(),
+  privateKey: text("private_key").notNull(),
+  subject: text("subject").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export type ProductRow = typeof products.$inferSelect;
 export type ProductInsert = typeof products.$inferInsert;

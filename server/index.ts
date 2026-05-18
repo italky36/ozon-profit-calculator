@@ -19,8 +19,10 @@ import { analyticsRoutes } from "./routes/analytics";
 import { exportRoutes } from "./routes/export";
 import { inviteRoutes, workspaceRoutes } from "./routes/workspace";
 import { chatRoutes } from "./routes/chat";
+import { pushRoutes } from "./routes/push";
 import { getDb } from "./db/client";
 import { setEmailClientDb } from "./email/client";
+import { setWebPushDb } from "./lib/webPush";
 
 export interface BuildAppOptions {
   db?: ReturnType<typeof getDb>;
@@ -39,6 +41,7 @@ export function buildApp(opts: BuildAppOptions = {}): Hono {
 export function buildAppWithWs(opts: BuildAppOptions = {}): BuiltApp {
   const db = opts.db ?? getDb();
   setEmailClientDb(db);
+  setWebPushDb(db);
 
   const app = new Hono();
   app.use("*", cors());
@@ -65,6 +68,7 @@ export function buildAppWithWs(opts: BuildAppOptions = {}): BuiltApp {
   api.route("/export", exportRoutes());
   api.route("/workspace", workspaceRoutes(db));
   api.route("/chat", chatRoutes(db, upgradeWebSocket));
+  api.route("/push", pushRoutes(db));
 
   app.route("/api", api);
   return { app, injectWebSocket };

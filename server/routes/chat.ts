@@ -24,6 +24,7 @@ import { bumpTyping, clearAllForUser, clearTyping } from "../chat/typing";
 import { attach, detach, isUserOnline, onlineUserIds } from "../chat/presence";
 import { loadMentionsForMessages, resolveMentions } from "../chat/mentions";
 import { cancelForUser, queueMention } from "../chat/mentionDigest";
+import { dispatchPushForMessage } from "../chat/notifications";
 import { resolveAppUrl } from "../lib/appUrl";
 
 type Env = { Variables: { user: SessionUser } };
@@ -1521,6 +1522,20 @@ export function chatRoutes(
       userIds: mentionedIds,
       appUrl: resolveAppUrl(c),
     });
+    void dispatchPushForMessage({
+      db,
+      workspaceId: user.workspaceId,
+      channelId,
+      messageId: created.id,
+      authorUserId: user.id,
+      authorName: user.fullName || user.email.split("@")[0] || "—",
+      body: text,
+      channelName: channel.name,
+      channelType: channel.type,
+      parentMessageId,
+      mentionedUserIds: mentionedIds,
+      appUrl: resolveAppUrl(c),
+    });
     // Thread reply also bumps the parent's reply count for any open
     // ThreadPanel — emit a message.updated event for the parent with the
     // fresh count. Cheap: one extra loadMessageOut.
@@ -1692,6 +1707,20 @@ export function chatRoutes(
       authorUserId: user.id,
       messageId: message.id,
       userIds: mentionedIds,
+      appUrl: resolveAppUrl(c),
+    });
+    void dispatchPushForMessage({
+      db,
+      workspaceId: user.workspaceId,
+      channelId,
+      messageId: message.id,
+      authorUserId: user.id,
+      authorName: user.fullName || user.email.split("@")[0] || "—",
+      body: bodyText || "📎 вложение",
+      channelName: channel.name,
+      channelType: channel.type,
+      parentMessageId,
+      mentionedUserIds: mentionedIds,
       appUrl: resolveAppUrl(c),
     });
     if (parentMessageId != null) {
@@ -1903,6 +1932,24 @@ export function chatRoutes(
       userIds: newlyMentioned,
       appUrl: resolveAppUrl(c),
     });
+    if (newlyMentioned.length > 0) {
+      void dispatchPushForMessage({
+        db,
+        workspaceId: user.workspaceId,
+        channelId: msg.channelId,
+        messageId,
+        authorUserId: user.id,
+        authorName: user.fullName || user.email.split("@")[0] || "—",
+        body: text,
+        channelName: channel.name,
+        channelType: channel.type,
+        parentMessageId: msg.parentMessageId,
+        // Only target the newly-mentioned users — others either saw the
+        // original message in-app or already got a push for it.
+        mentionedUserIds: newlyMentioned,
+        appUrl: resolveAppUrl(c),
+      });
+    }
     return c.json(out);
   });
 

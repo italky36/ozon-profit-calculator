@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
 import Avatar from "./Avatar";
+import NotificationSettings from "./NotificationSettings";
 import {
   resizeImage,
   IMAGE_DATA_URL_MAX_LEN,
@@ -281,6 +282,8 @@ export default function ProfileEditor({
         <div style={{ fontSize: 11.5, color: "var(--muted-2)" }}>
           Email <b>{email}</b> здесь не меняется — это идентификатор для входа.
         </div>
+
+        {mode === "self" && <NotificationSettings />}
 
         {error && (
           <div
