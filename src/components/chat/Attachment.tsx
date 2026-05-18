@@ -8,6 +8,9 @@ import {
   Play,
 } from "lucide-react";
 import type { ChatAttachment } from "../../api";
+import { extractPeaksFromUrl, extractPeaksFromBlob } from "../../lib/audioPeaks";
+
+const WAVEFORM_BUCKETS = 48;
 
 function renderIcon(mime: string) {
   if (mime.startsWith("image/")) return <ImageIcon size={18} />;
@@ -31,43 +34,77 @@ function formatDuration(secs: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-/** Mini audio player for voice messages / audio attachments. Native
- *  <audio controls> works but looks heavyweight and inconsistent across
- *  browsers. Custom: play/pause toggle + click-to-seek progress bar +
- *  «current / total» readout. Loads metadata lazily on first play so a
- *  long feed of voice messages doesn't preload every blob. */
-function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
+/** Mini audio player for voice messages / audio attachments. Custom
+ *  waveform visualisation: PCM amplitudes are decoded once on mount via
+ *  AudioContext.decodeAudioData, downsampled to 48 buckets, and rendered
+ *  as clickable vertical bars. Played portion of the wave fills with the
+ *  accent colour; remaining bars stay muted. Click any bar to seek.
+ *
+ *  Width is intentionally narrow-ish (≈260 px) so the player fits in feed
+ *  message bubbles without dominating the layout. Mobile renders at full
+ *  available width via `width:auto` fallback.
+ *
+ *  Accepts `url` for in-feed playback OR a `blob` for the recording
+ *  preview before upload (extractPeaks skips the network in that case). */
+export interface AudioPlayerProps {
+  /** Network URL or blob: / object URL — used for the `<audio>` element. */
+  url: string;
+  /** Optional Blob that backs `url` (when `url` is a `URL.createObjectURL`
+   *  result). Lets us skip an HTTP round-trip for the recording preview. */
+  blob?: Blob;
+}
+
+export function AudioPlayer({ url, blob }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [duration, setDuration] = useState<number>(0);
   const [position, setPosition] = useState<number>(0);
+  const [peaks, setPeaks] = useState<number[] | null>(null);
 
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
     const onTime = () => setPosition(a.currentTime);
     const onLoaded = () => {
-      // MediaRecorder webm blobs sometimes report Infinity until the user
-      // seeks past the end — guard against it.
       if (Number.isFinite(a.duration)) setDuration(a.duration);
     };
     const onEnd = () => {
       setPlaying(false);
       setPosition(0);
     };
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onLoaded);
     a.addEventListener("durationchange", onLoaded);
     a.addEventListener("ended", onEnd);
-    a.addEventListener("pause", () => setPlaying(false));
-    a.addEventListener("play", () => setPlaying(true));
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
     return () => {
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("loadedmetadata", onLoaded);
       a.removeEventListener("durationchange", onLoaded);
       a.removeEventListener("ended", onEnd);
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
     };
   }, []);
+
+  // Decode peaks once per source. For previews we have the blob in memory;
+  // for feed attachments we fetch via URL. Either way the result is the
+  // same downsampled amplitude array.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = blob
+        ? await extractPeaksFromBlob(blob, WAVEFORM_BUCKETS)
+        : await extractPeaksFromUrl(url, WAVEFORM_BUCKETS);
+      if (!cancelled && result) setPeaks(result);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [url, blob]);
 
   const toggle = () => {
     const a = audioRef.current;
@@ -79,17 +116,25 @@ function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
     }
   };
 
-  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+  const seekByRatio = (ratio: number) => {
     const a = audioRef.current;
     if (!a || !duration || !Number.isFinite(duration)) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    a.currentTime = ratio * duration;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    a.currentTime = clamped * duration;
     setPosition(a.currentTime);
   };
 
-  const ratio = duration > 0 ? Math.min(1, position / duration) : 0;
+  const seekFromMouse = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    seekByRatio((e.clientX - rect.left) / rect.width);
+  };
+
+  const playedRatio = duration > 0 ? Math.min(1, position / duration) : 0;
   const remaining = duration > 0 ? Math.max(0, duration - position) : 0;
+
+  // Bars to render: either real peaks (when decoded) or flat placeholders.
+  const bars = peaks ?? new Array(WAVEFORM_BUCKETS).fill(0.15);
+  const playedBucket = Math.floor(playedRatio * bars.length);
 
   return (
     <div
@@ -101,7 +146,7 @@ function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
         borderRadius: 20,
         background: "var(--bg-soft, #f3f3f3)",
         border: "1px solid var(--border, #e2e2e2)",
-        width: 260,
+        width: 280,
         maxWidth: "100%",
       }}
     >
@@ -127,7 +172,7 @@ function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
         {playing ? <Pause size={14} /> : <Play size={14} />}
       </button>
       <div
-        onClick={seek}
+        onClick={seekFromMouse}
         role="slider"
         aria-label="Позиция воспроизведения"
         aria-valuemin={0}
@@ -136,24 +181,32 @@ function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
         style={{
           flex: 1,
           minWidth: 0,
-          height: 4,
-          borderRadius: 2,
-          background: "var(--border, #ddd)",
+          height: 28,
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
           cursor: duration > 0 ? "pointer" : "default",
-          position: "relative",
         }}
       >
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            height: "100%",
-            width: `${ratio * 100}%`,
-            background: "var(--accent, #2563eb)",
-            borderRadius: 2,
-          }}
-        />
+        {bars.map((peak, i) => {
+          const h = Math.max(3, peak * 24);
+          return (
+            <span
+              key={i}
+              aria-hidden
+              style={{
+                flex: 1,
+                height: `${h}px`,
+                background:
+                  i < playedBucket
+                    ? "var(--accent, #2563eb)"
+                    : "var(--border, #d4d4d4)",
+                borderRadius: 1,
+                transition: "background 60ms linear",
+              }}
+            />
+          );
+        })}
       </div>
       <span
         style={{
@@ -168,7 +221,7 @@ function AudioPlayer({ attachment }: { attachment: ChatAttachment }) {
           : formatDuration(duration || 0)}
         {playing && duration > 0 && ` / ${formatDuration(remaining)}`}
       </span>
-      <audio ref={audioRef} src={attachment.url} preload="metadata" />
+      <audio ref={audioRef} src={url} preload="metadata" />
     </div>
   );
 }
@@ -180,7 +233,7 @@ export default function Attachment({
 }) {
   const isImage = attachment.mimeType.startsWith("image/");
   const isAudio = attachment.mimeType.startsWith("audio/");
-  if (isAudio) return <AudioPlayer attachment={attachment} />;
+  if (isAudio) return <AudioPlayer url={attachment.url} />;
   if (isImage) {
     // Open in new tab on click — server sends Content-Disposition: inline,
     // so browser previews. NO `download` attribute here — that would force

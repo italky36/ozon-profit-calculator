@@ -10,17 +10,18 @@ import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "reac
 import {
   FileText,
   Mic,
-  MicOff,
   Paperclip,
   Reply,
   Send,
   Smile,
+  Square,
   Trash2,
   X,
 } from "lucide-react";
 import type { ChatMessage, WorkspaceMember } from "../../api";
 import MentionAutocomplete from "./MentionAutocomplete";
 import EmojiPicker from "./EmojiPicker";
+import { AudioPlayer } from "./Attachment";
 
 /** Format byte count for the file-tile tooltip (e.g. "1.4 MB"). */
 function formatBytes(n: number): string {
@@ -127,6 +128,15 @@ export default function Composer({
   const recorderChunksRef = useRef<Blob[]>([]);
   const recorderTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recorderCancelledRef = useRef(false);
+  /** Finished recording awaiting send. Distinct from `pending` so the
+   *  preview UI can render a horizontal audio-player widget instead of
+   *  the 64×64 file tiles. The blob is kept alive by the object URL until
+   *  send or discard. */
+  const [recordedVoice, setRecordedVoice] = useState<{
+    file: File;
+    previewUrl: string;
+    blob: Blob;
+  } | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const typingRefreshAt = useRef<number>(0);
@@ -352,7 +362,14 @@ export default function Composer({
       const file = new File([blob], `voice-${ts}.${extForMime(blobMime)}`, {
         type: blobMime,
       });
-      setPending((prev) => [...prev, file]);
+      // Move to preview state — the user can listen before committing.
+      // Send() will attach this on top of any other pending files. If a
+      // previous unsent preview exists (shouldn't happen — Mic is disabled
+      // while it's there), revoke its URL first.
+      setRecordedVoice((prev) => {
+        if (prev) URL.revokeObjectURL(prev.previewUrl);
+        return { file, previewUrl: URL.createObjectURL(blob), blob };
+      });
     });
     // Start with 250 ms chunks so dataavailable fires regularly — required
     // by some browsers (Firefox) to deliver any data at all when stop is
@@ -402,7 +419,8 @@ export default function Composer({
 
   // Belt-and-suspenders cleanup: if the composer unmounts mid-recording
   // (channel switch, navigation), drop the mic stream so the OS-level
-  // recording indicator doesn't linger.
+  // recording indicator doesn't linger. Also revoke any preview blob URL
+  // we still hold.
   useEffect(() => {
     return () => {
       if (recorderRef.current) {
@@ -414,6 +432,10 @@ export default function Composer({
         }
       }
       teardownRecorder();
+      setRecordedVoice((prev) => {
+        if (prev) URL.revokeObjectURL(prev.previewUrl);
+        return null;
+      });
     };
   }, [teardownRecorder]);
 
@@ -449,7 +471,11 @@ export default function Composer({
     setPending(pending.filter((_, i) => i !== idx));
   };
 
-  const canSend = !busy && !disabled && (text.trim() !== "" || pending.length > 0);
+  const canSend =
+    !busy &&
+    !disabled &&
+    recordingSecs == null &&
+    (text.trim() !== "" || pending.length > 0 || recordedVoice != null);
 
   const send = useCallback(async () => {
     if (!canSend) return;
@@ -457,13 +483,22 @@ export default function Composer({
     setError(null);
     try {
       const body = text.trim();
-      if (pending.length > 0) {
-        await onSendWithAttachments(body, pending);
+      // Voice preview is sent as part of the attachments list along with
+      // any other pending files. Server treats it as a normal upload.
+      const files = recordedVoice
+        ? [...pending, recordedVoice.file]
+        : pending;
+      if (files.length > 0) {
+        await onSendWithAttachments(body, files);
       } else {
         await onSendText(body);
       }
       setText("");
       setPending([]);
+      if (recordedVoice) {
+        URL.revokeObjectURL(recordedVoice.previewUrl);
+        setRecordedVoice(null);
+      }
       stopTyping();
       setEmojiOpen(false);
     } catch (e) {
@@ -471,7 +506,23 @@ export default function Composer({
     } finally {
       setBusy(false);
     }
-  }, [canSend, text, pending, onSendText, onSendWithAttachments, stopTyping]);
+  }, [
+    canSend,
+    text,
+    pending,
+    recordedVoice,
+    onSendText,
+    onSendWithAttachments,
+    stopTyping,
+  ]);
+
+  /** Discard the staged voice preview without sending. */
+  const discardRecordedVoice = useCallback(() => {
+    setRecordedVoice((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl);
+      return null;
+    });
+  }, []);
 
   const insertMention = useCallback(
     (m: WorkspaceMember) => {
@@ -616,6 +667,42 @@ export default function Composer({
             }}
           >
             <X size={14} />
+          </button>
+        </div>
+      )}
+      {recordedVoice && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 8,
+          }}
+        >
+          <AudioPlayer
+            url={recordedVoice.previewUrl}
+            blob={recordedVoice.blob}
+          />
+          <button
+            type="button"
+            onClick={discardRecordedVoice}
+            title="Удалить запись"
+            aria-label="Удалить запись"
+            style={{
+              background: "transparent",
+              border: "1px solid var(--border, #ddd)",
+              borderRadius: "50%",
+              width: 28,
+              height: 28,
+              cursor: "pointer",
+              color: "var(--muted, #888)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Trash2 size={14} />
           </button>
         </div>
       )}
@@ -816,7 +903,7 @@ export default function Composer({
             onClick={() => void startRecording()}
             title="Записать голосовое сообщение"
             aria-label="Записать голосовое сообщение"
-            disabled={disabled || busy}
+            disabled={disabled || busy || recordedVoice != null}
           >
             <Mic size={16} />
           </button>
@@ -864,8 +951,8 @@ export default function Composer({
             <button
               type="button"
               onClick={stopRecording}
-              title="Остановить и прикрепить"
-              aria-label="Остановить и прикрепить"
+              title="Остановить и прослушать"
+              aria-label="Остановить и прослушать"
               style={{
                 background: "var(--danger, #c33)",
                 color: "#fff",
@@ -879,7 +966,7 @@ export default function Composer({
                 justifyContent: "center",
               }}
             >
-              <MicOff size={12} />
+              <Square size={10} fill="currentColor" />
             </button>
           </div>
         )}
