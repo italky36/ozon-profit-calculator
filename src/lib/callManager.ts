@@ -11,11 +11,12 @@
  *   - Caller emits call.invite on WS → server replies call.created (carries
  *     callId + invitedUserIds).
  *   - Server fans out call.incoming to invitees → they call accept() → server
- *     publishes call.accepted to everyone in the roster.
- *   - On call.accepted (or call.peer-joined later), each side that was
- *     already in the call creates an offer toward the new peer (lower userId
- *     becomes "polite", higher userId initiates — keeps glare resolution
- *     simple for mesh of N≤5).
+ *     publishes call.accepted (UI status) AND call.peer-joined (authoritative
+ *     mesh handshake, carries connectedUserIds snapshot).
+ *   - On call.peer-joined, every peer ALREADY in connectedUserIds (excluding
+ *     the newcomer) sends an SDP offer to the newcomer. The newcomer waits
+ *     for incoming offers. Server serialises accepts so each peer-joined
+ *     has a unique newcomer — no glare in the mesh.
  *   - Server proxies call.offer / call.answer / call.ice between peers (with
  *     allowedUserIds filter so other workspace subscribers never see SDP).
  */
@@ -318,15 +319,13 @@ export class CallManager {
         // Authoritative mesh-handshake signal: the newcomer (`userId`) just
         // connected. Every peer that was ALREADY in `connectedUserIds`
         // before this event (i.e. anyone in the new snapshot except the
-        // newcomer themselves) is a candidate offerer.
+        // newcomer themselves) offers SDP to the newcomer. The newcomer
+        // itself sends no offers and waits for incoming ones.
         //
-        // Glare rule: only peers with `selfUserId < newPeer` actually send
-        // the offer. This makes the decision symmetric across the mesh
-        // (every pair has exactly one offerer = the lower-id peer), so we
-        // never see double-offers even when several joins happen in quick
-        // succession. The newcomer (the one with the highest id among
-        // wasConnectedBefore peers + themselves) sends none and just waits
-        // for incoming offers.
+        // No glare possible: server serialises acceptCall, so each
+        // peer-joined event has a unique newcomer. Already-connected peers
+        // offer one at a time as each new participant arrives — every pair
+        // has exactly one offerer (the older participant).
         const newPeer = event.payload.userId;
         const snapshot = event.payload.connectedUserIds;
         this.state.connectedUserIds = new Set(snapshot);
@@ -337,7 +336,7 @@ export class CallManager {
         const wasConnectedBefore = snapshot
           .filter((uid) => uid !== newPeer)
           .includes(this.selfUserId);
-        if (wasConnectedBefore && this.selfUserId < newPeer) {
+        if (wasConnectedBefore) {
           await this.startOfferTo(newPeer);
         } else {
           this.emit();
