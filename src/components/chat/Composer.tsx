@@ -38,6 +38,15 @@ const TRIGGER_RE = /(?:^|\s)@([\p{L}\p{N}_.-]*)$/u;
 /** Hard cap on voice-message length (browser auto-stops at this point and
  *  the recorded blob is attached to the draft). Mirrors WhatsApp/Slack. */
 const VOICE_MAX_SECS = 120;
+/** Live waveform during recording: VOICE_MAX_SECS / BAR_SECS bars on a
+ *  timeline so the user sees how much room is left. 60 bars × 2 s each
+ *  fills the pill width on both desktop and mobile without overflow. */
+const REC_BAR_SECS = 2;
+const REC_BARS_TOTAL = Math.ceil(VOICE_MAX_SECS / REC_BAR_SECS);
+/** Sample at 10 Hz — captures spikes between 2 s buckets without spamming
+ *  the React render loop. samplesPerBar = 20 with this combination. */
+const REC_SAMPLE_INTERVAL_MS = 100;
+const REC_SAMPLES_PER_BAR = (REC_BAR_SECS * 1000) / REC_SAMPLE_INTERVAL_MS;
 /** Format MM:SS for the recording timer. */
 function fmtMMSS(secs: number): string {
   const m = Math.floor(secs / 60);
@@ -123,11 +132,28 @@ export default function Composer({
    *  MediaRecorder is capturing. The recorder + media stream + tick timer
    *  live on refs so React renders don't tear them down. */
   const [recordingSecs, setRecordingSecs] = useState<number | null>(null);
+  /** Per-bar peaks for the live waveform timeline. Length = REC_BARS_TOTAL;
+   *  position i is the max amplitude observed in the [i*REC_BAR_SECS,
+   *  (i+1)*REC_BAR_SECS) window so far. Bars past the recording head stay 0
+   *  and render as the "remaining time" placeholder. */
+  const [recordingPeaks, setRecordingPeaks] = useState<number[]>([]);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderStreamRef = useRef<MediaStream | null>(null);
   const recorderChunksRef = useRef<Blob[]>([]);
   const recorderTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recorderCancelledRef = useRef(false);
+  /** Live-waveform plumbing: AudioContext + AnalyserNode tap on the mic
+   *  stream, plus a sampling timer. Kept on refs so renders don't recreate
+   *  them and tear-down can disconnect cleanly. */
+  const recorderAudioCtxRef = useRef<AudioContext | null>(null);
+  const recorderAnalyserRef = useRef<AnalyserNode | null>(null);
+  const recorderAnalyserSourceRef = useRef<MediaStreamAudioSourceNode | null>(
+    null,
+  );
+  const recorderSampleTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const recorderSamplesRef = useRef<number[]>([]);
   /** Finished recording awaiting send. Distinct from `pending` so the
    *  preview UI can render a horizontal audio-player widget instead of
    *  the 64×64 file tiles. The blob is kept alive by the object URL until
@@ -289,6 +315,33 @@ export default function Composer({
       clearInterval(recorderTickRef.current);
       recorderTickRef.current = null;
     }
+    if (recorderSampleTimerRef.current) {
+      clearInterval(recorderSampleTimerRef.current);
+      recorderSampleTimerRef.current = null;
+    }
+    if (recorderAnalyserSourceRef.current) {
+      try {
+        recorderAnalyserSourceRef.current.disconnect();
+      } catch {
+        /* ignore */
+      }
+      recorderAnalyserSourceRef.current = null;
+    }
+    if (recorderAnalyserRef.current) {
+      try {
+        recorderAnalyserRef.current.disconnect();
+      } catch {
+        /* ignore */
+      }
+      recorderAnalyserRef.current = null;
+    }
+    if (recorderAudioCtxRef.current) {
+      // Close releases the audio thread; safe to ignore «already closed» race.
+      recorderAudioCtxRef.current.close().catch(() => {});
+      recorderAudioCtxRef.current = null;
+    }
+    recorderSamplesRef.current = [];
+    setRecordingPeaks([]);
     const stream = recorderStreamRef.current;
     if (stream) {
       for (const t of stream.getTracks()) t.stop();
@@ -375,6 +428,54 @@ export default function Composer({
     // by some browsers (Firefox) to deliver any data at all when stop is
     // called shortly after start.
     mr.start(250);
+
+    // Live-waveform tap. AnalyserNode reads time-domain samples from the
+    // same MediaStream; we never connect it to destination so there's no
+    // echo. A separate sampling timer at 10 Hz pushes per-tick peaks into
+    // a ref, then aggregates them into REC_BARS_TOTAL buckets for the
+    // pill. Closing the AudioContext on teardown disconnects the graph.
+    try {
+      const Ctor: typeof AudioContext =
+        window.AudioContext ??
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).webkitAudioContext;
+      const ctx = new Ctor();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      recorderAudioCtxRef.current = ctx;
+      recorderAnalyserRef.current = analyser;
+      recorderAnalyserSourceRef.current = source;
+      const buf = new Uint8Array(analyser.fftSize);
+      recorderSamplesRef.current = [];
+      setRecordingPeaks(new Array(REC_BARS_TOTAL).fill(0));
+      recorderSampleTimerRef.current = setInterval(() => {
+        analyser.getByteTimeDomainData(buf);
+        let peak = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const v = Math.abs(buf[i]! - 128) / 128;
+          if (v > peak) peak = v;
+        }
+        recorderSamplesRef.current.push(peak);
+        // Aggregate the running sample list into REC_BARS_TOTAL buckets.
+        // Cheap O(N) — N grows to ~1200 over the full 2 min, negligible.
+        const display = new Array<number>(REC_BARS_TOTAL).fill(0);
+        const samples = recorderSamplesRef.current;
+        for (let s = 0; s < samples.length; s++) {
+          const barIdx = Math.floor(s / REC_SAMPLES_PER_BAR);
+          if (barIdx >= REC_BARS_TOTAL) break;
+          const v = samples[s]!;
+          if (v > display[barIdx]!) display[barIdx] = v;
+        }
+        setRecordingPeaks(display);
+      }, REC_SAMPLE_INTERVAL_MS);
+    } catch {
+      // AnalyserNode setup failures shouldn't break the recording itself —
+      // we just lose the live waveform. Recording continues with the
+      // empty placeholder bars.
+    }
+
     setRecordingSecs(0);
     recorderTickRef.current = setInterval(() => {
       setRecordingSecs((s) => {
@@ -918,40 +1019,15 @@ export default function Composer({
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
-              padding: "3px 8px",
+              padding: "3px 6px 3px 8px",
               borderRadius: 14,
               background: "var(--bg-soft, #f3f3f3)",
               border: "1px solid var(--border, #ddd)",
               color: "inherit",
               minWidth: 0,
-              // Recording pill takes whatever the row has — `flex: 1` lets
-              // it grow on wide screens and shrink past its content size on
-              // narrow ones (timer keeps tabular-num font so it doesn't
-              // jump).
               flex: 1,
             }}
           >
-            <span
-              aria-hidden
-              title="Идёт запись"
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: 4,
-                background: "var(--danger, #c33)",
-                animation: "ozonRecPulse 1s ease-in-out infinite",
-                flexShrink: 0,
-              }}
-            />
-            <span
-              style={{
-                fontVariantNumeric: "tabular-nums",
-                fontSize: 12,
-                color: "var(--muted, #555)",
-              }}
-            >
-              {fmtMMSS(recordingSecs)} / {fmtMMSS(VOICE_MAX_SECS)}
-            </span>
             <button
               type="button"
               onClick={cancelRecording}
@@ -964,11 +1040,73 @@ export default function Composer({
                 color: "var(--muted, #888)",
                 padding: 2,
                 display: "inline-flex",
-                marginLeft: "auto",
+                flexShrink: 0,
               }}
             >
               <Trash2 size={14} />
             </button>
+            <span
+              aria-hidden
+              title="Идёт запись"
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 4,
+                background: "var(--danger, #c33)",
+                animation: "ozonRecPulse 1s ease-in-out infinite",
+                flexShrink: 0,
+              }}
+            />
+            <div
+              role="meter"
+              aria-label="Уровень и оставшееся время записи"
+              aria-valuemin={0}
+              aria-valuemax={VOICE_MAX_SECS}
+              aria-valuenow={recordingSecs}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                height: 22,
+                display: "flex",
+                alignItems: "center",
+                gap: 1,
+              }}
+            >
+              {Array.from({ length: REC_BARS_TOTAL }, (_, i) => {
+                const elapsedSec = recordingSecs ?? 0;
+                const barStartSec = i * REC_BAR_SECS;
+                const filled = barStartSec < elapsedSec;
+                const peak = recordingPeaks[i] ?? 0;
+                const h = filled
+                  ? Math.max(3, peak * 18)
+                  : 2; // placeholder for «remaining» portion
+                return (
+                  <span
+                    key={i}
+                    aria-hidden
+                    style={{
+                      flex: 1,
+                      height: `${h}px`,
+                      background: filled
+                        ? "var(--accent, #2563eb)"
+                        : "var(--border, #d4d4d4)",
+                      borderRadius: 1,
+                      transition: "height 80ms linear",
+                    }}
+                  />
+                );
+              })}
+            </div>
+            <span
+              style={{
+                fontVariantNumeric: "tabular-nums",
+                fontSize: 11,
+                color: "var(--muted, #555)",
+                flexShrink: 0,
+              }}
+            >
+              {fmtMMSS(recordingSecs)}
+            </span>
             <button
               type="button"
               onClick={stopRecording}
