@@ -31,17 +31,18 @@ export function getNotificationPermission(): NotificationPermission | "unsupport
 }
 
 /** Idempotent SW registration. Returns the registration on success, null on
- *  unsupported / failed. SW updates on every page load via the browser's
- *  built-in 24h max-age check. */
+ *  unsupported. Throws with the underlying DOMException message on failure
+ *  so the caller can surface a useful diagnostic — silently swallowing the
+ *  error leaves the user staring at «Не удалось зарегистрировать service
+ *  worker» with no hint about *why* (self-signed cert, mixed content, SW
+ *  disabled in dev tools, …). */
 export async function ensureServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (!isPushSupported()) return null;
-  try {
-    const existing = await navigator.serviceWorker.getRegistration(SW_SCOPE);
-    if (existing) return existing;
-    return await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
-  } catch {
-    return null;
-  }
+  const existing = await navigator.serviceWorker
+    .getRegistration(SW_SCOPE)
+    .catch(() => null);
+  if (existing) return existing;
+  return navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
 }
 
 /** True if the user already opted in on this device — checks for an
@@ -67,8 +68,27 @@ export async function subscribeToPush(): Promise<void> {
         : "Разрешение не выдано",
     );
   }
-  const reg = await ensureServiceWorker();
-  if (!reg) throw new Error("Не удалось зарегистрировать service worker");
+  let reg: ServiceWorkerRegistration | null;
+  try {
+    reg = await ensureServiceWorker();
+  } catch (e) {
+    const err = e as Error;
+    const host = typeof window !== "undefined" ? window.location.host : "";
+    const proto = typeof window !== "undefined" ? window.location.protocol : "";
+    // Most common dev-time cause: HTTPS on a LAN IP with a self-signed cert
+    // that the browser doesn't fully trust for SW registration. The error
+    // message from the browser ("...failed to register...SSL...") is not
+    // human-friendly, so we add a hint.
+    const hint =
+      proto === "https:" && host && !host.startsWith("localhost")
+        ? ` (часто из-за self-signed cert на ${host} — откройте https://localhost:5173 или добавьте origin в chrome://flags/#unsafely-treat-insecure-origin-as-secure)`
+        : "";
+    throw new Error(
+      `Не удалось зарегистрировать service worker: ${err.message}${hint}`,
+      { cause: e },
+    );
+  }
+  if (!reg) throw new Error("Браузер не поддерживает service worker");
 
   // Fetch VAPID public key.
   const keyRes = await fetch("/api/push/public-key", {
