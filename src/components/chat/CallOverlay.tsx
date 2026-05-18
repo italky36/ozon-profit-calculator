@@ -41,9 +41,19 @@ function PeerTile({
   status?: "connected" | "ringing";
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+  // Audio element is mounted unconditionally for *remote* streams — without
+  // it an audio-only call has no playback target and the user hears nothing,
+  // even though the MediaStream is fully connected. Muted on the self tile
+  // (caller doesn't echo their own mic) by reusing the same `muted` prop.
+  useEffect(() => {
+    if (audioRef.current && stream) {
+      audioRef.current.srcObject = stream;
     }
   }, [stream]);
   const hasVideo =
@@ -83,6 +93,12 @@ function PeerTile({
           size={96}
         />
       )}
+      {/* Hidden audio sink — always present for remote tiles so audio-only
+          calls (no video track to attach to) still play sound. Muted when
+          the <video> element above is rendering the same stream (else we
+          get double playback), and muted for the self tile (no echo). */}
+      <audio ref={audioRef} autoPlay muted={muted || hasVideo} />
+
       <div
         style={{
           position: "absolute",
