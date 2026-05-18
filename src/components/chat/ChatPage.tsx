@@ -10,6 +10,7 @@ import { useAuth } from "../../contexts/useAuth";
 import { ChatSocket } from "../../lib/chatSocket";
 import ChatLayout from "./layout/ChatLayout";
 import { CallManager, type CallState } from "../../lib/callManager";
+import { startRingtone } from "../../lib/ringtone";
 import { CallOverlay } from "./CallOverlay";
 import { IncomingCallBanner } from "./IncomingCallBanner";
 import {
@@ -137,6 +138,26 @@ export default function ChatPage({
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
+
+  // Ring tones: classic two-tone for inbound, single-tone wait for outbound.
+  // Each effect's cleanup stops the previous loop, so transitioning from
+  // "ringing" → "connecting"/"live"/"ended" silences the right one
+  // automatically. AudioContext init lives inside startRingtone — gated by
+  // browser autoplay policy, best-effort.
+  useEffect(() => {
+    if (!incomingCall) return;
+    const stop = startRingtone("incoming");
+    return stop;
+  }, [incomingCall]);
+  const outboundRinging =
+    callState != null &&
+    callState.role === "caller" &&
+    callState.status === "ringing";
+  useEffect(() => {
+    if (!outboundRinging) return;
+    const stop = startRingtone("outgoing");
+    return stop;
+  }, [outboundRinging]);
   /** Cached ICE servers from /api/chat/ice — fetched lazily on first call. */
   const iceServersRef = useRef<RTCIceServer[] | null>(null);
   /** Caller pre-state: media acquired locally before call.invite was even
