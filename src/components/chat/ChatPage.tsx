@@ -529,7 +529,9 @@ export default function ChatPage({
         event.type === "call.offer" ||
         event.type === "call.answer" ||
         event.type === "call.ice" ||
-        event.type === "call.peer-left"
+        event.type === "call.peer-joined" ||
+        event.type === "call.peer-left" ||
+        event.type === "call.peer-declined"
       ) {
         void callManagerRef.current?.dispatch(event);
         return;
