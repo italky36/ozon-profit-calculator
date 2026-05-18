@@ -63,7 +63,11 @@ const ALLOWED_MIME = new Set([
 
 function isAllowedMime(mime: string): boolean {
   if (!mime) return false;
+  // Images render inline; audio gets the in-message player (voice messages
+  // arrive here as audio/webm;codecs=opus from MediaRecorder, but we accept
+  // common containers in case the client encodes differently).
   if (mime.startsWith("image/")) return true;
+  if (mime.startsWith("audio/")) return true;
   return ALLOWED_MIME.has(mime);
 }
 

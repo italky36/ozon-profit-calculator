@@ -2037,6 +2037,10 @@ fieldset legend {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+@keyframes ozonRecPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 @media (max-width: 640px) {
   .toast-container { right: 12px; bottom: 12px; left: 12px; align-items: stretch; }
   .toast { max-width: none; }

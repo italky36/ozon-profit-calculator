@@ -7,7 +7,17 @@ import {
   useState,
 } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
-import { FileText, Paperclip, Reply, Send, Smile, X } from "lucide-react";
+import {
+  FileText,
+  Mic,
+  MicOff,
+  Paperclip,
+  Reply,
+  Send,
+  Smile,
+  Trash2,
+  X,
+} from "lucide-react";
 import type { ChatMessage, WorkspaceMember } from "../../api";
 import MentionAutocomplete from "./MentionAutocomplete";
 import EmojiPicker from "./EmojiPicker";
@@ -24,6 +34,39 @@ const MAX_FILES = 10;
 const TYPING_REFRESH_MS = 3_000;
 const MENTION_MAX_RESULTS = 8;
 const TRIGGER_RE = /(?:^|\s)@([\p{L}\p{N}_.-]*)$/u;
+/** Hard cap on voice-message length (browser auto-stops at this point and
+ *  the recorded blob is attached to the draft). Mirrors WhatsApp/Slack. */
+const VOICE_MAX_SECS = 120;
+/** Format MM:SS for the recording timer. */
+function fmtMMSS(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Pick a MediaRecorder MIME the browser can actually produce. Most modern
+ *  browsers prefer audio/webm;codecs=opus; Safari falls back to mp4. The
+ *  server `audio/*` allowlist accepts whatever lands. */
+function pickRecorderMime(): string {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  if (typeof MediaRecorder === "undefined") return "";
+  for (const m of candidates) {
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function extForMime(mime: string): string {
+  if (mime.includes("webm")) return "webm";
+  if (mime.includes("ogg")) return "ogg";
+  if (mime.includes("mp4")) return "m4a";
+  return "audio";
+}
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[\s._-]+/g, "");
@@ -75,6 +118,15 @@ export default function Composer({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionSelectedIdx, setMentionSelectedIdx] = useState(0);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  /** Voice recording state. Null = not recording; non-null while the
+   *  MediaRecorder is capturing. The recorder + media stream + tick timer
+   *  live on refs so React renders don't tear them down. */
+  const [recordingSecs, setRecordingSecs] = useState<number | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderStreamRef = useRef<MediaStream | null>(null);
+  const recorderChunksRef = useRef<Blob[]>([]);
+  const recorderTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recorderCancelledRef = useRef(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const typingRefreshAt = useRef<number>(0);
@@ -219,6 +271,151 @@ export default function Composer({
     if (files.length > 0) acceptFiles(files);
     if (fileInput.current) fileInput.current.value = "";
   };
+
+  /** Tear down the mic stream + timer. Used by both stop and cancel — they
+   *  differ only by whether the produced blob lands in `pending`. */
+  const teardownRecorder = useCallback(() => {
+    if (recorderTickRef.current) {
+      clearInterval(recorderTickRef.current);
+      recorderTickRef.current = null;
+    }
+    const stream = recorderStreamRef.current;
+    if (stream) {
+      for (const t of stream.getTracks()) t.stop();
+    }
+    recorderStreamRef.current = null;
+    recorderRef.current = null;
+    recorderChunksRef.current = [];
+    setRecordingSecs(null);
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (recorderRef.current) return;
+    setError(null);
+    if (typeof MediaRecorder === "undefined") {
+      setError("Браузер не поддерживает запись аудио");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(
+        "Запись недоступна — приложение работает не в secure context. " +
+          "Откройте через https:// или http://localhost.",
+      );
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      const name = (e as DOMException).name ?? "";
+      const msg =
+        name === "NotAllowedError" || name === "PermissionDeniedError"
+          ? "Доступ к микрофону запрещён. Разрешите его в настройках браузера."
+          : name === "NotFoundError"
+            ? "Микрофон не найден. Подключите устройство и повторите."
+            : `Не удалось получить доступ к микрофону${name ? ` (${name})` : ""}.`;
+      setError(msg);
+      return;
+    }
+    const mime = pickRecorderMime();
+    let mr: MediaRecorder;
+    try {
+      mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    } catch {
+      for (const t of stream.getTracks()) t.stop();
+      setError("Не удалось запустить запись аудио");
+      return;
+    }
+    recorderStreamRef.current = stream;
+    recorderRef.current = mr;
+    recorderChunksRef.current = [];
+    recorderCancelledRef.current = false;
+    mr.addEventListener("dataavailable", (evt) => {
+      if (evt.data && evt.data.size > 0) recorderChunksRef.current.push(evt.data);
+    });
+    mr.addEventListener("stop", () => {
+      const wasCancelled = recorderCancelledRef.current;
+      const chunks = recorderChunksRef.current.slice();
+      teardownRecorder();
+      if (wasCancelled || chunks.length === 0) return;
+      const blobMime = mr.mimeType || mime || "audio/webm";
+      const blob = new Blob(chunks, { type: blobMime });
+      if (blob.size === 0) return;
+      if (blob.size > MAX_FILE_BYTES) {
+        setError("Запись больше 25 МБ — сократите длительность");
+        return;
+      }
+      const ts = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .slice(0, 19);
+      const file = new File([blob], `voice-${ts}.${extForMime(blobMime)}`, {
+        type: blobMime,
+      });
+      setPending((prev) => [...prev, file]);
+    });
+    // Start with 250 ms chunks so dataavailable fires regularly — required
+    // by some browsers (Firefox) to deliver any data at all when stop is
+    // called shortly after start.
+    mr.start(250);
+    setRecordingSecs(0);
+    recorderTickRef.current = setInterval(() => {
+      setRecordingSecs((s) => {
+        if (s == null) return s;
+        const next = s + 1;
+        if (next >= VOICE_MAX_SECS) {
+          // Auto-stop at the cap; the recorder's `stop` event will commit
+          // the partial blob to `pending`.
+          try {
+            recorderRef.current?.stop();
+          } catch {
+            /* already stopped */
+          }
+        }
+        return next;
+      });
+    }, 1000);
+  }, [teardownRecorder]);
+
+  const stopRecording = useCallback(() => {
+    const mr = recorderRef.current;
+    if (!mr) return;
+    recorderCancelledRef.current = false;
+    try {
+      mr.stop();
+    } catch {
+      /* race with auto-stop */
+      teardownRecorder();
+    }
+  }, [teardownRecorder]);
+
+  const cancelRecording = useCallback(() => {
+    const mr = recorderRef.current;
+    if (!mr) return;
+    recorderCancelledRef.current = true;
+    try {
+      mr.stop();
+    } catch {
+      teardownRecorder();
+    }
+  }, [teardownRecorder]);
+
+  // Belt-and-suspenders cleanup: if the composer unmounts mid-recording
+  // (channel switch, navigation), drop the mic stream so the OS-level
+  // recording indicator doesn't linger.
+  useEffect(() => {
+    return () => {
+      if (recorderRef.current) {
+        recorderCancelledRef.current = true;
+        try {
+          recorderRef.current.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      teardownRecorder();
+    };
+  }, [teardownRecorder]);
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const files: File[] = [];
@@ -591,7 +788,7 @@ export default function Composer({
           className="btn-icon"
           onClick={() => fileInput.current?.click()}
           title="Прикрепить файл"
-          disabled={disabled || busy}
+          disabled={disabled || busy || recordingSecs != null}
         >
           <Paperclip size={16} />
         </button>
@@ -607,12 +804,86 @@ export default function Composer({
           className="btn-icon"
           onClick={() => setEmojiOpen((v) => !v)}
           title="Эмодзи"
-          disabled={disabled || busy}
+          disabled={disabled || busy || recordingSecs != null}
           style={emojiOpen ? { color: "var(--accent)" } : undefined}
         >
           <Smile size={16} />
         </button>
-        {!hideHints && (
+        {recordingSecs == null ? (
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={() => void startRecording()}
+            title="Записать голосовое сообщение"
+            aria-label="Записать голосовое сообщение"
+            disabled={disabled || busy}
+          >
+            <Mic size={16} />
+          </button>
+        ) : (
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "2px 10px",
+              borderRadius: 14,
+              background: "var(--accent-soft, #fee2e2)",
+              color: "var(--danger, #c33)",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 4,
+                background: "var(--danger, #c33)",
+                animation: "ozonRecPulse 1s ease-in-out infinite",
+              }}
+            />
+            <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
+              {fmtMMSS(recordingSecs)} / {fmtMMSS(VOICE_MAX_SECS)}
+            </span>
+            <button
+              type="button"
+              onClick={cancelRecording}
+              title="Отменить запись"
+              aria-label="Отменить запись"
+              style={{
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                color: "inherit",
+                padding: 2,
+                display: "inline-flex",
+              }}
+            >
+              <Trash2 size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={stopRecording}
+              title="Остановить и прикрепить"
+              aria-label="Остановить и прикрепить"
+              style={{
+                background: "var(--danger, #c33)",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                width: 24,
+                height: 24,
+                borderRadius: "50%",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <MicOff size={12} />
+            </button>
+          </div>
+        )}
+        {!hideHints && recordingSecs == null && (
           <span style={{ fontSize: 11, color: "var(--muted, #888)" }}>
             Enter — отправить · Shift+Enter — новая строка
           </span>
@@ -621,7 +892,7 @@ export default function Composer({
           type="button"
           className="btn-primary"
           onClick={() => void send()}
-          disabled={!canSend}
+          disabled={!canSend || recordingSecs != null}
           style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}
         >
           <Send size={14} />
