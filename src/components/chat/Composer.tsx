@@ -870,33 +870,37 @@ export default function Composer({
           marginTop: 6,
         }}
       >
-        <button
-          type="button"
-          className="btn-icon"
-          onClick={() => fileInput.current?.click()}
-          title="Прикрепить файл"
-          disabled={disabled || busy || recordingSecs != null}
-        >
-          <Paperclip size={16} />
-        </button>
-        <input
-          ref={fileInput}
-          type="file"
-          multiple
-          onChange={onFileChange}
-          style={{ display: "none" }}
-        />
-        <button
-          type="button"
-          className="btn-icon"
-          onClick={() => setEmojiOpen((v) => !v)}
-          title="Эмодзи"
-          disabled={disabled || busy || recordingSecs != null}
-          style={emojiOpen ? { color: "var(--accent)" } : undefined}
-        >
-          <Smile size={16} />
-        </button>
-        {recordingSecs == null ? (
+        {recordingSecs == null && (
+          <>
+            <button
+              type="button"
+              className="btn-icon"
+              onClick={() => fileInput.current?.click()}
+              title="Прикрепить файл"
+              disabled={disabled || busy}
+            >
+              <Paperclip size={16} />
+            </button>
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              onChange={onFileChange}
+              style={{ display: "none" }}
+            />
+            <button
+              type="button"
+              className="btn-icon"
+              onClick={() => setEmojiOpen((v) => !v)}
+              title="Эмодзи"
+              disabled={disabled || busy}
+              style={emojiOpen ? { color: "var(--accent)" } : undefined}
+            >
+              <Smile size={16} />
+            </button>
+          </>
+        )}
+        {recordingSecs == null && (
           <button
             type="button"
             className="btn-icon"
@@ -907,29 +911,45 @@ export default function Composer({
           >
             <Mic size={16} />
           </button>
-        ) : (
+        )}
+        {recordingSecs != null && (
           <div
             style={{
               display: "inline-flex",
               alignItems: "center",
-              gap: 8,
-              padding: "2px 10px",
+              gap: 6,
+              padding: "3px 8px",
               borderRadius: 14,
-              background: "var(--accent-soft, #fee2e2)",
-              color: "var(--danger, #c33)",
+              background: "var(--bg-soft, #f3f3f3)",
+              border: "1px solid var(--border, #ddd)",
+              color: "inherit",
+              minWidth: 0,
+              // Recording pill takes whatever the row has — `flex: 1` lets
+              // it grow on wide screens and shrink past its content size on
+              // narrow ones (timer keeps tabular-num font so it doesn't
+              // jump).
+              flex: 1,
             }}
           >
             <span
               aria-hidden
+              title="Идёт запись"
               style={{
                 width: 8,
                 height: 8,
                 borderRadius: 4,
                 background: "var(--danger, #c33)",
                 animation: "ozonRecPulse 1s ease-in-out infinite",
+                flexShrink: 0,
               }}
             />
-            <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
+            <span
+              style={{
+                fontVariantNumeric: "tabular-nums",
+                fontSize: 12,
+                color: "var(--muted, #555)",
+              }}
+            >
               {fmtMMSS(recordingSecs)} / {fmtMMSS(VOICE_MAX_SECS)}
             </span>
             <button
@@ -941,9 +961,10 @@ export default function Composer({
                 background: "transparent",
                 border: "none",
                 cursor: "pointer",
-                color: "inherit",
+                color: "var(--muted, #888)",
                 padding: 2,
                 display: "inline-flex",
+                marginLeft: "auto",
               }}
             >
               <Trash2 size={14} />
@@ -954,19 +975,20 @@ export default function Composer({
               title="Остановить и прослушать"
               aria-label="Остановить и прослушать"
               style={{
-                background: "var(--danger, #c33)",
+                background: "var(--accent, #2563eb)",
                 color: "#fff",
                 border: "none",
                 cursor: "pointer",
-                width: 24,
-                height: 24,
+                width: 26,
+                height: 26,
                 borderRadius: "50%",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
+                flexShrink: 0,
               }}
             >
-              <Square size={10} fill="currentColor" />
+              <Square size={11} fill="currentColor" />
             </button>
           </div>
         )}
@@ -975,16 +997,24 @@ export default function Composer({
             Enter — отправить · Shift+Enter — новая строка
           </span>
         )}
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={() => void send()}
-          disabled={!canSend || recordingSecs != null}
-          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}
-        >
-          <Send size={14} />
-          Отправить
-        </button>
+        {recordingSecs == null && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void send()}
+            disabled={!canSend}
+            style={{
+              marginLeft: "auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              flexShrink: 0,
+            }}
+          >
+            <Send size={14} />
+            Отправить
+          </button>
+        )}
       </div>
       {error && (
         <div style={{ marginTop: 6, color: "var(--danger, #c33)", fontSize: 12 }}>
