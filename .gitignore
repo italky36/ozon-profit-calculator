@@ -50,3 +50,6 @@ workspace/
 *.njsproj
 *.sln
 *.sw?
+
+# Local TLS (mkcert)
+localhost*.pem
