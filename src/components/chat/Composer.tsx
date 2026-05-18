@@ -7,10 +7,17 @@ import {
   useState,
 } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
-import { Paperclip, Send, Smile, X } from "lucide-react";
-import type { WorkspaceMember } from "../../api";
+import { FileText, Paperclip, Reply, Send, Smile, X } from "lucide-react";
+import type { ChatMessage, WorkspaceMember } from "../../api";
 import MentionAutocomplete from "./MentionAutocomplete";
 import EmojiPicker from "./EmojiPicker";
+
+/** Format byte count for the file-tile tooltip (e.g. "1.4 MB"). */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_FILES = 10;
@@ -40,6 +47,12 @@ interface ComposerProps {
   /** Suppress "Enter — отправить · Shift+Enter — новая строка" hint. Set
    *  true on touch devices where keyboard shortcuts don't apply. */
   hideHints?: boolean;
+  /** When non-null, the composer renders a quote-preview banner above the
+   *  textarea and the parent (ChatPage) is expected to thread
+   *  `quotedMessageId` through `onSendText` / `onSendWithAttachments` and
+   *  clear this prop after a successful send. */
+  quoting?: ChatMessage | null;
+  onCancelQuote?: () => void;
 }
 
 export default function Composer({
@@ -51,6 +64,8 @@ export default function Composer({
   onTypingStart,
   onTypingStop,
   hideHints,
+  quoting,
+  onCancelQuote,
 }: ComposerProps) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState<File[]>([]);
@@ -68,6 +83,26 @@ export default function Composer({
    * insertEmoji, consumed by useLayoutEffect below. Using a ref (not state)
    * avoids triggering an extra render. */
   const pendingCaretRef = useRef<number | null>(null);
+
+  /** Blob URLs for image previews — one per file in `pending`. Computed
+   * synchronously from the file list (memoised on identity), and revoked
+   * by the cleanup effect below when the URL list changes or the composer
+   * unmounts. Non-image files map to null. */
+  const previewUrls = useMemo<Array<string | null>>(
+    () =>
+      pending.map((f) =>
+        f.type.startsWith("image/") ? URL.createObjectURL(f) : null,
+      ),
+    [pending],
+  );
+  useEffect(
+    () => () => {
+      for (const u of previewUrls) {
+        if (u) URL.revokeObjectURL(u);
+      }
+    },
+    [previewUrls],
+  );
 
   const insertEmoji = useCallback((emoji: string) => {
     const el = textareaRef.current;
@@ -96,6 +131,21 @@ export default function Composer({
     el.selectionStart = pos;
     el.selectionEnd = pos;
   }, [text]);
+
+  // Auto-focus the textarea when the user picks a quote target — they came
+  // here intending to type a reply, no reason to make them click the input.
+  // Keyed on the quoted message id so picking a different quote re-focuses.
+  const quotingId = quoting?.id ?? null;
+  useEffect(() => {
+    if (quotingId == null) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    // Place the caret at the current end of any existing draft.
+    const end = el.value.length;
+    el.selectionStart = end;
+    el.selectionEnd = end;
+  }, [quotingId]);
 
   const mentionCandidates = useMemo<WorkspaceMember[]>(() => {
     if (mentionQuery === null) return [];
@@ -305,45 +355,172 @@ export default function Composer({
           onClose={() => setEmojiOpen(false)}
         />
       )}
+      {quoting && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "stretch",
+            gap: 8,
+            marginBottom: 8,
+            padding: "6px 8px 6px 0",
+            background: "var(--bg-soft, #f3f3f3)",
+            borderRadius: 6,
+            borderLeft: "3px solid var(--accent, #2563eb)",
+          }}
+        >
+          <Reply
+            size={16}
+            style={{
+              color: "var(--accent, #2563eb)",
+              marginLeft: 8,
+              marginTop: 2,
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: "var(--accent, #2563eb)",
+              }}
+            >
+              {quoting.author.fullName ||
+                quoting.author.email.split("@")[0] ||
+                "—"}
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--muted, #555)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {quoting.deletedAt
+                ? "сообщение удалено"
+                : quoting.body ||
+                  (quoting.attachments.length > 0 ? "📎 вложение" : "")}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancelQuote}
+            title="Отменить цитату"
+            aria-label="Отменить цитату"
+            style={{
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--muted, #888)",
+              padding: 4,
+              flexShrink: 0,
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       {pending.length > 0 && (
         <div
           style={{
             display: "flex",
             flexWrap: "wrap",
-            gap: 6,
+            gap: 8,
             marginBottom: 8,
           }}
         >
-          {pending.map((f, idx) => (
-            <span
-              key={`${f.name}-${idx}`}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "3px 8px",
-                background: "var(--bg-soft, #f3f3f3)",
-                borderRadius: 14,
-                fontSize: 12,
-              }}
-            >
-              {f.name}
-              <button
-                type="button"
-                onClick={() => removePending(idx)}
-                title="Убрать"
+          {pending.map((f, idx) => {
+            const previewUrl = previewUrls[idx] ?? null;
+            const isImage = previewUrl != null;
+            const tooltip = `${f.name} · ${formatBytes(f.size)}`;
+            return (
+              <div
+                key={`${f.name}-${idx}`}
+                title={tooltip}
                 style={{
-                  border: "none",
-                  background: "transparent",
-                  cursor: "pointer",
-                  padding: 2,
-                  display: "inline-flex",
+                  position: "relative",
+                  width: 64,
+                  height: 64,
+                  borderRadius: 8,
+                  overflow: "hidden",
+                  background: "var(--bg-soft, #f3f3f3)",
+                  border: "1px solid var(--border, #ddd)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
                 }}
               >
-                <X size={12} />
-              </button>
-            </span>
-          ))}
+                {isImage ? (
+                  <img
+                    src={previewUrl}
+                    alt={f.name}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "cover",
+                      display: "block",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: 4,
+                      width: "100%",
+                      height: "100%",
+                      boxSizing: "border-box",
+                      color: "var(--muted, #888)",
+                    }}
+                  >
+                    <FileText size={20} />
+                    <span
+                      style={{
+                        fontSize: 10,
+                        marginTop: 2,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        width: "100%",
+                        textAlign: "center",
+                      }}
+                    >
+                      {f.name}
+                    </span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => removePending(idx)}
+                  title="Убрать"
+                  aria-label="Убрать"
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    right: 2,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: "rgba(0,0,0,0.55)",
+                    color: "#fff",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div style={{ position: "relative" }}>

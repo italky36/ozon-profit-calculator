@@ -49,13 +49,45 @@ export interface ChatReadEvent {
   payload: { userId: number; messageId: number };
 }
 
+/** WebRTC signaling fan-out. All variants share `callId` so clients can route
+ * the event to the right call session. `payload.from` is the originating user
+ * (added by the server, not trusted from client). Most variants are restricted
+ * to the call's participant set via pubsub's `allowedUserIds` — `call.incoming`
+ * is delivered to the callee(s) only, SDP/ICE go to the specific peer.
+ *
+ * `call.peer-joined` carries the full snapshot of `connectedUserIds` after
+ * the new peer connected — clients use this to drive the mesh handshake
+ * (already-connected peers offer SDP to the newcomer; see callManager.ts).
+ *
+ * `call.peer-declined` fires in group calls (≥3 invitees) when one callee
+ * declines but the call should continue with the rest — distinct from
+ * `call.declined`/`call.ended` which terminate the whole session. */
+export interface ChatCallEvent {
+  type:
+    | "call.incoming"
+    | "call.accepted"
+    | "call.declined"
+    | "call.ended"
+    | "call.offer"
+    | "call.answer"
+    | "call.ice"
+    | "call.peer-joined"
+    | "call.peer-left"
+    | "call.peer-declined";
+  workspaceId: number;
+  callId: number;
+  channelId: number;
+  payload: Record<string, unknown>;
+}
+
 export type ChatServerEvent =
   | ChatMessageEvent
   | ChatChannelEvent
   | ChatReactionEvent
   | ChatTypingEvent
   | ChatPresenceEvent
-  | ChatReadEvent;
+  | ChatReadEvent
+  | ChatCallEvent;
 
 type Listener = (event: ChatServerEvent) => void;
 

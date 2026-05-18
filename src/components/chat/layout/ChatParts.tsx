@@ -3,7 +3,7 @@
  * Keeping them in one file so the three layout files (Desktop/Tablet/
  * Mobile) stay focused on arrangement, not on what's inside each region. */
 import type { ReactNode } from "react";
-import { Menu, Search, X } from "lucide-react";
+import { Menu, Phone, Search, Video, X } from "lucide-react";
 import MessageStream from "../MessageStream";
 import Composer from "../Composer";
 import TypingIndicator from "../TypingIndicator";
@@ -16,13 +16,9 @@ interface ChannelHeaderProps {
   /** Optional left-side widget — used by mobile to inject a hamburger
    *  toggle for the channel-list drawer. */
   leftSlot?: ReactNode;
-  /** When true, hide the "real-time" connection text — saves horizontal
-   *  space on narrow screens. The status is still reflected by reconnect
-   *  attempts inside ChatSocket. */
-  compactStatus?: boolean;
 }
 
-export function ChannelHeader({ v, leftSlot, compactStatus }: ChannelHeaderProps) {
+export function ChannelHeader({ v, leftSlot }: ChannelHeaderProps) {
   if (!v.activeChannel) return null;
   return (
     <div
@@ -48,6 +44,7 @@ export function ChannelHeader({ v, leftSlot, compactStatus }: ChannelHeaderProps
       >
         #{v.activeChannel.name}
       </strong>
+      <ConnectionDot state={v.connectionState} />
       <button
         type="button"
         className="btn-icon"
@@ -57,41 +54,70 @@ export function ChannelHeader({ v, leftSlot, compactStatus }: ChannelHeaderProps
       >
         <Search size={16} />
       </button>
-      {!compactStatus && (
-        <span
-          style={{
-            fontSize: 11,
-            color:
-              v.connectionState === "open"
-                ? "var(--muted, #888)"
-                : "var(--danger, #c33)",
-          }}
-        >
-          {v.connectionState === "open"
-            ? "в реальном времени"
-            : v.connectionState === "connecting"
-              ? "соединение…"
-              : "оффлайн"}
-        </span>
-      )}
-      {compactStatus && v.connectionState !== "open" && (
-        <span
-          aria-label={
-            v.connectionState === "connecting" ? "соединение" : "оффлайн"
-          }
-          title={
-            v.connectionState === "connecting" ? "соединение" : "оффлайн"
-          }
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 4,
-            background: "var(--danger, #c33)",
-            display: "inline-block",
-          }}
-        />
+      {v.onStartCall && !v.activeChannel.archivedAt && (
+        <>
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={() =>
+              v.onStartCall?.(v.activeChannel!.id, "audio")
+            }
+            title="Аудиозвонок"
+            aria-label="Аудиозвонок"
+          >
+            <Phone size={16} />
+          </button>
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={() =>
+              v.onStartCall?.(v.activeChannel!.id, "video")
+            }
+            title="Видеозвонок"
+            aria-label="Видеозвонок"
+          >
+            <Video size={16} />
+          </button>
+        </>
       )}
     </div>
+  );
+}
+
+/** Small coloured dot for the WebSocket connection state. Replaces the
+ * previous "в реальном времени"/"соединение"/"оффлайн" text — the colour
+ * carries the same info without eating horizontal space. Tooltip preserves
+ * accessibility. */
+function ConnectionDot({
+  state,
+}: {
+  state: "open" | "connecting" | "closed";
+}) {
+  const color =
+    state === "open"
+      ? "#22c55e"
+      : state === "connecting"
+        ? "#eab308"
+        : "var(--danger, #c33)";
+  const label =
+    state === "open"
+      ? "в реальном времени"
+      : state === "connecting"
+        ? "соединение…"
+        : "оффлайн";
+  return (
+    <span
+      aria-label={label}
+      title={label}
+      style={{
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        background: color,
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    />
   );
 }
 
@@ -148,6 +174,8 @@ export function FeedRegion({ v }: { v: ChatViewProps }) {
       onMarkRead={v.onMarkRead}
       onOpenThread={v.onOpenThread}
       onOpenDm={v.onOpenDm}
+      onQuoteMessage={v.onQuoteMessage}
+      scrollToBottomToken={v.scrollToBottomToken}
     />
   );
 }
@@ -185,6 +213,8 @@ export function ComposerRow({
         onTypingStart={v.onTypingStart}
         onTypingStop={v.onTypingStop}
         hideHints={hideHints}
+        quoting={v.quoting}
+        onCancelQuote={v.onCancelQuote}
       />
     </div>
   );

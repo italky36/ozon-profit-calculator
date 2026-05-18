@@ -1,4 +1,4 @@
-import { MessageSquare, Pencil, Trash2 } from "lucide-react";
+import { MessageSquare, Pencil, Reply, Trash2 } from "lucide-react";
 import Drawer from "../Drawer";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🤔", "👀", "🔥", "✅"];
@@ -9,8 +9,10 @@ interface Props {
   canEdit: boolean;
   canDelete: boolean;
   canReplyInThread: boolean;
+  canQuote: boolean;
   onReact: (emoji: string) => void;
   onOpenThread: () => void;
+  onQuote: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
@@ -25,8 +27,10 @@ export default function MessageActionsSheet({
   canEdit,
   canDelete,
   canReplyInThread,
+  canQuote,
   onReact,
   onOpenThread,
+  onQuote,
   onEdit,
   onDelete,
 }: Props) {
@@ -76,6 +80,13 @@ export default function MessageActionsSheet({
             </button>
           ))}
         </div>
+        {canQuote && (
+          <ActionButton
+            icon={<Reply size={18} />}
+            label="Цитировать"
+            onClick={run(onQuote)}
+          />
+        )}
         {canReplyInThread && (
           <ActionButton
             icon={<MessageSquare size={18} />}

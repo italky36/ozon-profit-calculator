@@ -392,6 +392,19 @@ export interface ChatMention {
   email: string;
 }
 
+/** Compact summary of the message a reply quotes (Telegram/WhatsApp-style
+ *  inline preview). NULL on non-quoting messages. */
+export interface ChatQuotedMessage {
+  id: number;
+  authorUserId: number | null;
+  authorName: string;
+  body: string;
+  /** Soft-delete timestamp on the original — UI renders «сообщение удалено». */
+  deletedAt: number | null;
+  /** True when the original carried files (the body might be empty). */
+  hasAttachments: boolean;
+}
+
 export interface ChatMessage {
   id: number;
   channelId: number;
@@ -411,6 +424,9 @@ export interface ChatMessage {
   attachments: ChatAttachment[];
   reactions: ChatReactionAggregate[];
   mentions: ChatMention[];
+  /** Inline-quote preview, when this message is a reply-with-quote.
+   *  Distinct from `parentMessageId` which drives the side-panel thread UX. */
+  quotedMessage: ChatQuotedMessage | null;
 }
 
 export interface ChatMessagesPage {
@@ -473,6 +489,73 @@ export type ChatServerEvent =
       channelId: number;
       workspaceId: number;
       payload: { userId: number; messageId: number };
+    }
+  | {
+      type: "call.incoming";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: {
+        from: number;
+        callType: "audio" | "video";
+        invitedUserIds: number[];
+      };
+    }
+  | {
+      type: "call.accepted";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: { from: number };
+    }
+  | {
+      type: "call.declined" | "call.ended";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: { reason?: string; by?: number | null };
+    }
+  | {
+      type: "call.offer" | "call.answer";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: { from: number; to: number; sdp: RTCSessionDescriptionInit | null };
+    }
+  | {
+      type: "call.ice";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: {
+        from: number;
+        to: number;
+        candidate: RTCIceCandidateInit | null;
+      };
+    }
+  | {
+      type: "call.peer-joined";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      /** `userId` — the freshly-connected peer. `connectedUserIds` — full
+       *  snapshot of who is in the call after this join (incl. initiator +
+       *  newcomer). Clients use the snapshot to drive the mesh-handshake
+       *  rule «previously-connected peers with smaller userId offer SDP». */
+      payload: { userId: number; connectedUserIds: number[] };
+    }
+  | {
+      type: "call.peer-left" | "call.peer-declined";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: { userId: number };
+    }
+  | {
+      type: "call.created";
+      callId: number;
+      channelId: number;
+      invitedUserIds: number[];
     }
   | { type: "hello"; workspaceId: number; onlineUserIds: number[] }
   | { type: "pong" };
@@ -1094,15 +1177,19 @@ export const api = {
     sendMessage: (
       channelId: number,
       body: string,
-      opts: { parentMessageId?: number } = {},
+      opts: { parentMessageId?: number; quotedMessageId?: number } = {},
     ) =>
       apiFetch<ChatMessage>(`/chat/channels/${channelId}/messages`, {
         method: "POST",
-        body: JSON.stringify(
-          opts.parentMessageId != null
-            ? { body, parentMessageId: opts.parentMessageId }
-            : { body },
-        ),
+        body: JSON.stringify({
+          body,
+          ...(opts.parentMessageId != null
+            ? { parentMessageId: opts.parentMessageId }
+            : {}),
+          ...(opts.quotedMessageId != null
+            ? { quotedMessageId: opts.quotedMessageId }
+            : {}),
+        }),
       }),
     editMessage: (id: number, body: string) =>
       apiFetch<ChatMessage>(`/chat/messages/${id}`, {
@@ -1133,12 +1220,19 @@ export const api = {
       ),
     sendMessageWithAttachments: async (
       channelId: number,
-      input: { body?: string; files: File[]; parentMessageId?: number },
+      input: {
+        body?: string;
+        files: File[];
+        parentMessageId?: number;
+        quotedMessageId?: number;
+      },
     ): Promise<ChatMessage> => {
       const fd = new FormData();
       if (input.body) fd.append("body", input.body);
       if (input.parentMessageId != null)
         fd.append("parentMessageId", String(input.parentMessageId));
+      if (input.quotedMessageId != null)
+        fd.append("quotedMessageId", String(input.quotedMessageId));
       for (const f of input.files) fd.append("file", f);
       const res = await fetch(
         `${BASE}/chat/channels/${channelId}/messages/with-attachments`,
@@ -1184,6 +1278,10 @@ export const api = {
         `/chat/search?${params.toString()}`,
       );
     },
+    /** STUN/TURN list for `new RTCPeerConnection({ iceServers })`. Cached
+     *  for the lifetime of the page — sysadmin changes don't hot-reload. */
+    iceServers: () =>
+      apiFetch<{ iceServers: RTCIceServer[] }>("/chat/ice"),
   },
 };
 

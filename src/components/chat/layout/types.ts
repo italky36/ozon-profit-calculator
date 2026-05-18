@@ -4,6 +4,7 @@ import type {
   WorkspaceMember,
 } from "../../../api";
 
+
 /** Typing presence per-channel per-user. Identity carries the typing
  *  person's display fields for the indicator strip. */
 export type TypingByChannel = Map<
@@ -68,4 +69,22 @@ export interface ChatViewProps {
    *  channel to it. Triggered from avatar / mention popovers inside
    *  MessageItem. */
   onOpenDm: (userId: number) => void;
+  /** Place a call from the channel header. Null when calls are not
+   *  available right now (active call already in progress, incoming
+   *  banner, archived channel) — ChannelHeader hides the buttons in that
+   *  case. */
+  onStartCall: ((channelId: number, callType: "audio" | "video") => void) | null;
+
+  /** Currently-staged quote target (Telegram/WhatsApp-style reply). NULL =
+   *  no quote, composer shows no banner. */
+  quoting: ChatMessage | null;
+  /** Stage a message as the inline-quote target. Forwarded to MessageItem
+   *  via MessageStream to drive the «Цитировать» action. */
+  onQuoteMessage: (message: ChatMessage) => void;
+  /** Clear the staged quote. Called from the composer banner's «×». */
+  onCancelQuote: () => void;
+  /** Monotonic counter — ChatPage bumps after every successful send so the
+   *  feed scrolls to the bottom even when the user was up in history (e.g.
+   *  scrolled to quote an old message). */
+  scrollToBottomToken: number;
 }

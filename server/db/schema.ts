@@ -541,6 +541,12 @@ export const chatMessages = sqliteTable("chat_messages", {
    * (одноуровневые треды, как Slack). FK self-ref, ON DELETE CASCADE — hard-
    * delete root'а уносит все ответы. */
   parentMessageId: integer("parent_message_id"),
+  /** Inline-quote target (Telegram/WhatsApp-style reply-with-preview). Distinct
+   * from `parentMessageId` — the quoting message stays in the channel feed
+   * and renders the quoted body as a banner above its own. ON DELETE SET NULL
+   * so the quoting message survives a hard-delete of the original; soft
+   * delete is preserved via FK and rendered as «сообщение удалено». */
+  quotedMessageId: integer("quoted_message_id"),
   body: text("body").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   editedAt: integer("edited_at", { mode: "timestamp_ms" }),
@@ -646,6 +652,61 @@ export const vapidSettings = sqliteTable("vapid_settings", {
   publicKey: text("public_key").notNull(),
   privateKey: text("private_key").notNull(),
   subject: text("subject").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// === Calls (Stage 5) ===
+// One row per WebRTC call. `channel_id` ties to the originating chat channel
+// (DM = 2 participants, regular channel = mesh up to 5). `end_reason`
+// distinguishes 'completed' / 'declined' / 'missed' / 'failed' — drives the
+// system-message text inserted on call end.
+export const chatCalls = sqliteTable("chat_calls", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  channelId: integer("channel_id")
+    .notNull()
+    .references(() => chatChannels.id, { onDelete: "cascade" }),
+  initiatorUserId: integer("initiator_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  callType: text("call_type", { enum: ["audio", "video"] }).notNull(),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
+  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+  endReason: text("end_reason", {
+    enum: ["completed", "declined", "missed", "failed"],
+  }),
+});
+
+// Per-user participation log for a call. Active participant = row with
+// `left_at IS NULL`. PK keeps reconnects idempotent (re-join overwrites
+// joined_at via INSERT … ON CONFLICT).
+export const chatCallParticipants = sqliteTable(
+  "chat_call_participants",
+  {
+    callId: integer("call_id")
+      .notNull()
+      .references(() => chatCalls.id, { onDelete: "cascade" }),
+    userId: integer("user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    joinedAt: integer("joined_at", { mode: "timestamp_ms" }),
+    leftAt: integer("left_at", { mode: "timestamp_ms" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.callId, t.userId] }),
+  }),
+);
+
+// STUN/TURN config for clients. Sysadmin-managed. `enabled` lets ops turn
+// an entry off without losing the credentials. Loaded once into the
+// RTCPeerConnection at call start; not hot-reloaded mid-call.
+export const iceServers = sqliteTable("ice_servers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  urls: text("urls").notNull(),
+  username: text("username"),
+  credential: text("credential"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 

@@ -46,7 +46,6 @@ export default function MobileLayout(v: ChatViewProps) {
     >
       <ChannelHeader
         v={v}
-        compactStatus
         leftSlot={<HamburgerButton onClick={() => setChannelsOpen(true)} />}
       />
       <SearchRow v={v} />

@@ -9,6 +9,57 @@ import {
 import { useAuth } from "../../contexts/useAuth";
 import { ChatSocket } from "../../lib/chatSocket";
 import ChatLayout from "./layout/ChatLayout";
+import { CallManager, type CallState } from "../../lib/callManager";
+import { CallOverlay } from "./CallOverlay";
+import { IncomingCallBanner } from "./IncomingCallBanner";
+import {
+  CallInvitePicker,
+  type CallCandidate,
+} from "./CallInvitePicker";
+
+/** Mesh cap minus the initiator → max number of invitees the picker can
+ *  return. Kept in sync with `MAX_PARTICIPANTS = 5` in server/routes/chat.ts. */
+const MAX_INVITEES = 4;
+
+interface IncomingCallInfo {
+  callId: number;
+  channelId: number;
+  callType: "audio" | "video";
+  fromUserId: number;
+  invitedUserIds: number[];
+}
+
+/** Map a DOMException.name from getUserMedia into a Russian user message.
+ * Listed cases follow the WebRTC spec — the catch-all keeps unknown names
+ * from showing the raw English string. */
+function translateMediaError(
+  name: string,
+  requested: "audio" | "video",
+): string {
+  const what = requested === "video" ? "микрофону / камере" : "микрофону";
+  switch (name) {
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return requested === "video"
+        ? "Камера или микрофон не найдены. Проверьте, подключены ли устройства."
+        : "Микрофон не найден. Подключите микрофон и повторите.";
+    case "NotAllowedError":
+    case "PermissionDeniedError":
+      return `Доступ к ${what} запрещён. Разрешите доступ в настройках браузера и повторите.`;
+    case "NotReadableError":
+    case "TrackStartError":
+      return `Не удалось получить ${what} — устройство занято другим приложением (Zoom, Skype, OBS и т.п.).`;
+    case "OverconstrainedError":
+    case "ConstraintNotSatisfiedError":
+      return "Устройство не поддерживает требуемые параметры. Попробуйте другой микрофон / камеру.";
+    case "SecurityError":
+      return "Браузер блокирует доступ к устройствам в этом контексте. Используйте HTTPS или http://localhost.";
+    case "AbortError":
+      return "Доступ к устройству прерван. Повторите попытку.";
+    default:
+      return `Не удалось получить доступ к ${what}${name ? ` (${name})` : ""}.`;
+  }
+}
 
 const PAGE_SIZE = 50;
 
@@ -58,6 +109,52 @@ export default function ChatPage({
   /** Recent ChatMessage events forwarded from WS for the open ThreadPanel.
    * Trimmed to the last 50 — ThreadPanel merges idempotently by id. */
   const [threadUpdates, setThreadUpdates] = useState<ChatMessage[]>([]);
+  /** Inline-quote target (Telegram/WhatsApp-style). NULL = no quote staged;
+   *  Composer hides the banner. Set by MessageItem's «Цитировать» action,
+   *  cleared on send + on channel switch + on banner-X click. */
+  const [quotingMessage, setQuotingMessage] = useState<ChatMessage | null>(
+    null,
+  );
+  /** Bumped after every successful send (text or with-attachments) so the
+   *  MessageStream forces a scroll-to-bottom — without this, quoting an
+   *  older message leaves the viewport stuck at the quote. */
+  const [scrollToBottomToken, setScrollToBottomToken] = useState(0);
+
+  // === WebRTC call state (Stage 5) ===
+  /** Active call. Non-null after the user starts or accepts a call. The
+   *  CallManager owns RTC peer connections; we mirror its CallState here so
+   *  CallOverlay re-renders on every signaling transition. */
+  const [callState, setCallState] = useState<CallState | null>(null);
+  const callManagerRef = useRef<CallManager | null>(null);
+  /** Active inbound call invitation, before the user accepts/declines. */
+  const [incomingCall, setIncomingCall] = useState<IncomingCallInfo | null>(
+    null,
+  );
+  /** Mirror of incomingCall for the WS handler. The handler is registered
+   * once and closes over this ref so we don't tear down the socket every
+   * time a banner appears/disappears. */
+  const incomingCallRef = useRef<IncomingCallInfo | null>(null);
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
+  /** Cached ICE servers from /api/chat/ice — fetched lazily on first call. */
+  const iceServersRef = useRef<RTCIceServer[] | null>(null);
+  /** Caller pre-state: media acquired locally before call.invite was even
+   *  sent. When call.created arrives we promote this into a real
+   *  CallManager. Cleared after promotion. */
+  const pendingCallerRef = useRef<{
+    channelId: number;
+    callType: "audio" | "video";
+    localStream: MediaStream;
+  } | null>(null);
+  /** Group-call picker state. Non-null = modal open. `candidates` is the
+   *  pre-loaded list of callable channel members (excluding self). */
+  const [pickerState, setPickerState] = useState<{
+    channelId: number;
+    channelName: string;
+    callType: "audio" | "video";
+    candidates: CallCandidate[];
+  } | null>(null);
 
   const socketRef = useRef<ChatSocket | null>(null);
   // Keep the active channel id in a ref so the WS event handler (registered
@@ -374,6 +471,78 @@ export default function ChatPage({
           next[idx] = ch;
           return next;
         });
+        return;
+      }
+      // === Call signaling fan-out → CallManager + UI state ===
+      if (event.type === "call.incoming") {
+        // Don't show inbound banner when *we* initiated the call (server
+        // includes the initiator in the recipient set).
+        if (event.payload.from === currentUserId) return;
+        // If we're already in/handling a call, auto-decline this one. The
+        // server treats no-accept within 45s as missed, which is acceptable.
+        if (callManagerRef.current || incomingCallRef.current) return;
+        setIncomingCall({
+          callId: event.callId,
+          channelId: event.channelId,
+          callType: event.payload.callType,
+          fromUserId: event.payload.from,
+          invitedUserIds: event.payload.invitedUserIds,
+        });
+        return;
+      }
+      if (event.type === "call.created") {
+        // Caller-side ACK after call.invite. We previously acquired media
+        // and stashed it in pendingCallerRef; promote it to a CallManager
+        // now that the server has assigned a callId.
+        const pending = pendingCallerRef.current;
+        if (!pending) return;
+        pendingCallerRef.current = null;
+        const initial: CallState = {
+          callId: event.callId,
+          channelId: pending.channelId,
+          callType: pending.callType,
+          role: "caller",
+          initiatorUserId: currentUserId,
+          invitedUserIds: event.invitedUserIds,
+          // Caller is connected from t=0; callees join via peer-joined.
+          connectedUserIds: new Set([currentUserId]),
+          remotePeers: new Map(),
+          localStream: pending.localStream,
+          status: "ringing",
+          micMuted: false,
+          cameraOff: false,
+        };
+        callManagerRef.current = new CallManager({
+          selfUserId: currentUserId,
+          iceServers: iceServersRef.current ?? [
+            { urls: "stun:stun.l.google.com:19302" },
+          ],
+          send: (msg) => socketRef.current?.send(msg),
+          onUpdate: setCallState,
+          initial,
+        });
+        setCallState(initial);
+        return;
+      }
+      if (
+        event.type === "call.accepted" ||
+        event.type === "call.offer" ||
+        event.type === "call.answer" ||
+        event.type === "call.ice" ||
+        event.type === "call.peer-left"
+      ) {
+        void callManagerRef.current?.dispatch(event);
+        return;
+      }
+      if (event.type === "call.ended" || event.type === "call.declined") {
+        // Either side terminating clears the local state and banner.
+        callManagerRef.current?.dispose();
+        callManagerRef.current = null;
+        setCallState(null);
+        setIncomingCall((cur) =>
+          cur && cur.callId === event.callId ? null : cur,
+        );
+        return;
       }
     };
     const sock = new ChatSocket(handle);
@@ -398,6 +567,7 @@ export default function ChatPage({
     setHasMore(false);
     setLoadingMessages(true);
     setThreadParentId(null);
+    setQuotingMessage(null);
     // Typing state — drop entries for non-active channels to avoid stale UI.
     setTypingByChannel((prev) => {
       const me = prev.get(activeChannelId);
@@ -451,13 +621,23 @@ export default function ChatPage({
   const onSendText = useCallback(
     async (text: string) => {
       if (!activeChannelId) return;
-      const sent = await api.chat.sendMessage(activeChannelId, text);
+      // Drop staged quote if it belongs to a different channel (shouldn't
+      // normally happen — switching channels also clears it — but defensive).
+      const quotedId =
+        quotingMessage && quotingMessage.channelId === activeChannelId
+          ? quotingMessage.id
+          : undefined;
+      const sent = await api.chat.sendMessage(activeChannelId, text, {
+        ...(quotedId != null ? { quotedMessageId: quotedId } : {}),
+      });
+      setQuotingMessage(null);
       // Optimistic local append (WS will dedupe via id check).
       setMessages((prev) =>
         prev.some((m) => m.id === sent.id) ? prev : [...prev, sent],
       );
+      setScrollToBottomToken((n) => n + 1);
     },
-    [activeChannelId],
+    [activeChannelId, quotingMessage],
   );
 
   /** Debounced bump of the read pointer. The IntersectionObserver inside
@@ -513,15 +693,22 @@ export default function ChatPage({
   const onSendWithAttachments = useCallback(
     async (text: string, files: File[]) => {
       if (!activeChannelId) return;
+      const quotedId =
+        quotingMessage && quotingMessage.channelId === activeChannelId
+          ? quotingMessage.id
+          : undefined;
       const sent = await api.chat.sendMessageWithAttachments(activeChannelId, {
         body: text || undefined,
         files,
+        ...(quotedId != null ? { quotedMessageId: quotedId } : {}),
       });
+      setQuotingMessage(null);
       setMessages((prev) =>
         prev.some((m) => m.id === sent.id) ? prev : [...prev, sent],
       );
+      setScrollToBottomToken((n) => n + 1);
     },
-    [activeChannelId],
+    [activeChannelId, quotingMessage],
   );
 
   const onDelete = useCallback(async (id: number) => {
@@ -588,6 +775,280 @@ export default function ChatPage({
     [],
   );
 
+  // === Call actions ===
+
+  /** Lazy-load ICE servers from /api/chat/ice (cached for the page). Falls
+   * back to a public STUN entry on failure so calls still work without
+   * sysadmin configuration. */
+  const loadIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
+    if (iceServersRef.current) return iceServersRef.current;
+    try {
+      const res = await api.chat.iceServers();
+      iceServersRef.current = res.iceServers;
+    } catch {
+      iceServersRef.current = [{ urls: "stun:stun.l.google.com:19302" }];
+    }
+    return iceServersRef.current!;
+  }, []);
+
+  /** Browsers expose `navigator.mediaDevices` only in secure contexts
+   * (HTTPS or http://localhost). Over a LAN IP the API is undefined, which
+   * crashes getUserMedia with a cryptic «Cannot read properties of
+   * undefined» error. Surface a clear Russian message instead. */
+  const ensureMediaDevices = useCallback((): MediaDevices | null => {
+    if (typeof navigator !== "undefined" && navigator.mediaDevices) {
+      return navigator.mediaDevices;
+    }
+    const host = typeof window !== "undefined" ? window.location.host : "";
+    setError(
+      `Звонки работают только по HTTPS или через http://localhost. ` +
+        `Текущий адрес (${host}) браузер считает небезопасным и блокирует доступ к микрофону / камере. ` +
+        `Откройте приложение по https:// или используйте http://localhost.`,
+    );
+    return null;
+  }, []);
+
+  /** Acquire mic / camera with sensible fallbacks + human-readable errors.
+   *
+   * - Video call where no camera exists → automatically downgrade to audio
+   *   (returns the stream + the effective callType that was negotiated).
+   * - No mic at all → surface "Микрофон не найден".
+   * - Permission denied → surface "Доступ к микрофону / камере запрещён".
+   * - Device busy (other app) → surface "Микрофон или камера заняты другим
+   *   приложением".
+   *
+   * Returns null on unrecoverable failure (caller bails out). */
+  const acquireMedia = useCallback(
+    async (
+      requested: "audio" | "video",
+    ): Promise<{ stream: MediaStream; effectiveType: "audio" | "video" } | null> => {
+      const md = ensureMediaDevices();
+      if (!md) return null;
+      const tryGet = async (
+        video: boolean,
+      ): Promise<MediaStream> => md.getUserMedia({ audio: true, video });
+      try {
+        const stream = await tryGet(requested === "video");
+        return { stream, effectiveType: requested };
+      } catch (e) {
+        const err = e as DOMException & { name?: string; message?: string };
+        const name = err?.name ?? "";
+        // If video failed because there's no camera, retry as audio-only.
+        // OverconstrainedError fires when the device exists but doesn't meet
+        // constraints — also worth a retry on the audio path.
+        if (
+          requested === "video" &&
+          (name === "NotFoundError" ||
+            name === "OverconstrainedError" ||
+            name === "DevicesNotFoundError")
+        ) {
+          try {
+            const stream = await tryGet(false);
+            setError(
+              "Камера не найдена — переключились на аудиозвонок. " +
+                "Подключите веб-камеру и повторите для видео.",
+            );
+            return { stream, effectiveType: "audio" };
+          } catch (e2) {
+            const err2 = e2 as DOMException & { name?: string };
+            setError(translateMediaError(err2?.name ?? "", requested));
+            return null;
+          }
+        }
+        setError(translateMediaError(name, requested));
+        return null;
+      }
+    },
+    [ensureMediaDevices],
+  );
+
+  /** Acquire media + ship the `call.invite` payload. Shared between the
+   *  immediate path (DM / small channel) and the picker-confirm path
+   *  (group call where the user chose a subset of members). When
+   *  `inviteeUserIds` is undefined the server resolves the full channel
+   *  roster itself; when it's an array the server validates the subset. */
+  const placeCall = useCallback(
+    async (
+      channelId: number,
+      callType: "audio" | "video",
+      inviteeUserIds?: number[],
+    ) => {
+      if (callManagerRef.current || pendingCallerRef.current) return;
+      await loadIceServers();
+      const acquired = await acquireMedia(callType);
+      if (!acquired) return;
+      const finalType = acquired.effectiveType;
+      pendingCallerRef.current = {
+        channelId,
+        callType: finalType,
+        localStream: acquired.stream,
+      };
+      socketRef.current?.send({
+        type: "call.invite",
+        channelId,
+        callType: finalType,
+        ...(inviteeUserIds ? { inviteeUserIds } : {}),
+      });
+    },
+    [loadIceServers, acquireMedia],
+  );
+
+  const onStartCall = useCallback(
+    async (channelId: number, callType: "audio" | "video") => {
+      if (callManagerRef.current || pendingCallerRef.current) return;
+      const channel = channels.find((c) => c.id === channelId);
+      if (!channel) return;
+      // DM: pair-call, no picker — same behaviour as v1.
+      if (channel.type === "dm") {
+        await placeCall(channelId, callType);
+        return;
+      }
+      // Channel call: figure out the candidate pool.
+      let candidates: CallCandidate[];
+      try {
+        if (channel.isPrivate) {
+          // Private channel — load members through the channel-scoped API.
+          const res = await api.chat.listChannelMembers(channelId);
+          candidates = res.members
+            .filter((m) => m.userId !== currentUserId)
+            .map((m) => ({
+              userId: m.userId,
+              email: m.email,
+              fullName: m.fullName,
+              avatarDataUrl: m.avatarDataUrl,
+            }));
+        } else {
+          // Open channel — every workspace member can be invited.
+          candidates = members
+            .filter((m) => m.userId !== currentUserId)
+            .map((m) => ({
+              userId: m.userId,
+              email: m.email,
+              fullName: m.fullName,
+              avatarDataUrl: m.avatarDataUrl,
+            }));
+        }
+      } catch (e) {
+        setError((e as Error).message);
+        return;
+      }
+      if (candidates.length === 0) {
+        setError("В этом канале некого позвать.");
+        return;
+      }
+      // Small channel → just call everyone, no picker UI.
+      if (candidates.length <= MAX_INVITEES) {
+        await placeCall(channelId, callType);
+        return;
+      }
+      // Large channel → open the picker so the user picks ≤4.
+      setPickerState({
+        channelId,
+        channelName: channel.name,
+        callType,
+        candidates,
+      });
+    },
+    [channels, members, currentUserId, placeCall],
+  );
+
+  const onPickerConfirm = useCallback(
+    async (inviteeUserIds: number[]) => {
+      const p = pickerState;
+      if (!p) return;
+      setPickerState(null);
+      await placeCall(p.channelId, p.callType, inviteeUserIds);
+    },
+    [pickerState, placeCall],
+  );
+
+  const onPickerCancel = useCallback(() => setPickerState(null), []);
+
+  const onAcceptIncoming = useCallback(async () => {
+    const inc = incomingCall;
+    if (!inc) return;
+    const iceServers = await loadIceServers();
+    const acquired = await acquireMedia(inc.callType);
+    if (!acquired) {
+      // Auto-decline so the caller isn't left ringing.
+      socketRef.current?.send({ type: "call.decline", callId: inc.callId });
+      setIncomingCall(null);
+      return;
+    }
+    // If we degraded video → audio (callee has no camera), the call still
+    // proceeds as video on the caller side — they just won't see our cam.
+    const initial: CallState = {
+      callId: inc.callId,
+      channelId: inc.channelId,
+      callType: inc.callType,
+      role: "callee",
+      initiatorUserId: inc.fromUserId,
+      invitedUserIds: inc.invitedUserIds,
+      // Initiator + self at minimum; peer-joined events will fill in the
+      // rest of the roster as other callees accept.
+      connectedUserIds: new Set([inc.fromUserId, currentUserId]),
+      remotePeers: new Map(),
+      localStream: acquired.stream,
+      status: "connecting",
+      micMuted: false,
+      cameraOff: acquired.effectiveType !== inc.callType,
+    };
+    callManagerRef.current = new CallManager({
+      selfUserId: currentUserId,
+      iceServers,
+      send: (msg) => socketRef.current?.send(msg),
+      onUpdate: setCallState,
+      initial,
+    });
+    setCallState(initial);
+    setIncomingCall(null);
+    socketRef.current?.send({ type: "call.accept", callId: inc.callId });
+  }, [incomingCall, currentUserId, loadIceServers, acquireMedia]);
+
+  const onDeclineIncoming = useCallback(() => {
+    const inc = incomingCall;
+    if (!inc) return;
+    socketRef.current?.send({ type: "call.decline", callId: inc.callId });
+    setIncomingCall(null);
+  }, [incomingCall]);
+
+  const onHangup = useCallback(() => {
+    const state = callState;
+    if (state) {
+      socketRef.current?.send({ type: "call.hangup", callId: state.callId });
+    }
+    callManagerRef.current?.dispose();
+    callManagerRef.current = null;
+    setCallState(null);
+    // Tear down any caller-pending media that never reached call.created.
+    const pending = pendingCallerRef.current;
+    if (pending) {
+      for (const t of pending.localStream.getTracks()) t.stop();
+      pendingCallerRef.current = null;
+    }
+  }, [callState]);
+
+  const onToggleMic = useCallback(() => {
+    callManagerRef.current?.toggleMic();
+  }, []);
+
+  const onToggleCamera = useCallback(() => {
+    callManagerRef.current?.toggleCamera();
+  }, []);
+
+  // Tear down any active call when ChatPage unmounts.
+  useEffect(() => {
+    return () => {
+      callManagerRef.current?.dispose();
+      callManagerRef.current = null;
+      const pending = pendingCallerRef.current;
+      if (pending) {
+        for (const t of pending.localStream.getTracks()) t.stop();
+        pendingCallerRef.current = null;
+      }
+    };
+  }, []);
+
   const activeChannel = activeChannelId
     ? channels.find((c) => c.id === activeChannelId) ?? null
     : null;
@@ -622,42 +1083,94 @@ export default function ChatPage({
     );
   }
 
+  // Calls available in any non-archived channel when nothing else is in
+  // flight. Sizing branch lives in onStartCall — ≤4 other members → call
+  // everyone immediately, more → open the invitee picker.
+  const callsAvailable =
+    activeChannel != null &&
+    !activeChannel.archivedAt &&
+    callState == null &&
+    incomingCall == null;
+
   return (
-    <ChatLayout
-      currentUserId={currentUserId}
-      canManage={canManage}
-      channels={channels}
-      activeChannelId={activeChannelId}
-      activeChannel={activeChannel}
-      messages={messages}
-      loadingMessages={loadingMessages}
-      loadingOlder={loadingOlder}
-      hasMore={hasMore}
-      onlineUsers={onlineUsers}
-      members={members}
-      typingByChannel={typingByChannel}
-      connectionState={connectionState}
-      threadParentId={threadParentId}
-      threadUpdates={threadUpdates}
-      searchOpen={searchOpen}
-      error={error}
-      onSelectChannel={setActiveChannelId}
-      onCreateChannel={onCreateChannel}
-      onSendText={onSendText}
-      onSendWithAttachments={onSendWithAttachments}
-      onDelete={onDelete}
-      onEdit={onEdit}
-      onToggleReaction={onToggleReaction}
-      onMarkRead={onMarkRead}
-      onOpenThread={(messageId) => setThreadParentId(messageId)}
-      onCloseThread={() => setThreadParentId(null)}
-      onLoadOlder={() => void onLoadOlder()}
-      onTypingStart={onTypingStart}
-      onTypingStop={onTypingStop}
-      onToggleSearch={() => setSearchOpen((v) => !v)}
-      onCloseSearch={() => setSearchOpen(false)}
-      onClearError={() => setError(null)}
-      onOpenDm={(userId) => void openDmFor(userId)}
-    />
+    <div style={{ position: "relative" }}>
+      <ChatLayout
+        currentUserId={currentUserId}
+        canManage={canManage}
+        channels={channels}
+        activeChannelId={activeChannelId}
+        activeChannel={activeChannel}
+        messages={messages}
+        loadingMessages={loadingMessages}
+        loadingOlder={loadingOlder}
+        hasMore={hasMore}
+        onlineUsers={onlineUsers}
+        members={members}
+        typingByChannel={typingByChannel}
+        connectionState={connectionState}
+        threadParentId={threadParentId}
+        threadUpdates={threadUpdates}
+        searchOpen={searchOpen}
+        error={error}
+        onSelectChannel={setActiveChannelId}
+        onCreateChannel={onCreateChannel}
+        onSendText={onSendText}
+        onSendWithAttachments={onSendWithAttachments}
+        onDelete={onDelete}
+        onEdit={onEdit}
+        onToggleReaction={onToggleReaction}
+        onMarkRead={onMarkRead}
+        onOpenThread={(messageId) => setThreadParentId(messageId)}
+        onCloseThread={() => setThreadParentId(null)}
+        onLoadOlder={() => void onLoadOlder()}
+        onTypingStart={onTypingStart}
+        onTypingStop={onTypingStop}
+        onToggleSearch={() => setSearchOpen((v) => !v)}
+        onCloseSearch={() => setSearchOpen(false)}
+        onClearError={() => setError(null)}
+        onOpenDm={(userId) => void openDmFor(userId)}
+        onStartCall={
+          callsAvailable
+            ? (channelId, callType) => void onStartCall(channelId, callType)
+            : null
+        }
+        quoting={quotingMessage}
+        onQuoteMessage={setQuotingMessage}
+        onCancelQuote={() => setQuotingMessage(null)}
+        scrollToBottomToken={scrollToBottomToken}
+      />
+      {incomingCall && (
+        <IncomingCallBanner
+          callId={incomingCall.callId}
+          fromUserId={incomingCall.fromUserId}
+          callType={incomingCall.callType}
+          members={members}
+          onAccept={() => void onAcceptIncoming()}
+          onDecline={onDeclineIncoming}
+        />
+      )}
+      {callState && (
+        <CallOverlay
+          state={callState}
+          selfUserId={currentUserId}
+          members={members}
+          onToggleMic={onToggleMic}
+          onToggleCamera={onToggleCamera}
+          onHangup={onHangup}
+        />
+      )}
+      {pickerState && (
+        <CallInvitePicker
+          channelName={pickerState.channelName}
+          candidates={pickerState.candidates}
+          onlineUserIds={onlineUsers}
+          callType={pickerState.callType}
+          maxInvitees={MAX_INVITEES}
+          onConfirm={(ids) => void onPickerConfirm(ids)}
+          onCancel={onPickerCancel}
+        />
+      )}
+    </div>
   );
 }
+

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
-import { MessageSquare, Pencil, Trash2 } from "lucide-react";
+import { MessageSquare, Pencil, Reply, Trash2 } from "lucide-react";
 import type { ChatMessage, WorkspaceMember } from "../../api";
 import Avatar from "../Avatar";
 import Attachment from "./Attachment";
@@ -198,6 +198,11 @@ interface Props {
   /** Open the thread panel for this message. Omitted when the message is
    * already inside a thread (ThreadPanel doesn't show a nested-thread button). */
   onOpenThread?: (messageId: number) => void;
+  /** Stage a quoted reply: parent (ChatPage) records this message as the
+   *  quote target so the composer renders the preview banner. Omit to hide
+   *  the «Цитировать» action (e.g. inside ThreadPanel which has its own
+   *  reply mechanic). */
+  onQuoteMessage?: (message: ChatMessage) => void;
   /** Workspace roster — used for read-status tooltip + reader avatars. */
   members?: WorkspaceMember[];
   /** Count of other workspace members (total − author). Drives the
@@ -224,6 +229,7 @@ export default function MessageItem({
   onEdit,
   onToggleReaction,
   onOpenThread,
+  onQuoteMessage,
   members,
   otherMembersCount = 0,
   isTouch = false,
@@ -470,6 +476,16 @@ export default function MessageItem({
           </span>
           {!isDeleted && !editing && !isTouch && (
             <div style={{ marginLeft: "auto", display: "inline-flex", gap: 2 }}>
+              {onQuoteMessage && (
+                <button
+                  type="button"
+                  className="btn-icon"
+                  onClick={() => onQuoteMessage(message)}
+                  title="Цитировать"
+                >
+                  <Reply size={14} />
+                </button>
+              )}
               {onOpenThread && message.parentMessageId == null && (
                 <button
                   type="button"
@@ -572,6 +588,50 @@ export default function MessageItem({
           </div>
         ) : (
           <>
+            {message.quotedMessage && (
+              <div
+                style={{
+                  marginTop: 4,
+                  marginBottom: 4,
+                  padding: "4px 8px",
+                  background: "var(--bg-soft, #f3f3f3)",
+                  borderRadius: 6,
+                  borderLeft: "3px solid var(--accent, #2563eb)",
+                  fontSize: 12,
+                  cursor: "default",
+                  maxWidth: "100%",
+                }}
+                title={
+                  message.quotedMessage.deletedAt
+                    ? "сообщение удалено"
+                    : message.quotedMessage.body
+                }
+              >
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--accent, #2563eb)",
+                  }}
+                >
+                  {message.quotedMessage.authorName}
+                </div>
+                <div
+                  style={{
+                    color: "var(--muted, #555)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {message.quotedMessage.deletedAt
+                    ? "сообщение удалено"
+                    : message.quotedMessage.body ||
+                      (message.quotedMessage.hasAttachments
+                        ? "📎 вложение"
+                        : "")}
+                </div>
+              </div>
+            )}
             {message.body && (() => {
               const jumboPx = emojiOnlyFontSize(message.body);
               return (
@@ -677,12 +737,14 @@ export default function MessageItem({
         canEdit={canEdit && !isDeleted}
         canDelete={canDelete && !isDeleted}
         canReplyInThread={canReplyInThread}
+        canQuote={!!onQuoteMessage && !isDeleted}
         onReact={(emoji) => {
           const existing = message.reactions.find((r) => r.emoji === emoji);
           const mine = existing?.userIds.includes(currentUserId) ?? false;
           onToggleReaction(message.id, emoji, mine);
         }}
         onOpenThread={() => onOpenThread?.(message.id)}
+        onQuote={() => onQuoteMessage?.(message)}
         onEdit={beginEdit}
         onDelete={() => onDelete(message.id)}
       />

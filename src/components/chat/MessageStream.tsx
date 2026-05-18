@@ -22,6 +22,13 @@ interface MessageStreamProps {
   onOpenThread: (messageId: number) => void;
   /** Forwarded to MessageItem for avatar / mention popovers. */
   onOpenDm?: (userId: number) => void;
+  /** Stage a message as the inline-quote target (Composer renders banner). */
+  onQuoteMessage?: (message: ChatMessage) => void;
+  /** Monotonically-increasing token. When it bumps, the stream forces a
+   *  scroll-to-bottom regardless of current scroll position. Used after the
+   *  user sends a message — without this, replying to an older quoted
+   *  message would leave the viewport stuck at the quote location. */
+  scrollToBottomToken?: number;
 }
 
 const STICK_THRESHOLD_PX = 80;
@@ -55,6 +62,8 @@ export default function MessageStream({
   onMarkRead,
   onOpenThread,
   onOpenDm,
+  onQuoteMessage,
+  scrollToBottomToken,
 }: MessageStreamProps) {
   // Other-members count for the «✓✓ all read» heuristic. Author is always
   // current user for own messages (the only rows that get ticks), so
@@ -149,6 +158,17 @@ export default function MessageStream({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, channelId]);
 
+  // Forced scroll-to-bottom on token bump (after a successful send). Runs in
+  // layout phase so the user never sees an intermediate "stuck at quote"
+  // frame between optimistic append and the viewport jump.
+  useLayoutEffect(() => {
+    if (scrollToBottomToken == null || scrollToBottomToken === 0) return;
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stickToBottomRef.current = true;
+  }, [scrollToBottomToken]);
+
   return (
     <div
       ref={containerRef}
@@ -210,6 +230,7 @@ export default function MessageStream({
           onEdit={onEdit}
           onToggleReaction={onToggleReaction}
           onOpenThread={onOpenThread}
+          onQuoteMessage={onQuoteMessage}
           members={members}
           otherMembersCount={otherMembersCount}
           isTouch={isTouch}

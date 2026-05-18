@@ -11,6 +11,7 @@ import {
   chatMessageMentions,
   chatMessageReactions,
   chatMessages,
+  iceServers,
   users,
   workspaceMembers,
 } from "../db/schema";
@@ -25,6 +26,22 @@ import { attach, detach, isUserOnline, onlineUserIds } from "../chat/presence";
 import { loadMentionsForMessages, resolveMentions } from "../chat/mentions";
 import { cancelForUser, queueMention } from "../chat/mentionDigest";
 import { dispatchPushForMessage } from "../chat/notifications";
+import {
+  acceptCall,
+  activeCallsForUser,
+  createCall,
+  declineCall,
+  endCall,
+  getActiveCall,
+  isParticipant,
+  leaveCall,
+  type CallType,
+} from "../chat/calls";
+import {
+  callSystemMessageBody,
+  pushMissedCall,
+  type CallEndSummary,
+} from "../chat/callSystemMessages";
 import { resolveAppUrl } from "../lib/appUrl";
 
 type Env = { Variables: { user: SessionUser } };
@@ -82,6 +99,22 @@ interface MentionOut {
   email: string;
 }
 
+/** Compact summary of the message being quoted — embedded inside a quoting
+ * message's MessageOut. Just enough for the UI to render the reply-preview
+ * banner; clicking it can navigate to the original by id. */
+interface QuotedMessageOut {
+  id: number;
+  authorUserId: number | null;
+  authorName: string;
+  body: string;
+  /** Set when the quoted message was soft-deleted — UI renders «сообщение
+   *  удалено» and suppresses body / attachments. */
+  deletedAt: number | null;
+  /** True when the original carried files. UI renders «📎 вложение» when
+   *  the body is empty. */
+  hasAttachments: boolean;
+}
+
 interface MessageOut {
   id: number;
   channelId: number;
@@ -104,6 +137,9 @@ interface MessageOut {
   attachments: AttachmentOut[];
   reactions: ReactionAggregate[];
   mentions: MentionOut[];
+  /** Inline-quote preview (Telegram/WhatsApp-style). NULL when this isn't a
+   *  reply-with-quote. Distinct from `parentMessageId` (threads side-panel). */
+  quotedMessage: QuotedMessageOut | null;
 }
 
 interface ChannelOut {
@@ -173,6 +209,60 @@ function attachmentUrl(attachmentId: number): string {
   return `/api/chat/attachments/${attachmentId}`;
 }
 
+/** Bulk-load the inline-quote previews for a batch of messages. Skips
+ * messages without a `quotedMessageId` set. Returns a Map keyed by the
+ * QUOTING message's id (not the quoted id) — caller wires it into each
+ * MessageOut via toMessageOut(). */
+async function quotedMessagesByIds(
+  db: DB,
+  quotingPairs: Array<{ id: number; quotedMessageId: number }>,
+): Promise<Map<number, QuotedMessageOut>> {
+  const out = new Map<number, QuotedMessageOut>();
+  if (quotingPairs.length === 0) return out;
+  const quotedIds = [...new Set(quotingPairs.map((p) => p.quotedMessageId))];
+  const rows = await db
+    .select({
+      id: chatMessages.id,
+      authorUserId: chatMessages.authorUserId,
+      body: chatMessages.body,
+      deletedAt: chatMessages.deletedAt,
+    })
+    .from(chatMessages)
+    .where(inArray(chatMessages.id, quotedIds));
+  const authors = await authorsByIds(
+    db,
+    rows
+      .map((r) => r.authorUserId)
+      .filter((x): x is number => x != null),
+  );
+  // Which quoted messages had attachments? One IN query.
+  const attCounts = await db
+    .select({
+      messageId: chatAttachments.messageId,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(chatAttachments)
+    .where(inArray(chatAttachments.messageId, quotedIds))
+    .groupBy(chatAttachments.messageId);
+  const hasAtt = new Set(attCounts.filter((r) => r.count > 0).map((r) => r.messageId));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const pair of quotingPairs) {
+    const row = byId.get(pair.quotedMessageId);
+    if (!row) continue;
+    const author = row.authorUserId != null ? authors.get(row.authorUserId) : undefined;
+    out.set(pair.id, {
+      id: row.id,
+      authorUserId: row.authorUserId,
+      authorName:
+        author?.fullName || author?.email.split("@")[0] || "удалённый пользователь",
+      body: row.deletedAt ? "" : row.body,
+      deletedAt: row.deletedAt ? row.deletedAt.getTime() : null,
+      hasAttachments: row.deletedAt ? false : hasAtt.has(row.id),
+    });
+  }
+  return out;
+}
+
 function toMessageOut(
   msg: {
     id: number;
@@ -195,6 +285,7 @@ function toMessageOut(
   mentions: MentionOut[],
   replyCount: number,
   readerUserIds: number[],
+  quotedMessage: QuotedMessageOut | null,
 ): MessageOut {
   return {
     id: msg.id,
@@ -224,6 +315,10 @@ function toMessageOut(
         })),
     reactions: msg.deletedAt ? [] : reactions,
     mentions: msg.deletedAt ? [] : mentions,
+    // Quoted preview survives soft-delete of the quoting message — the
+    // banner is still useful as context («[deleted] ответил на: X»). It is
+    // suppressed on render through deletedAt elsewhere if needed.
+    quotedMessage,
   };
 }
 
@@ -408,6 +503,12 @@ async function loadMessageOut(
     msg.parentMessageId == null
       ? await readersForMessages(db, msg.channelId, [msg])
       : new Map<number, number[]>();
+  const quotedMap =
+    msg.quotedMessageId != null
+      ? await quotedMessagesByIds(db, [
+          { id: msg.id, quotedMessageId: msg.quotedMessageId },
+        ])
+      : new Map<number, QuotedMessageOut>();
   return toMessageOut(
     msg,
     atts,
@@ -416,6 +517,7 @@ async function loadMessageOut(
     mentionsMap.get(messageId) ?? [],
     replyMap.get(messageId) ?? 0,
     readersMap.get(messageId) ?? [],
+    quotedMap.get(messageId) ?? null,
   );
 }
 
@@ -1399,6 +1501,12 @@ export function chatRoutes(
     const mentionsMap = await loadMentionsForMessages(db, ids);
     const replyMap = await replyCountsForParents(db, ids);
     const readersMap = await readersForMessages(db, channelId, rows);
+    const quotedMap = await quotedMessagesByIds(
+      db,
+      rows
+        .filter((r) => r.quotedMessageId != null)
+        .map((r) => ({ id: r.id, quotedMessageId: r.quotedMessageId! })),
+    );
     const result: MessageOut[] = rows.map((r) =>
       toMessageOut(
         r,
@@ -1408,6 +1516,7 @@ export function chatRoutes(
         mentionsMap.get(r.id) ?? [],
         replyMap.get(r.id) ?? 0,
         readersMap.get(r.id) ?? [],
+        quotedMap.get(r.id) ?? null,
       ),
     );
 
@@ -1416,6 +1525,30 @@ export function chatRoutes(
       hasMore: rows.length === limit,
     });
   });
+
+  /** Validate an inline-quote target: must exist + live in the same channel.
+   *  Quoting hard-deleted messages is allowed (FK ON DELETE SET NULL handles
+   *  the eventual cleanup); quoting soft-deleted messages too — UI renders
+   *  «сообщение удалено» in that case. Self-quote rejected to avoid silly
+   *  loops in the UI. */
+  async function validateQuoted(
+    quotedMessageId: number,
+    channelId: number,
+  ): Promise<{ status: number; error: string } | null> {
+    const quoted = await db
+      .select({
+        id: chatMessages.id,
+        channelId: chatMessages.channelId,
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.id, quotedMessageId))
+      .get();
+    if (!quoted) return { status: 404, error: "quoted message not found" };
+    if (quoted.channelId !== channelId) {
+      return { status: 400, error: "quoted message is in another channel" };
+    }
+    return null;
+  }
 
   /** Validate a thread parent: must exist, live in the same channel, not be
    * itself a reply (one-level threads only), and not be hard-deleted. Returns
@@ -1456,12 +1589,13 @@ export function chatRoutes(
       return c.json({ error: "канал заархивирован" }, 400);
     }
 
-    let body: { body?: unknown; parentMessageId?: unknown };
+    let body: {
+      body?: unknown;
+      parentMessageId?: unknown;
+      quotedMessageId?: unknown;
+    };
     try {
-      body = (await c.req.json()) as {
-        body?: unknown;
-        parentMessageId?: unknown;
-      };
+      body = (await c.req.json()) as typeof body;
     } catch {
       return c.json({ error: "expected JSON" }, 400);
     }
@@ -1480,6 +1614,16 @@ export function chatRoutes(
       if (err) return c.json({ error: err.error }, err.status as 400 | 404);
       parentMessageId = n;
     }
+    let quotedMessageId: number | null = null;
+    if (body.quotedMessageId != null) {
+      const n = Number(body.quotedMessageId);
+      if (!Number.isFinite(n) || n <= 0) {
+        return c.json({ error: "invalid quotedMessageId" }, 400);
+      }
+      const err = await validateQuoted(n, channelId);
+      if (err) return c.json({ error: err.error }, err.status as 400 | 404);
+      quotedMessageId = n;
+    }
 
     const now = new Date();
     const created = await db
@@ -1488,6 +1632,7 @@ export function chatRoutes(
         channelId,
         authorUserId: user.id,
         parentMessageId,
+        quotedMessageId,
         body: text,
         createdAt: now,
       })
@@ -1597,6 +1742,17 @@ export function chatRoutes(
       if (err) return c.json({ error: err.error }, err.status as 400 | 404);
       parentMessageId = n;
     }
+    const quotedRaw = formData.get("quotedMessageId");
+    let quotedMessageId: number | null = null;
+    if (quotedRaw != null && quotedRaw !== "") {
+      const n = Number(quotedRaw);
+      if (!Number.isFinite(n) || n <= 0) {
+        return c.json({ error: "invalid quotedMessageId" }, 400);
+      }
+      const err = await validateQuoted(n, channelId);
+      if (err) return c.json({ error: err.error }, err.status as 400 | 404);
+      quotedMessageId = n;
+    }
 
     for (const f of files) {
       if (f.size > MAX_FILE_BYTES) {
@@ -1620,6 +1776,7 @@ export function chatRoutes(
         channelId,
         authorUserId: user.id,
         parentMessageId,
+        quotedMessageId,
         body: bodyText,
         createdAt: now,
       })
@@ -1820,6 +1977,12 @@ export function chatRoutes(
     const readersMap = await readersForMessages(db, parentRow.channelId, [
       parentRow,
     ]);
+    const quotedMap = await quotedMessagesByIds(
+      db,
+      [parentRow, ...replyRows]
+        .filter((r) => r.quotedMessageId != null)
+        .map((r) => ({ id: r.id, quotedMessageId: r.quotedMessageId! })),
+    );
 
     const parent = toMessageOut(
       parentRow,
@@ -1831,6 +1994,7 @@ export function chatRoutes(
       mentionsMap.get(parentRow.id) ?? [],
       replyMap.get(parentRow.id) ?? 0,
       readersMap.get(parentRow.id) ?? [],
+      quotedMap.get(parentRow.id) ?? null,
     );
     const replies = replyRows.map((r) =>
       toMessageOut(
@@ -1841,6 +2005,7 @@ export function chatRoutes(
         mentionsMap.get(r.id) ?? [],
         0,
         [],
+        quotedMap.get(r.id) ?? null,
       ),
     );
     return c.json({ parent, replies });
@@ -2318,6 +2483,12 @@ export function chatRoutes(
     // looking at a search hit, not the live feed). Pass empty.
     const snippetsById = new Map(rows.map((r) => [r.id, r.snippet]));
     const byId = new Map(messages.map((m) => [m.id, m]));
+    const quotedMap = await quotedMessagesByIds(
+      db,
+      messages
+        .filter((m) => m.quotedMessageId != null)
+        .map((m) => ({ id: m.id, quotedMessageId: m.quotedMessageId! })),
+    );
     const results = ids
       .map((id) => byId.get(id))
       .filter((m): m is NonNullable<typeof m> => m != null)
@@ -2330,6 +2501,7 @@ export function chatRoutes(
           mentionsMap.get(m.id) ?? [],
           replyMap.get(m.id) ?? 0,
           [],
+          quotedMap.get(m.id) ?? null,
         ),
         snippet: snippetsById.get(m.id) ?? "",
       }));
@@ -2344,12 +2516,166 @@ export function chatRoutes(
     return c.json({ onlineUserIds: onlineUserIds(user.workspaceId) });
   });
 
+  // === ICE servers (Stage 5) ===
+  // Public read for any logged-in user — needed to construct a peer connection
+  // before the WS handshake. Returns only enabled rows; credentials echoed
+  // as-is because clients need them for TURN auth. If sysadmin hasn't seeded
+  // anything, fall back to a single public STUN entry so dev / first-run
+  // still works.
+  app.get("/ice", async (c) => {
+    const rows = await db
+      .select({
+        urls: iceServers.urls,
+        username: iceServers.username,
+        credential: iceServers.credential,
+      })
+      .from(iceServers)
+      .where(eq(iceServers.enabled, true))
+      .orderBy(iceServers.sortOrder, iceServers.id)
+      .all();
+    const items = rows.length
+      ? rows.map((r) => ({
+          urls: r.urls,
+          ...(r.username != null ? { username: r.username } : {}),
+          ...(r.credential != null ? { credential: r.credential } : {}),
+        }))
+      : [{ urls: "stun:stun.l.google.com:19302" }];
+    return c.json({ iceServers: items });
+  });
+
+  // === Call helpers (shared between WS handlers + ring timer) ===
+
+  /** Resolve invitees for a new call. DMs / private channels expand from
+   * chat_channel_members; open channels expand from workspace_members. Caps
+   * the *total* call size at MAX_PARTICIPANTS to keep the mesh feasible. */
+  const MAX_PARTICIPANTS = 5;
+  async function resolveCallInvitees(
+    channel: typeof chatChannels.$inferSelect,
+    initiatorUserId: number,
+  ): Promise<number[] | null> {
+    if (channel.archivedAt != null) return null;
+    let invitees: number[];
+    if (channel.type === "dm" || channel.isPrivate) {
+      const rows = await db
+        .select({ userId: chatChannelMembers.userId })
+        .from(chatChannelMembers)
+        .where(eq(chatChannelMembers.channelId, channel.id));
+      invitees = rows
+        .map((r) => r.userId)
+        .filter((uid) => uid !== initiatorUserId);
+    } else {
+      const rows = await db
+        .select({ userId: workspaceMembers.userId })
+        .from(workspaceMembers)
+        .where(eq(workspaceMembers.workspaceId, channel.workspaceId));
+      invitees = rows
+        .map((r) => r.userId)
+        .filter((uid) => uid !== initiatorUserId);
+    }
+    if (invitees.length === 0) return null;
+    if (invitees.length + 1 > MAX_PARTICIPANTS) return null;
+    return invitees;
+  }
+
+  /** Validate an explicit `inviteeUserIds` list from a `call.invite` payload
+   * (Stage 5.5 — picker UI). Returns the sanitized list when every requested
+   * id is a member of the channel's invitable pool and the call size is
+   * within MAX_PARTICIPANTS; null otherwise. Caller treats null as a soft
+   * reject — no ACK, no DB row, no event.
+   *
+   * - DM → exactly one invitee that matches the channel's other member.
+   * - Private → subset of chat_channel_members (excluding initiator).
+   * - Open  → subset of workspace_members (excluding initiator). */
+  async function validateExplicitInvitees(
+    channel: typeof chatChannels.$inferSelect,
+    initiatorUserId: number,
+    requested: number[],
+  ): Promise<number[] | null> {
+    if (channel.archivedAt != null) return null;
+    if (requested.length === 0) return null;
+    if (requested.length + 1 > MAX_PARTICIPANTS) return null;
+    // Reject self + dupes.
+    const seen = new Set<number>();
+    for (const uid of requested) {
+      if (uid === initiatorUserId) return null;
+      if (seen.has(uid)) return null;
+      seen.add(uid);
+    }
+    let pool: Set<number>;
+    if (channel.type === "dm" || channel.isPrivate) {
+      const rows = await db
+        .select({ userId: chatChannelMembers.userId })
+        .from(chatChannelMembers)
+        .where(eq(chatChannelMembers.channelId, channel.id));
+      pool = new Set(rows.map((r) => r.userId));
+    } else {
+      const rows = await db
+        .select({ userId: workspaceMembers.userId })
+        .from(workspaceMembers)
+        .where(eq(workspaceMembers.workspaceId, channel.workspaceId));
+      pool = new Set(rows.map((r) => r.userId));
+    }
+    for (const uid of requested) {
+      if (!pool.has(uid)) return null;
+    }
+    return [...requested];
+  }
+
+  /** Finalize a call: write the system message into the channel + (for
+   * missed) fire a push. Called by both the explicit-hangup path and the
+   * ring-timer missed-call path. */
+  async function finalizeCall(
+    summary: CallEndSummary,
+    appUrl: string,
+  ): Promise<void> {
+    const channel = await db
+      .select()
+      .from(chatChannels)
+      .where(eq(chatChannels.id, summary.channelId))
+      .get();
+    if (!channel) return;
+    const text = callSystemMessageBody(summary);
+    const inserted = db
+      .insert(chatMessages)
+      .values({
+        channelId: summary.channelId,
+        authorUserId: summary.initiatorUserId,
+        body: text,
+        createdAt: new Date(),
+      })
+      .returning({ id: chatMessages.id })
+      .get();
+    const out = await loadMessageOut(db, inserted.id);
+    const recipients = await channelRecipients(db, channel);
+    if (out) {
+      publish(
+        summary.workspaceId,
+        {
+          type: "message.created",
+          channelId: summary.channelId,
+          messageId: inserted.id,
+          workspaceId: summary.workspaceId,
+          payload: out,
+        },
+        recipients,
+      );
+    }
+    if (summary.reason === "missed") {
+      try {
+        await pushMissedCall(db, summary, appUrl);
+      } catch {
+        /* push failures are best-effort */
+      }
+    }
+  }
+
   // === WebSocket ===
   if (upgradeWebSocket) {
     app.get(
       "/ws",
       upgradeWebSocket((c) => {
         const user = (c as { get: (k: string) => SessionUser }).get("user");
+        const appUrl = resolveAppUrl(c);
         let unsub: (() => void) | null = null;
         return {
           onOpen(_evt, ws) {
@@ -2381,25 +2707,31 @@ export function chatRoutes(
             }
           },
           onMessage(evt, ws) {
-            try {
-              const raw = typeof evt.data === "string" ? evt.data : "";
-              if (!raw) return;
-              const parsed = JSON.parse(raw) as {
-                type?: string;
-                channelId?: number;
-              };
-              if (parsed.type === "ping") {
-                ws.send(JSON.stringify({ type: "pong" }));
+            void (async () => {
+              let parsed: Record<string, unknown>;
+              try {
+                const raw = typeof evt.data === "string" ? evt.data : "";
+                if (!raw) return;
+                parsed = JSON.parse(raw) as Record<string, unknown>;
+              } catch {
                 return;
               }
-              if (
-                parsed.type === "typing.start" &&
-                typeof parsed.channelId === "number"
-              ) {
+              const type = typeof parsed.type === "string" ? parsed.type : "";
+              const channelId =
+                typeof parsed.channelId === "number" ? parsed.channelId : null;
+              if (type === "ping") {
+                try {
+                  ws.send(JSON.stringify({ type: "pong" }));
+                } catch {
+                  /* ignore */
+                }
+                return;
+              }
+              if (type === "typing.start" && channelId != null) {
                 bumpTyping(
                   {
                     workspaceId: user.workspaceId,
-                    channelId: parsed.channelId,
+                    channelId,
                     userId: user.id,
                   },
                   {
@@ -2411,23 +2743,286 @@ export function chatRoutes(
                 );
                 return;
               }
-              if (
-                parsed.type === "typing.stop" &&
-                typeof parsed.channelId === "number"
-              ) {
+              if (type === "typing.stop" && channelId != null) {
                 clearTyping({
                   workspaceId: user.workspaceId,
-                  channelId: parsed.channelId,
+                  channelId,
                   userId: user.id,
                 });
                 return;
               }
-            } catch {
-              // ignore malformed
-            }
+              // === Call signaling ===
+              if (type === "call.invite" && channelId != null) {
+                const callTypeIn = parsed.callType;
+                if (callTypeIn !== "audio" && callTypeIn !== "video") return;
+                const channel = await userCanAccessChannel(
+                  db,
+                  user,
+                  channelId,
+                );
+                if (!channel) return;
+                // Picker path: client may pass an explicit subset of
+                // channel members. When omitted, fall back to "call
+                // everyone in the channel" (preserves DM + small-channel
+                // ergonomics + backward-compat with mobile clients).
+                const explicitRaw = parsed.inviteeUserIds;
+                let invitees: number[] | null;
+                if (Array.isArray(explicitRaw)) {
+                  if (
+                    !explicitRaw.every(
+                      (x) => typeof x === "number" && Number.isFinite(x),
+                    )
+                  ) {
+                    return;
+                  }
+                  invitees = await validateExplicitInvitees(
+                    channel,
+                    user.id,
+                    explicitRaw as number[],
+                  );
+                } else {
+                  invitees = await resolveCallInvitees(channel, user.id);
+                }
+                if (!invitees) return;
+                // Reject if any invitee is already in another call (or self
+                // already in a call) — keeps multi-call routing simple.
+                if (activeCallsForUser(user.id).length > 0) return;
+                const { callId } = await createCall({
+                  db,
+                  workspaceId: user.workspaceId,
+                  channelId: channel.id,
+                  initiatorUserId: user.id,
+                  callType: callTypeIn as CallType,
+                  inviteeUserIds: invitees,
+                  onMissed: async (call) => {
+                    const summary: CallEndSummary = {
+                      callId: call.callId,
+                      channelId: call.channelId,
+                      workspaceId: call.workspaceId,
+                      callType: call.callType,
+                      initiatorUserId: call.initiatorUserId,
+                      inviteeUserIds: [...call.invitedUserIds],
+                      startedAt: call.startedAt,
+                      endedAt: new Date(),
+                      reason: "missed",
+                    };
+                    // Terminate the call first so endCall publishes call.ended
+                    // before the system-message lands.
+                    await endCall({
+                      db,
+                      callId: call.callId,
+                      byUserId: null,
+                      reason: "missed",
+                    });
+                    await finalizeCall(summary, appUrl);
+                  },
+                });
+                // ACK back to the initiator so they can begin SDP exchange.
+                try {
+                  ws.send(
+                    JSON.stringify({
+                      type: "call.created",
+                      callId,
+                      channelId: channel.id,
+                      invitedUserIds: [user.id, ...invitees],
+                    }),
+                  );
+                } catch {
+                  /* ignore */
+                }
+                return;
+              }
+              if (type === "call.accept") {
+                const callId =
+                  typeof parsed.callId === "number" ? parsed.callId : null;
+                if (callId == null) return;
+                await acceptCall(db, callId, user.id);
+                return;
+              }
+              if (type === "call.decline") {
+                const callId =
+                  typeof parsed.callId === "number" ? parsed.callId : null;
+                if (callId == null) return;
+                const call = getActiveCall(callId);
+                if (!call || !call.invitedUserIds.has(user.id)) return;
+                // 1-on-1: decline tears down the whole call (legacy path).
+                // Group (≥3 invitees): one decline just removes that user;
+                // the call continues for everyone else. If the decline leaves
+                // only the initiator on the invitee roster, we wrap up.
+                const isTwoParty = call.invitedUserIds.size <= 2;
+                if (isTwoParty) {
+                  const summary: CallEndSummary = {
+                    callId,
+                    channelId: call.channelId,
+                    workspaceId: call.workspaceId,
+                    callType: call.callType,
+                    initiatorUserId: call.initiatorUserId,
+                    inviteeUserIds: [...call.invitedUserIds],
+                    startedAt: call.startedAt,
+                    endedAt: new Date(),
+                    reason: "declined",
+                  };
+                  await endCall({
+                    db,
+                    callId,
+                    byUserId: user.id,
+                    reason: "declined",
+                  });
+                  await finalizeCall(summary, appUrl);
+                  return;
+                }
+                // Group decline: snapshot the roster *before* mutation so
+                // peer-declined reaches the declining user too (clients use
+                // this to dispose their own RTC state).
+                const recipients = new Set(call.invitedUserIds);
+                const { allDeclined } = await declineCall(db, callId, user.id);
+                publish(
+                  call.workspaceId,
+                  {
+                    type: "call.peer-declined",
+                    workspaceId: call.workspaceId,
+                    callId,
+                    channelId: call.channelId,
+                    payload: { userId: user.id },
+                  },
+                  recipients,
+                );
+                if (allDeclined) {
+                  const summary: CallEndSummary = {
+                    callId,
+                    channelId: call.channelId,
+                    workspaceId: call.workspaceId,
+                    callType: call.callType,
+                    initiatorUserId: call.initiatorUserId,
+                    inviteeUserIds: [...recipients],
+                    startedAt: call.startedAt,
+                    endedAt: new Date(),
+                    reason: "declined",
+                  };
+                  await endCall({
+                    db,
+                    callId,
+                    byUserId: user.id,
+                    reason: "declined",
+                  });
+                  await finalizeCall(summary, appUrl);
+                }
+                return;
+              }
+              if (type === "call.hangup") {
+                const callId =
+                  typeof parsed.callId === "number" ? parsed.callId : null;
+                if (callId == null) return;
+                const call = getActiveCall(callId);
+                if (!call || !call.invitedUserIds.has(user.id)) return;
+                // 2-party call: hangup ends it for everyone. For >2 mesh
+                // calls, the participant leaves; only the last connected
+                // peer triggers a full end.
+                const isTwoParty = call.invitedUserIds.size === 2;
+                if (!isTwoParty) {
+                  const callIsOver = await leaveCall(db, callId, user.id);
+                  if (!callIsOver) return;
+                }
+                const reason: "completed" | "missed" =
+                  call.connectedUserIds.size > 1 ? "completed" : "missed";
+                const summary: CallEndSummary = {
+                  callId,
+                  channelId: call.channelId,
+                  workspaceId: call.workspaceId,
+                  callType: call.callType,
+                  initiatorUserId: call.initiatorUserId,
+                  inviteeUserIds: [...call.invitedUserIds],
+                  startedAt: call.startedAt,
+                  endedAt: new Date(),
+                  reason,
+                };
+                await endCall({
+                  db,
+                  callId,
+                  byUserId: user.id,
+                  reason,
+                });
+                await finalizeCall(summary, appUrl);
+                return;
+              }
+              if (
+                type === "call.offer" ||
+                type === "call.answer" ||
+                type === "call.ice"
+              ) {
+                const callId =
+                  typeof parsed.callId === "number" ? parsed.callId : null;
+                const to =
+                  typeof parsed.to === "number" ? parsed.to : null;
+                if (callId == null || to == null) return;
+                if (!isParticipant(callId, user.id)) return;
+                if (!isParticipant(callId, to)) return;
+                const call = getActiveCall(callId);
+                if (!call) return;
+                // Forward only to the addressed peer. The pubsub filter
+                // restricts to {to}, so other workspace subscribers (even
+                // call participants) won't see this SDP/ICE frame.
+                publish(
+                  user.workspaceId,
+                  {
+                    type:
+                      type === "call.offer"
+                        ? "call.offer"
+                        : type === "call.answer"
+                          ? "call.answer"
+                          : "call.ice",
+                    workspaceId: user.workspaceId,
+                    callId,
+                    channelId: call.channelId,
+                    payload: {
+                      from: user.id,
+                      to,
+                      sdp: parsed.sdp ?? null,
+                      candidate: parsed.candidate ?? null,
+                    },
+                  },
+                  new Set([to]),
+                );
+                return;
+              }
+            })();
           },
           onClose() {
             clearAllForUser(user.workspaceId, user.id);
+            // If the user was in any call, hang them up. For 2-party, this
+            // ends the call (completed if both joined, missed if not). For
+            // mesh, leaveCall returns true only when the call empties.
+            const activeIds = activeCallsForUser(user.id);
+            for (const callId of activeIds) {
+              const call = getActiveCall(callId);
+              if (!call) continue;
+              const isTwoParty = call.invitedUserIds.size === 2;
+              const everConnected = call.connectedUserIds.size > 1;
+              if (isTwoParty || !everConnected) {
+                const reason: "completed" | "missed" = everConnected
+                  ? "completed"
+                  : "missed";
+                const summary: CallEndSummary = {
+                  callId,
+                  channelId: call.channelId,
+                  workspaceId: call.workspaceId,
+                  callType: call.callType,
+                  initiatorUserId: call.initiatorUserId,
+                  inviteeUserIds: [...call.invitedUserIds],
+                  startedAt: call.startedAt,
+                  endedAt: new Date(),
+                  reason,
+                };
+                void endCall({
+                  db,
+                  callId,
+                  byUserId: user.id,
+                  reason,
+                }).then(() => finalizeCall(summary, appUrl));
+              } else {
+                void leaveCall(db, callId, user.id);
+              }
+            }
             detach(user.workspaceId, user.id);
             unsub?.();
             unsub = null;

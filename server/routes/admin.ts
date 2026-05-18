@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { eq, inArray, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
 import {
+  iceServers,
   sessions,
   smtpSettings,
   users,
@@ -660,6 +661,137 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   app.post("/vapid/generate", (c) => {
     const { publicKey, privateKey } = generateVapidKeys();
     return c.json({ publicKey, privateKey });
+  });
+
+  // === ICE servers (Stage 5 — WebRTC) ===
+  // Sysadmin manages the STUN/TURN pool that clients use when building a
+  // RTCPeerConnection. List endpoint mirrors /api/chat/ice (which strips
+  // disabled rows + credentials) but here we expose everything.
+  app.get("/ice", (c) => {
+    const rows = db
+      .select()
+      .from(iceServers)
+      .orderBy(iceServers.sortOrder, iceServers.id)
+      .all();
+    return c.json({
+      items: rows.map((r) => ({
+        id: r.id,
+        urls: r.urls,
+        username: r.username,
+        credential: r.credential,
+        enabled: r.enabled,
+        sortOrder: r.sortOrder,
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+    });
+  });
+
+  app.post("/ice", async (c) => {
+    let body: {
+      urls?: unknown;
+      username?: unknown;
+      credential?: unknown;
+      enabled?: unknown;
+      sortOrder?: unknown;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "expected JSON" }, 400);
+    }
+    const urls = String(body.urls ?? "").trim();
+    if (!urls) return c.json({ error: "urls обязателен" }, 400);
+    if (!/^(stun|turn|turns):/i.test(urls)) {
+      return c.json(
+        { error: "urls должен начинаться с stun: / turn: / turns:" },
+        400,
+      );
+    }
+    const username =
+      body.username == null ? null : String(body.username).trim() || null;
+    const credential =
+      body.credential == null ? null : String(body.credential).trim() || null;
+    const enabled = body.enabled == null ? true : Boolean(body.enabled);
+    const sortOrder =
+      typeof body.sortOrder === "number" ? Math.trunc(body.sortOrder) : 0;
+    const now = new Date();
+    const result = db
+      .insert(iceServers)
+      .values({
+        urls,
+        username,
+        credential,
+        enabled,
+        sortOrder,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+      .get();
+    return c.json({
+      id: result.id,
+      urls: result.urls,
+      username: result.username,
+      credential: result.credential,
+      enabled: result.enabled,
+      sortOrder: result.sortOrder,
+    });
+  });
+
+  app.patch("/ice/:id", async (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+    const existing = db
+      .select()
+      .from(iceServers)
+      .where(eq(iceServers.id, id))
+      .get();
+    if (!existing) return c.json({ error: "not found" }, 404);
+    let body: Record<string, unknown>;
+    try {
+      body = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "expected JSON" }, 400);
+    }
+    const patch: Partial<typeof iceServers.$inferInsert> = {};
+    if (typeof body.urls === "string") {
+      const urls = body.urls.trim();
+      if (!urls) return c.json({ error: "urls пуст" }, 400);
+      if (!/^(stun|turn|turns):/i.test(urls)) {
+        return c.json(
+          { error: "urls должен начинаться с stun: / turn: / turns:" },
+          400,
+        );
+      }
+      patch.urls = urls;
+    }
+    if ("username" in body) {
+      patch.username =
+        body.username == null ? null : String(body.username).trim() || null;
+    }
+    if ("credential" in body) {
+      patch.credential =
+        body.credential == null
+          ? null
+          : String(body.credential).trim() || null;
+    }
+    if ("enabled" in body) patch.enabled = Boolean(body.enabled);
+    if (typeof body.sortOrder === "number") {
+      patch.sortOrder = Math.trunc(body.sortOrder);
+    }
+    if (Object.keys(patch).length === 0) {
+      return c.json({ error: "нет изменений" }, 400);
+    }
+    patch.updatedAt = new Date();
+    db.update(iceServers).set(patch).where(eq(iceServers.id, id)).run();
+    return c.json({ ok: true });
+  });
+
+  app.delete("/ice/:id", (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+    db.delete(iceServers).where(eq(iceServers.id, id)).run();
+    return c.json({ ok: true });
   });
 
   return app;
