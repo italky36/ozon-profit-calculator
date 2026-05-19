@@ -539,6 +539,11 @@ export const chatMessages = pgTable("chat_messages", {
   /** Soft-delete. UI рендерит сообщение как «удалено», вложения зачищаются
    * физически роутом. */
   deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "date" }),
+  // NOTE: чат-таблица также имеет колонку `search_vector tsvector` (GENERATED
+  // ALWAYS AS to_tsvector('russian', body) STORED) с GIN-индексом — миграция
+  // 0001_chat_fts. Drizzle ORM её не модель-ирует: запросы FTS идут через raw
+  // sql`…` в server/routes/chat.ts. Если будешь делать db:generate под chat_
+  // messages — проверь, что новая миграция не сносит search_vector / индекс.
 });
 
 /** Per-user read pointer. Bump-only (PUT /channels/:id/read валидирует

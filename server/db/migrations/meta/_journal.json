@@ -8,6 +8,13 @@
       "when": 1779205657936,
       "tag": "0000_square_colossus",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1779209000000,
+      "tag": "0001_chat_fts",
+      "breakpoints": true
     }
   ]
 }

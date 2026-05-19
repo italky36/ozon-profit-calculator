@@ -2416,28 +2416,34 @@ export function chatRoutes(
       channelFilter = n;
     }
 
-    // Postgres FTS: ILIKE-based fallback. Proper tsvector + GIN is task #7
-    // in the migration plan; until then this gives substring matching with
-    // case-insensitivity, no snippets. Returns top `limit` newest matches.
-    const likePattern = `%${ftsQuery.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+    // Postgres FTS: tsvector + GIN (migration 0001_chat_fts).
+    // - search_vector — STORED generated `tsvector` колонка с конфигом
+    //   russian, Postgres сам поддерживает её в актуальном состоянии.
+    // - ts_headline даёт подсвеченный сниппет (<mark>…</mark>) — пара
+    //   StartSel/StopSel совпадает с тем, что был у SQLite FTS5 snippet().
+    // - plainto_tsquery санитизирует пользовательский ввод (никакой
+    //   ручной escape-логики на JS-стороне).
     const channelClause = channelFilter
       ? sql`AND m.channel_id = ${channelFilter}`
       : sql``;
-    const queryResult = await db.execute<{ id: number; body: string }>(sql`
-      SELECT m.id AS id, m.body AS body
+    const queryResult = await db.execute<{ id: number; snippet: string }>(sql`
+      SELECT m.id AS id,
+             ts_headline(
+               'russian',
+               m.body,
+               plainto_tsquery('russian', ${ftsQuery}),
+               'StartSel=<mark>, StopSel=</mark>, MaxWords=20, MinWords=10, ShortWord=2'
+             ) AS snippet
       FROM chat_messages m
       JOIN chat_channels ch ON ch.id = m.channel_id
-      WHERE m.body ILIKE ${likePattern}
+      WHERE m.search_vector @@ plainto_tsquery('russian', ${ftsQuery})
         AND ch.workspace_id = ${user.workspaceId}
         AND m.deleted_at IS NULL
         ${channelClause}
       ORDER BY m.created_at DESC
       LIMIT ${limit}
     `);
-    const rows = queryResult.rows.map((r) => ({
-      id: r.id,
-      snippet: r.body,
-    }));
+    const rows = queryResult.rows;
 
     const ids = rows.map((r) => r.id);
     if (ids.length === 0) return c.json({ results: [] });
