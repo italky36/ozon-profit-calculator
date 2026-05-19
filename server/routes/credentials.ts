@@ -162,7 +162,7 @@ export function credentialsRoutes(db: DB): Hono<CredsEnv> {
         updatedAt: now,
       })
       .where(eq(shops.id, shop));
-    return c.json({ ok: true, cleared: result.changes });
+    return c.json({ ok: true, cleared: result.rowCount ?? 0 });
   });
 
   return app;

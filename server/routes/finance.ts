@@ -181,7 +181,7 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
           eq(financeTransactions.userId, user.id),
         ),
       );
-    return c.json({ deleted: result.changes });
+    return c.json({ deleted: result.rowCount ?? 0 });
   });
 
   return app;

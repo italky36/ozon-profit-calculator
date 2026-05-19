@@ -209,7 +209,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     const { token } = await createVerificationToken(db, row.id);
     const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generateVerificationEmail(row.email, verifyLink));
+      (await getEmailClient()).send(generateVerificationEmail(row.email, verifyLink));
     } catch (e) {
       console.error("[admin] failed to send verification email:", e);
       return c.json({ error: "failed to send email" }, 500);
@@ -380,7 +380,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     }
 
     try {
-      await getEmailClient().send({
+      (await getEmailClient()).send({
         to: r.to,
         subject,
         text:
@@ -416,12 +416,12 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   /** All workspaces in the platform with member/shop counts and the email of
    * the primary owner. Paginated only by limit (we expect <10k workspaces). */
   app.get("/workspaces", async (c) => {
-    const rows = db.all<{
+    const result = await db.execute<{
       id: number;
       name: string;
       slug: string;
-      created_at: number;
-      suspended_at: number | null;
+      created_at: Date;
+      suspended_at: Date | null;
       member_count: number;
       shop_count: number;
       owner_email: string | null;
@@ -444,6 +444,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       FROM workspaces w
       ORDER BY w.created_at ASC
     `);
+    const rows = result.rows;
     return c.json(
       rows.map((r) => ({
         id: r.id,
@@ -452,16 +453,8 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         memberCount: Number(r.member_count),
         shopCount: Number(r.shop_count),
         ownerEmail: r.owner_email ?? null,
-        createdAt:
-          typeof r.created_at === "number"
-            ? r.created_at
-            : new Date(r.created_at).getTime(),
-        suspendedAt:
-          r.suspended_at == null
-            ? null
-            : typeof r.suspended_at === "number"
-              ? r.suspended_at
-              : new Date(r.suspended_at).getTime(),
+        createdAt: r.created_at.getTime(),
+        suspendedAt: r.suspended_at?.getTime() ?? null,
       })),
     );
   });

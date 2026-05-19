@@ -332,7 +332,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
           eq(products.userId, user.id),
         ),
       );
-    return c.json({ updated: result.changes });
+    return c.json({ updated: result.rowCount ?? 0 });
   });
 
   // Bulk-update arbitrary subset of products. Supported fields:
@@ -391,7 +391,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
           eq(products.userId, user.id),
         ),
       );
-    return c.json({ updated: result.changes });
+    return c.json({ updated: result.rowCount ?? 0 });
   });
 
   app.post("/bulk/delete", async (c) => {
@@ -417,7 +417,7 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
           eq(products.userId, user.id),
         ),
       );
-    return c.json({ deleted: result.changes });
+    return c.json({ deleted: result.rowCount ?? 0 });
   });
 
   return app;

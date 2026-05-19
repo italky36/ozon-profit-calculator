@@ -57,7 +57,7 @@ interface InviteOut {
   createdAt: number;
 }
 
-function listMembers(db: DB, workspaceId: number, currentUserId: number): MemberOut[] {
+async function listMembers(db: DB, workspaceId: number, currentUserId: number): Promise<MemberOut[]> {
   const rows = await db
     .select({
       userId: workspaceMembers.userId,
@@ -90,7 +90,7 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
+async function listPendingInvites(db: DB, workspaceId: number): Promise<InviteOut[]> {
   const rows = await db
     .select({
       token: workspaceInvites.token,
@@ -124,7 +124,7 @@ function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function ownerCount(db: DB, workspaceId: number): number {
+async function ownerCount(db: DB, workspaceId: number): Promise<number> {
   const [row] = await db
     .select({ n: sql<number>`count(*)` })
     .from(workspaceMembers)
@@ -162,7 +162,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       createdAt: ws.createdAt.getTime(),
       updatedAt: ws.updatedAt.getTime(),
       role: user.workspaceRole,
-      members: listMembers(db, ws.id, user.id),
+      members: await listMembers(db, ws.id, user.id),
     });
   });
 
@@ -397,7 +397,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
   app.get("/me/invites", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
-    return c.json(listPendingInvites(db, user.workspaceId));
+    return c.json(await listPendingInvites(db, user.workspaceId));
   });
 
   app.post("/me/invites", async (c) => {
@@ -476,7 +476,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       ;
 
     try {
-      await getEmailClient().send(
+      (await getEmailClient()).send(
         generateInviteEmail({
           to: email,
           workspaceName: ws?.name ?? "Команда",
@@ -564,7 +564,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (
       target.role === "owner" &&
       nextRole !== "owner" &&
-      ownerCount(db, user.workspaceId) <= 1
+      (await ownerCount(db, user.workspaceId)) <= 1
     )
       return c.json(
         { error: "Нельзя понизить последнего владельца команды" },
@@ -675,7 +675,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
 
     if (
       target.role === "owner" &&
-      ownerCount(db, user.workspaceId) <= 1
+      (await ownerCount(db, user.workspaceId)) <= 1
     )
       return c.json(
         { error: "Нельзя удалить последнего владельца команды" },
@@ -749,7 +749,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (
       r.blocked &&
       member.role === "owner" &&
-      ownerCount(db, user.workspaceId) <= 1
+      (await ownerCount(db, user.workspaceId)) <= 1
     )
       return c.json(
         { error: "Нельзя заблокировать последнего владельца команды" },
@@ -806,7 +806,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       ;
     if (!member) return c.json({ error: "Участник не найден" }, 404);
 
-    if (member.role === "owner" && ownerCount(db, user.workspaceId) <= 1)
+    if (member.role === "owner" && (await ownerCount(db, user.workspaceId)) <= 1)
       return c.json(
         { error: "Нельзя удалить последнего владельца команды" },
         400,
@@ -922,7 +922,7 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
     }
 
     const now = new Date();
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       await tx.insert(workspaceMembers)
         .values({
           workspaceId: inv.workspaceId,

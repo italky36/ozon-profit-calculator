@@ -283,8 +283,8 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
 
     // user → (workspace + owner-membership + default shop) OR (join via invite),
     // atomically.
-    const [userId] = await db.transaction((tx) => {
-      const u = tx
+    const userId = await db.transaction(async (tx) => {
+      const [u] = await tx
         .insert(users)
         .values({
           email: parsed.email,
@@ -296,8 +296,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
           createdAt: now,
           updatedAt: now,
         })
-        .returning({ id: users.id })
-        ;
+        .returning({ id: users.id });
 
       if (invite) {
         // Join existing workspace via invite.
@@ -389,7 +388,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const { token } = await createVerificationToken(db, userId);
     const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(
+      (await getEmailClient()).send(
         generateVerificationEmail(parsed.email, verifyLink),
       );
     } catch (e) {
@@ -638,7 +637,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const { token } = await createPasswordResetToken(db, row.id);
     const resetLink = `${resolveAppUrl(c)}/reset-password?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generatePasswordResetEmail(row.email, resetLink));
+      (await getEmailClient()).send(generatePasswordResetEmail(row.email, resetLink));
     } catch (e) {
       console.error("[auth] failed to send password reset email:", e);
     }

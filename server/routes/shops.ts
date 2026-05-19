@@ -709,7 +709,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       .where(
         and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)),
       );
-    if (result.changes === 0) return c.json({ error: "not found" }, 404);
+    if (result.rowCount ?? 0 === 0) return c.json({ error: "not found" }, 404);
 
     const [settings] = await db
       .select()

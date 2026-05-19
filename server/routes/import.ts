@@ -418,7 +418,7 @@ export function importRoutes(
           importShopId,
           importWorkspaceId,
           importUserId,
-          (c2) => {
+          async (c2) => {
             await db.update(importRuns)
               .set({ itemsProcessed: c2.itemsProcessed })
               .where(eq(importRuns.id, run.id))
@@ -541,7 +541,7 @@ export function importRoutes(
             importWorkspaceId,
             importUserId,
             chunkFilter,
-            (c2) => {
+            async (c2) => {
               await db.update(importRuns)
                 .set({
                   itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
@@ -819,7 +819,7 @@ export function importRoutes(
       );
 
     let linked = 0;
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       for (const r of orphans) {
         const raw = (r.raw ?? {}) as {
           items?: Array<{ sku?: number; offer_id?: string }>;

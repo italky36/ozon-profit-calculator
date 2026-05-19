@@ -2208,7 +2208,7 @@ export function chatRoutes(
           eq(chatMessageReactions.emoji, emoji),
         ),
       );
-    if ((result as { changes?: number }).changes ?? 0 > 0) {
+    if ((result.rowCount ?? 0) > 0) {
       publish(
         user.workspaceId,
         {
@@ -2416,26 +2416,28 @@ export function chatRoutes(
       channelFilter = n;
     }
 
-    // FTS5 → joined with chat_messages + chat_channels to enforce workspace
-    // scope. Snippet uses FTS5 `snippet()` for highlighted excerpt.
+    // Postgres FTS: ILIKE-based fallback. Proper tsvector + GIN is task #7
+    // in the migration plan; until then this gives substring matching with
+    // case-insensitivity, no snippets. Returns top `limit` newest matches.
+    const likePattern = `%${ftsQuery.replace(/[%_]/g, (m) => `\\${m}`)}%`;
     const channelClause = channelFilter
       ? sql`AND m.channel_id = ${channelFilter}`
       : sql``;
-    const rows = await db.all<{
-      id: number;
-      snippet: string;
-    }>(sql`
-      SELECT m.id AS id, snippet(chat_messages_fts, 0, '<mark>', '</mark>', '…', 16) AS snippet
-      FROM chat_messages_fts
-      JOIN chat_messages m ON m.id = chat_messages_fts.rowid
-      JOIN chat_channels  ch ON ch.id = m.channel_id
-      WHERE chat_messages_fts MATCH ${ftsQuery}
+    const queryResult = await db.execute<{ id: number; body: string }>(sql`
+      SELECT m.id AS id, m.body AS body
+      FROM chat_messages m
+      JOIN chat_channels ch ON ch.id = m.channel_id
+      WHERE m.body ILIKE ${likePattern}
         AND ch.workspace_id = ${user.workspaceId}
         AND m.deleted_at IS NULL
         ${channelClause}
       ORDER BY m.created_at DESC
       LIMIT ${limit}
     `);
+    const rows = queryResult.rows.map((r) => ({
+      id: r.id,
+      snippet: r.body,
+    }));
 
     const ids = rows.map((r) => r.id);
     if (ids.length === 0) return c.json({ results: [] });
@@ -2677,7 +2679,7 @@ export function chatRoutes(
   if (upgradeWebSocket) {
     app.get(
       "/ws",
-      upgradeWebSocket(async (c) => {
+      upgradeWebSocket((c) => {
         const user = (c as { get: (k: string) => SessionUser }).get("user");
         const appUrl = resolveAppUrl(c);
         let unsub: (() => void) | null = null;
