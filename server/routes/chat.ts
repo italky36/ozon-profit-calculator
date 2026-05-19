@@ -185,7 +185,7 @@ async function authorsByIds(
   if (ids.length === 0) return out;
   const unique = [...new Set(ids)];
   for (const id of unique) {
-    const row = await db
+    const [row] = await db
       .select({
         id: users.id,
         email: users.email,
@@ -195,7 +195,7 @@ async function authorsByIds(
       })
       .from(users)
       .where(eq(users.id, id))
-      .get();
+      ;
     if (row) {
       out.set(row.id, {
         userId: row.id,
@@ -474,11 +474,11 @@ async function loadMessageOut(
   db: DB,
   messageId: number,
 ): Promise<MessageOut | null> {
-  const msg = await db
+  const [msg] = await db
     .select()
     .from(chatMessages)
     .where(eq(chatMessages.id, messageId))
-    .get();
+    ;
   if (!msg) return null;
   const atts = await db
     .select({
@@ -539,11 +539,11 @@ async function userCanAccessChannel(
   user: SessionUser,
   channelId: number,
 ): Promise<typeof chatChannels.$inferSelect | null> {
-  const row = await db
+  const [row] = await db
     .select()
     .from(chatChannels)
     .where(eq(chatChannels.id, channelId))
-    .get();
+    ;
   if (!row) return null;
   if (row.workspaceId !== user.workspaceId) return null;
   // DM and private channels both gate by chat_channel_members. Open
@@ -551,7 +551,7 @@ async function userCanAccessChannel(
   // workspace member.
   const needsMembership = row.type === "dm" || row.isPrivate;
   if (needsMembership) {
-    const member = await db
+    const [member] = await db
       .select({ userId: chatChannelMembers.userId })
       .from(chatChannelMembers)
       .where(
@@ -560,7 +560,7 @@ async function userCanAccessChannel(
           eq(chatChannelMembers.userId, user.id),
         ),
       )
-      .get();
+      ;
     if (!member) return null;
   }
   return row;
@@ -861,7 +861,7 @@ export function chatRoutes(
     }
 
     const now = new Date();
-    const created = await db
+    const [created] = await db
       .insert(chatChannels)
       .values({
         workspaceId: user.workspaceId,
@@ -873,7 +873,7 @@ export function chatRoutes(
         createdAt: now,
       })
       .returning()
-      .get();
+      ;
     if (isPrivate && memberIds.length > 0) {
       await db.insert(chatChannelMembers).values(
         memberIds.map((userId) => ({
@@ -946,16 +946,16 @@ export function chatRoutes(
     if (Object.keys(patch).length === 0) {
       return c.json({ error: "nothing to update" }, 400);
     }
-    const updated = await db
+    const [updated] = await db
       .update(chatChannels)
       .set(patch)
       .where(eq(chatChannels.id, id))
       .returning()
-      .get();
+      ;
     // After PATCH we send back the read-state for current user; other users'
     // unread counters update via the existing channel.* event + their own
     // refetch flow (channel meta change is rare).
-    const myRead = await db
+    const [myRead] = await db
       .select({
         lastReadMessageId: chatChannelReads.lastReadMessageId,
       })
@@ -966,7 +966,7 @@ export function chatRoutes(
           eq(chatChannelReads.userId, user.id),
         ),
       )
-      .get();
+      ;
     const out: ChannelOut = {
       id: updated.id,
       name: updated.name,
@@ -1043,11 +1043,11 @@ export function chatRoutes(
     | { channel: typeof chatChannels.$inferSelect }
     | { status: 403 | 404; error: string }
   > {
-    const channel = await db
+    const [channel] = await db
       .select()
       .from(chatChannels)
       .where(eq(chatChannels.id, channelId))
-      .get();
+      ;
     if (!channel || channel.workspaceId !== user.workspaceId) {
       return { status: 404, error: "channel not found" };
     }
@@ -1095,7 +1095,7 @@ export function chatRoutes(
     if (!Number.isFinite(targetUserId) || targetUserId <= 0) {
       return c.json({ error: "invalid userId" }, 400);
     }
-    const target = await db
+    const [target] = await db
       .select({ id: users.id })
       .from(users)
       .innerJoin(workspaceMembers, eq(workspaceMembers.userId, users.id))
@@ -1105,7 +1105,7 @@ export function chatRoutes(
           eq(workspaceMembers.workspaceId, user.workspaceId),
         ),
       )
-      .get();
+      ;
     if (!target) {
       return c.json({ error: "пользователь не найден в команде" }, 404);
     }
@@ -1178,7 +1178,7 @@ export function chatRoutes(
       return c.json({ error: "нельзя написать самому себе" }, 400);
     }
     // Target must be a member of the same workspace.
-    const target = await db
+    const [target] = await db
       .select({
         id: users.id,
         email: users.email,
@@ -1194,7 +1194,7 @@ export function chatRoutes(
           eq(workspaceMembers.workspaceId, user.workspaceId),
         ),
       )
-      .get();
+      ;
     if (!target) {
       return c.json({ error: "пользователь не найден в команде" }, 404);
     }
@@ -1239,15 +1239,15 @@ export function chatRoutes(
     let createdAt: Date;
     if (existingChannelId != null) {
       channelId = existingChannelId;
-      const row = await db
+      const [row] = await db
         .select({ createdAt: chatChannels.createdAt })
         .from(chatChannels)
         .where(eq(chatChannels.id, channelId))
-        .get();
+        ;
       createdAt = row?.createdAt ?? new Date();
     } else {
       const now = new Date();
-      const created = await db
+      const [created] = await db
         .insert(chatChannels)
         .values({
           workspaceId: user.workspaceId,
@@ -1258,7 +1258,7 @@ export function chatRoutes(
           createdAt: now,
         })
         .returning()
-        .get();
+        ;
       channelId = created.id;
       createdAt = created.createdAt;
       await db.insert(chatChannelMembers).values([
@@ -1303,7 +1303,7 @@ export function chatRoutes(
     }
 
     // Read pointer for current user (if any).
-    const myRead = await db
+    const [myRead] = await db
       .select({ lastReadMessageId: chatChannelReads.lastReadMessageId })
       .from(chatChannelReads)
       .where(
@@ -1312,7 +1312,7 @@ export function chatRoutes(
           eq(chatChannelReads.userId, user.id),
         ),
       )
-      .get();
+      ;
 
     const out: ChannelOut = {
       id: channelId,
@@ -1359,17 +1359,17 @@ export function chatRoutes(
     if (!Number.isFinite(messageId) || messageId <= 0) {
       return c.json({ error: "invalid messageId" }, 400);
     }
-    const msg = await db
+    const [msg] = await db
       .select({ id: chatMessages.id, channelId: chatMessages.channelId })
       .from(chatMessages)
       .where(eq(chatMessages.id, messageId))
-      .get();
+      ;
     if (!msg || msg.channelId !== channelId) {
       return c.json({ error: "message not in channel" }, 404);
     }
 
     const now = new Date();
-    const existing = await db
+    const [existing] = await db
       .select({ lastReadMessageId: chatChannelReads.lastReadMessageId })
       .from(chatChannelReads)
       .where(
@@ -1378,7 +1378,7 @@ export function chatRoutes(
           eq(chatChannelReads.userId, user.id),
         ),
       )
-      .get();
+      ;
     let effectiveMessageId = messageId;
     if (!existing) {
       await db.insert(chatChannelReads).values({
@@ -1539,14 +1539,14 @@ export function chatRoutes(
     quotedMessageId: number,
     channelId: number,
   ): Promise<{ status: number; error: string } | null> {
-    const quoted = await db
+    const [quoted] = await db
       .select({
         id: chatMessages.id,
         channelId: chatMessages.channelId,
       })
       .from(chatMessages)
       .where(eq(chatMessages.id, quotedMessageId))
-      .get();
+      ;
     if (!quoted) return { status: 404, error: "quoted message not found" };
     if (quoted.channelId !== channelId) {
       return { status: 400, error: "quoted message is in another channel" };
@@ -1561,7 +1561,7 @@ export function chatRoutes(
     parentMessageId: number,
     channelId: number,
   ): Promise<{ status: number; error: string } | null> {
-    const parent = await db
+    const [parent] = await db
       .select({
         id: chatMessages.id,
         channelId: chatMessages.channelId,
@@ -1569,7 +1569,7 @@ export function chatRoutes(
       })
       .from(chatMessages)
       .where(eq(chatMessages.id, parentMessageId))
-      .get();
+      ;
     if (!parent) return { status: 404, error: "parent message not found" };
     if (parent.channelId !== channelId)
       return { status: 400, error: "parent message is in another channel" };
@@ -1630,7 +1630,7 @@ export function chatRoutes(
     }
 
     const now = new Date();
-    const created = await db
+    const [created] = await db
       .insert(chatMessages)
       .values({
         channelId,
@@ -1641,7 +1641,7 @@ export function chatRoutes(
         createdAt: now,
       })
       .returning()
-      .get();
+      ;
     const mentionedIds = await syncMentions(
       db,
       created.id,
@@ -1774,7 +1774,7 @@ export function chatRoutes(
     }
 
     const now = new Date();
-    const message = await db
+    const [message] = await db
       .insert(chatMessages)
       .values({
         channelId,
@@ -1785,7 +1785,7 @@ export function chatRoutes(
         createdAt: now,
       })
       .returning()
-      .get();
+      ;
     let mentionedIds: number[] = [];
     if (bodyText) {
       mentionedIds = await syncMentions(
@@ -1806,7 +1806,7 @@ export function chatRoutes(
 
     for (const file of files) {
       const buf = Buffer.from(await file.arrayBuffer());
-      const attachment = await db
+      const [attachment] = await db
         .insert(chatAttachments)
         .values({
           messageId: message.id,
@@ -1817,7 +1817,7 @@ export function chatRoutes(
           createdAt: now,
         })
         .returning()
-        .get();
+        ;
       const key = buildStorageKey(
         user.workspaceId,
         attachment.id,
@@ -1914,11 +1914,11 @@ export function chatRoutes(
     if (!Number.isFinite(parentId) || parentId <= 0) {
       return c.json({ error: "invalid id" }, 400);
     }
-    const parentRow = await db
+    const [parentRow] = await db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, parentId))
-      .get();
+      ;
     if (!parentRow) return c.json({ error: "message not found" }, 404);
     const channel = await userCanAccessChannel(db, user, parentRow.channelId);
     if (!channel) return c.json({ error: "message not found" }, 404);
@@ -2021,11 +2021,11 @@ export function chatRoutes(
     if (!Number.isFinite(messageId) || messageId <= 0) {
       return c.json({ error: "invalid id" }, 400);
     }
-    const msg = await db
+    const [msg] = await db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, messageId))
-      .get();
+      ;
     if (!msg) return c.json({ error: "message not found" }, 404);
     const channel = await userCanAccessChannel(db, user, msg.channelId);
     if (!channel) return c.json({ error: "message not found" }, 404);
@@ -2145,11 +2145,11 @@ export function chatRoutes(
     if (emoji.length > EMOJI_MAX_LEN)
       return c.json({ error: "emoji too long" }, 400);
 
-    const msg = await db
+    const [msg] = await db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, messageId))
-      .get();
+      ;
     if (!msg) return c.json({ error: "message not found" }, 404);
     if (msg.deletedAt)
       return c.json({ error: "сообщение удалено" }, 400);
@@ -2190,11 +2190,11 @@ export function chatRoutes(
     const emoji = decodeURIComponent(c.req.param("emoji"));
     if (!emoji) return c.json({ error: "emoji is required" }, 400);
 
-    const msg = await db
+    const [msg] = await db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, messageId))
-      .get();
+      ;
     if (!msg) return c.json({ error: "message not found" }, 404);
     const channel = await userCanAccessChannel(db, user, msg.channelId);
     if (!channel) return c.json({ error: "message not found" }, 404);
@@ -2231,11 +2231,11 @@ export function chatRoutes(
     if (!Number.isFinite(messageId) || messageId <= 0) {
       return c.json({ error: "invalid id" }, 400);
     }
-    const msg = await db
+    const [msg] = await db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, messageId))
-      .get();
+      ;
     if (!msg) return c.json({ error: "message not found" }, 404);
     const channel = await userCanAccessChannel(db, user, msg.channelId);
     if (!channel) return c.json({ error: "message not found" }, 404);
@@ -2314,7 +2314,7 @@ export function chatRoutes(
     if (!Number.isFinite(id) || id <= 0) {
       return c.json({ error: "invalid id" }, 400);
     }
-    const row = await db
+    const [row] = await db
       .select({
         attachment: chatAttachments,
         channel: chatChannels,
@@ -2326,7 +2326,7 @@ export function chatRoutes(
       )
       .innerJoin(chatChannels, eq(chatChannels.id, chatMessages.channelId))
       .where(eq(chatAttachments.id, id))
-      .get();
+      ;
     if (!row) return c.json({ error: "attachment not found" }, 404);
     // Workspace match + DM membership (when applicable) — same gate as
     // userCanAccessChannel, expressed inline since we already have the
@@ -2335,7 +2335,7 @@ export function chatRoutes(
       return c.json({ error: "attachment not found" }, 404);
     }
     if (row.channel.type === "dm") {
-      const member = await db
+      const [member] = await db
         .select({ userId: chatChannelMembers.userId })
         .from(chatChannelMembers)
         .where(
@@ -2344,7 +2344,7 @@ export function chatRoutes(
             eq(chatChannelMembers.userId, user.id),
           ),
         )
-        .get();
+        ;
       if (!member) return c.json({ error: "attachment not found" }, 404);
     }
     const buf = await getFileStorage().read(row.attachment.storageKey).catch(
@@ -2536,7 +2536,7 @@ export function chatRoutes(
       .from(iceServers)
       .where(eq(iceServers.enabled, true))
       .orderBy(iceServers.sortOrder, iceServers.id)
-      .all();
+      ;
     const items = rows.length
       ? rows.map((r) => ({
           urls: r.urls,
@@ -2632,14 +2632,14 @@ export function chatRoutes(
     summary: CallEndSummary,
     appUrl: string,
   ): Promise<void> {
-    const channel = await db
+    const [channel] = await db
       .select()
       .from(chatChannels)
       .where(eq(chatChannels.id, summary.channelId))
-      .get();
+      ;
     if (!channel) return;
     const text = callSystemMessageBody(summary);
-    const inserted = db
+    const [inserted] = await db
       .insert(chatMessages)
       .values({
         channelId: summary.channelId,
@@ -2648,7 +2648,7 @@ export function chatRoutes(
         createdAt: new Date(),
       })
       .returning({ id: chatMessages.id })
-      .get();
+      ;
     const out = await loadMessageOut(db, inserted.id);
     const recipients = await channelRecipients(db, channel);
     if (out) {
@@ -2677,7 +2677,7 @@ export function chatRoutes(
   if (upgradeWebSocket) {
     app.get(
       "/ws",
-      upgradeWebSocket((c) => {
+      upgradeWebSocket(async (c) => {
         const user = (c as { get: (k: string) => SessionUser }).get("user");
         const appUrl = resolveAppUrl(c);
         let unsub: (() => void) | null = null;

@@ -82,11 +82,10 @@ export async function dispatchPushForMessage(
       if (r.authorUserId != null) audience.add(r.authorUserId);
     }
     // Also the root author — they presumably want to know.
-    const root = await input.db
+    const [root] = await input.db
       .select({ authorUserId: chatMessages.authorUserId })
       .from(chatMessages)
-      .where(eq(chatMessages.id, input.parentMessageId))
-      .get();
+      .where(eq(chatMessages.id, input.parentMessageId));
     if (root?.authorUserId != null) audience.add(root.authorUserId);
   }
 
@@ -191,11 +190,10 @@ export async function _selectPushTargets(input: {
     for (const r of replies) {
       if (r.authorUserId != null) audience.add(r.authorUserId);
     }
-    const root = await input.db
+    const [root] = await input.db
       .select({ authorUserId: chatMessages.authorUserId })
       .from(chatMessages)
-      .where(eq(chatMessages.id, input.parentMessageId))
-      .get();
+      .where(eq(chatMessages.id, input.parentMessageId));
     if (root?.authorUserId != null) audience.add(root.authorUserId);
   }
   audience.delete(input.authorUserId);

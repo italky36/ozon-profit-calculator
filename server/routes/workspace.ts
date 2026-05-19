@@ -58,7 +58,7 @@ interface InviteOut {
 }
 
 function listMembers(db: DB, workspaceId: number, currentUserId: number): MemberOut[] {
-  const rows = db
+  const rows = await db
     .select({
       userId: workspaceMembers.userId,
       email: users.email,
@@ -73,7 +73,7 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
     .from(workspaceMembers)
     .innerJoin(users, eq(users.id, workspaceMembers.userId))
     .where(eq(workspaceMembers.workspaceId, workspaceId))
-    .all();
+    ;
   return rows
     .map((r) => ({
       userId: r.userId,
@@ -91,7 +91,7 @@ function listMembers(db: DB, workspaceId: number, currentUserId: number): Member
 }
 
 function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
-  const rows = db
+  const rows = await db
     .select({
       token: workspaceInvites.token,
       email: workspaceInvites.email,
@@ -109,7 +109,7 @@ function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
         isNull(workspaceInvites.usedAt),
       ),
     )
-    .all();
+    ;
   const now = Date.now();
   return rows
     .filter((r) => r.expiresAt.getTime() > now)
@@ -125,7 +125,7 @@ function listPendingInvites(db: DB, workspaceId: number): InviteOut[] {
 }
 
 function ownerCount(db: DB, workspaceId: number): number {
-  const row = db
+  const [row] = await db
     .select({ n: sql<number>`count(*)` })
     .from(workspaceMembers)
     .where(
@@ -134,7 +134,7 @@ function ownerCount(db: DB, workspaceId: number): number {
         eq(workspaceMembers.role, "owner"),
       ),
     )
-    .get();
+    ;
   return row?.n ?? 0;
 }
 
@@ -142,15 +142,15 @@ function ownerCount(db: DB, workspaceId: number): number {
 export function workspaceRoutes(db: DB): Hono<Env> {
   const app = new Hono<Env>();
 
-  app.get("/me", (c) => {
+  app.get("/me", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId)
       return c.json({ error: "У вас нет команды" }, 404);
-    const ws = db
+    const [ws] = await db
       .select()
       .from(workspaces)
       .where(eq(workspaces.id, user.workspaceId))
-      .get();
+      ;
     if (!ws) return c.json({ error: "Команда не найдена" }, 404);
     return c.json({
       id: ws.id,
@@ -206,11 +206,11 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           },
           400,
         );
-      const clash = db
+      const [clash] = await db
         .select({ id: workspaces.id })
         .from(workspaces)
         .where(and(eq(workspaces.slug, slug), sql`${workspaces.id} != ${user.workspaceId}`))
-        .get();
+        ;
       if (clash) return c.json({ error: "Такой slug уже занят" }, 409);
       patch.slug = slug;
     }
@@ -247,13 +247,13 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (Object.keys(patch).length === 0)
       return c.json({ error: "Нечего обновлять" }, 400);
     patch.updatedAt = new Date();
-    db.update(workspaces).set(patch).where(eq(workspaces.id, user.workspaceId)).run();
+    await db.update(workspaces).set(patch).where(eq(workspaces.id, user.workspaceId));
 
-    const ws = db
+    const [ws] = await db
       .select()
       .from(workspaces)
-      .where(eq(workspaces.id, user.workspaceId))
-      .get()!;
+      .where(eq(workspaces.id, user.workspaceId));
+    if (!ws) return c.json({ error: "workspace not found" }, 404);
     return c.json({
       id: ws.id,
       name: ws.name,
@@ -276,7 +276,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
   // Each shop row carries `createdByEmail` so the UI can render «создан X».
   // Each assignment row carries `grantedByEmail` so «доступ от X» is renderable
   // for read-only access.
-  app.get("/me/shop-access", (c) => {
+  app.get("/me/shop-access", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
     if (!canManageWorkspace(user.workspaceRole))
@@ -285,7 +285,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         403,
       );
 
-    const members = db
+    const members = await db
       .select({
         userId: workspaceMembers.userId,
         email: users.email,
@@ -294,7 +294,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       .from(workspaceMembers)
       .innerJoin(users, eq(users.id, workspaceMembers.userId))
       .where(eq(workspaceMembers.workspaceId, user.workspaceId))
-      .all();
+      ;
 
     type ShopRow = {
       id: number;
@@ -318,16 +318,16 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     let wsShops: ShopRow[];
 
     if (user.workspaceRole === "owner") {
-      wsShops = db
-        .select(baseShopSelect)
-        .from(shops)
-        .leftJoin(users, eq(users.id, shops.createdBy))
-        .where(eq(shops.workspaceId, user.workspaceId))
-        .all()
-        .map((s) => ({ ...s, canEdit: true }));
+      wsShops = (
+        await db
+          .select(baseShopSelect)
+          .from(shops)
+          .leftJoin(users, eq(users.id, shops.createdBy))
+          .where(eq(shops.workspaceId, user.workspaceId))
+      ).map((s) => ({ ...s, canEdit: true }));
     } else {
       // Manager: shops they created (canEdit), plus shops they're assigned to (read-only).
-      const own = db
+      const own = await db
         .select(baseShopSelect)
         .from(shops)
         .leftJoin(users, eq(users.id, shops.createdBy))
@@ -337,8 +337,8 @@ export function workspaceRoutes(db: DB): Hono<Env> {
             eq(shops.createdBy, user.id),
           ),
         )
-        .all();
-      const assigned = db
+        ;
+      const assigned = await db
         .select(baseShopSelect)
         .from(shops)
         .innerJoin(shopMember, eq(shopMember.shopId, shops.id))
@@ -349,7 +349,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
             eq(shopMember.userId, user.id),
           ),
         )
-        .all();
+        ;
       const byId = new Map<number, ShopRow>();
       for (const s of own) byId.set(s.id, { ...s, canEdit: true });
       for (const s of assigned) {
@@ -364,7 +364,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     );
 
     const grantorAlias = aliasedTable(users, "grantor");
-    const allAssignments = db
+    const allAssignments = await db
       .select({
         userId: shopMember.userId,
         shopId: shopMember.shopId,
@@ -375,7 +375,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       .innerJoin(shops, eq(shops.id, shopMember.shopId))
       .leftJoin(grantorAlias, eq(grantorAlias.id, shopMember.createdBy))
       .where(eq(shops.workspaceId, user.workspaceId))
-      .all();
+      ;
     const assignments = allAssignments.filter((a) => {
       if (!visibleShopIds.has(a.shopId)) return false;
       if (editableShopIds.has(a.shopId)) return true;
@@ -394,7 +394,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
 
   // === Invites ===
 
-  app.get("/me/invites", (c) => {
+  app.get("/me/invites", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
     return c.json(listPendingInvites(db, user.workspaceId));
@@ -428,7 +428,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     const email = r.email.trim().toLowerCase();
 
     // Already a member of THIS workspace?
-    const existingMember = db
+    const [existingMember] = await db
       .select({ userId: workspaceMembers.userId })
       .from(workspaceMembers)
       .innerJoin(users, eq(users.id, workspaceMembers.userId))
@@ -438,12 +438,12 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(users.email, email),
         ),
       )
-      .get();
+      ;
     if (existingMember)
       return c.json({ error: "Этот пользователь уже в вашей команде" }, 409);
 
     // Pending invite for the same email? Replace it.
-    db.delete(workspaceInvites)
+    await db.delete(workspaceInvites)
       .where(
         and(
           eq(workspaceInvites.workspaceId, user.workspaceId),
@@ -451,12 +451,12 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           isNull(workspaceInvites.usedAt),
         ),
       )
-      .run();
+      ;
 
     const now = new Date();
     const token = newToken();
     const expiresAt = new Date(now.getTime() + INVITE_TTL_MS);
-    db.insert(workspaceInvites)
+    await db.insert(workspaceInvites)
       .values({
         token,
         workspaceId: user.workspaceId,
@@ -467,13 +467,13 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         usedAt: null,
         createdAt: now,
       })
-      .run();
+      ;
 
-    const ws = db
+    const [ws] = await db
       .select({ name: workspaces.name })
       .from(workspaces)
       .where(eq(workspaces.id, user.workspaceId))
-      .get();
+      ;
 
     try {
       await getEmailClient().send(
@@ -502,14 +502,14 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     );
   });
 
-  app.delete("/me/invites/:token", (c) => {
+  app.delete("/me/invites/:token", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
     if (!canManageWorkspace(user.workspaceRole))
       return c.json({ error: "Только владелец или менеджер" }, 403);
 
     const token = c.req.param("token");
-    const result = db
+    const deleted = await db
       .delete(workspaceInvites)
       .where(
         and(
@@ -517,8 +517,8 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceInvites.workspaceId, user.workspaceId),
         ),
       )
-      .run();
-    if (result.changes === 0)
+      .returning({ token: workspaceInvites.token });
+    if (deleted.length === 0)
       return c.json({ error: "Приглашение не найдено" }, 404);
     return c.json({ ok: true });
   });
@@ -549,7 +549,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       return c.json({ error: "Роль должна быть owner, manager или member" }, 400);
     const nextRole = r.role as WorkspaceRole;
 
-    const target = db
+    const [target] = await db
       .select()
       .from(workspaceMembers)
       .where(
@@ -558,7 +558,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .get();
+      ;
     if (!target) return c.json({ error: "Участник не найден" }, 404);
 
     if (
@@ -571,7 +571,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         400,
       );
 
-    db.update(workspaceMembers)
+    await db.update(workspaceMembers)
       .set({ role: nextRole })
       .where(
         and(
@@ -579,7 +579,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .run();
+      ;
     return c.json({ ok: true, userId: targetId, role: nextRole });
   });
 
@@ -600,7 +600,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       return c.json({ error: "invalid id" }, 400);
 
     // Confirm target is in this workspace.
-    const target = db
+    const [target] = await db
       .select({ userId: workspaceMembers.userId })
       .from(workspaceMembers)
       .where(
@@ -609,7 +609,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .get();
+      ;
     if (!target) return c.json({ error: "Участник не найден" }, 404);
 
     let body: unknown;
@@ -622,13 +622,13 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (typeof parsed === "string") return c.json({ error: parsed }, 400);
 
     if (Object.keys(parsed).length > 0) {
-      db.update(users)
+      await db.update(users)
         .set({ ...parsed, updatedAt: new Date() })
         .where(eq(users.id, targetId))
-        .run();
+        ;
     }
 
-    const updated = db
+    const [updated] = await db
       .select({
         userId: users.id,
         email: users.email,
@@ -638,11 +638,11 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       })
       .from(users)
       .where(eq(users.id, targetId))
-      .get();
+      ;
     return c.json(updated);
   });
 
-  app.delete("/me/members/:userId", (c) => {
+  app.delete("/me/members/:userId", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
     if (!canManageWorkspace(user.workspaceRole))
@@ -652,7 +652,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (!Number.isInteger(targetId) || targetId <= 0)
       return c.json({ error: "invalid id" }, 400);
 
-    const target = db
+    const [target] = await db
       .select()
       .from(workspaceMembers)
       .where(
@@ -661,7 +661,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .get();
+      ;
     if (!target) return c.json({ error: "Участник не найден" }, 404);
 
     if (targetId === user.id)
@@ -685,20 +685,20 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (target.role === "owner" && user.workspaceRole !== "owner")
       return c.json({ error: "Только владелец может удалить владельца" }, 403);
 
-    db.delete(workspaceMembers)
+    await db.delete(workspaceMembers)
       .where(
         and(
           eq(workspaceMembers.workspaceId, user.workspaceId),
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .run();
+      ;
 
     // Reset their active_shop_id pointer if it referenced a shop in this ws.
-    db.update(userSettings)
+    await db.update(userSettings)
       .set({ activeShopId: null, updatedAt: new Date() })
       .where(eq(userSettings.userId, targetId))
-      .run();
+      ;
 
     return c.json({ ok: true });
   });
@@ -732,7 +732,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
       return c.json({ error: "blocked должен быть boolean" }, 400);
 
     // Target must be a member of the same workspace.
-    const member = db
+    const [member] = await db
       .select()
       .from(workspaceMembers)
       .where(
@@ -741,7 +741,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .get();
+      ;
     if (!member) return c.json({ error: "Участник не найден" }, 404);
 
     // Don't lock out the last remaining owner — workspace would become
@@ -756,7 +756,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         400,
       );
 
-    const target = db.select().from(users).where(eq(users.id, targetId)).get();
+    const [target] = await db.select().from(users).where(eq(users.id, targetId));
     if (!target) return c.json({ error: "Пользователь не найден" }, 404);
     // Sysadmin accounts shouldn't be in workspace_members in the first place
     // but stay defensive: don't let a workspace owner lock out a sysadmin.
@@ -766,12 +766,12 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         403,
       );
 
-    db.update(users)
+    await db.update(users)
       .set({ isBlocked: r.blocked, updatedAt: new Date() })
       .where(eq(users.id, targetId))
-      .run();
+      ;
     if (r.blocked) {
-      db.delete(sessions).where(eq(sessions.userId, targetId)).run();
+      await db.delete(sessions).where(eq(sessions.userId, targetId));
     }
     return c.json({ ok: true, userId: targetId, blocked: r.blocked });
   });
@@ -779,7 +779,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
   // Permanently delete the user account (owner only). Cascades remove their
   // workspace_members row, sessions, products, finance, imports — everything.
   // Reserve for actual departures; for temporary lock-out use `/blocked`.
-  app.delete("/me/members/:userId/account", (c) => {
+  app.delete("/me/members/:userId/account", async (c) => {
     const user = c.get("user");
     if (!user.workspaceId) return c.json({ error: "У вас нет команды" }, 404);
     if (user.workspaceRole !== "owner")
@@ -794,7 +794,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     if (targetId === user.id)
       return c.json({ error: "Нельзя удалить самого себя" }, 400);
 
-    const member = db
+    const [member] = await db
       .select()
       .from(workspaceMembers)
       .where(
@@ -803,7 +803,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(workspaceMembers.userId, targetId),
         ),
       )
-      .get();
+      ;
     if (!member) return c.json({ error: "Участник не найден" }, 404);
 
     if (member.role === "owner" && ownerCount(db, user.workspaceId) <= 1)
@@ -812,7 +812,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
         400,
       );
 
-    const target = db.select().from(users).where(eq(users.id, targetId)).get();
+    const [target] = await db.select().from(users).where(eq(users.id, targetId));
     if (!target) return c.json({ error: "Пользователь не найден" }, 404);
     if (target.isSysadmin)
       return c.json(
@@ -825,7 +825,7 @@ export function workspaceRoutes(db: DB): Hono<Env> {
     // manageable by workspace owner via the canManageShop fallback). Explicit
     // re-assignment is cleaner: the owner sees them as "Создан вами" instead
     // of "Создатель удалён".
-    db.update(shops)
+    await db.update(shops)
       .set({ createdBy: user.id, updatedAt: new Date() })
       .where(
         and(
@@ -833,9 +833,9 @@ export function workspaceRoutes(db: DB): Hono<Env> {
           eq(shops.createdBy, targetId),
         ),
       )
-      .run();
+      ;
 
-    db.delete(users).where(eq(users.id, targetId)).run();
+    await db.delete(users).where(eq(users.id, targetId));
     return c.json({ ok: true });
   });
 
@@ -850,9 +850,9 @@ export function workspaceRoutes(db: DB): Hono<Env> {
 export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }> {
   const app = new Hono<{ Variables: { user?: SessionUser } }>();
 
-  app.get("/:token", (c) => {
+  app.get("/:token", async (c) => {
     const token = c.req.param("token");
-    const inv = db
+    const [inv] = await db
       .select({
         token: workspaceInvites.token,
         email: workspaceInvites.email,
@@ -867,7 +867,7 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
       .innerJoin(workspaces, eq(workspaces.id, workspaceInvites.workspaceId))
       .innerJoin(users, eq(users.id, workspaceInvites.invitedBy))
       .where(eq(workspaceInvites.token, token))
-      .get();
+      ;
     if (!inv) return c.json({ error: "Приглашение не найдено" }, 404);
     if (inv.usedAt)
       return c.json({ error: "Приглашение уже использовано" }, 410);
@@ -882,15 +882,15 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
     });
   });
 
-  app.post("/:token/accept", requireAuth, (c) => {
+  app.post("/:token/accept", requireAuth, async (c) => {
     const user = c.get("user")!;
     const token = c.req.param("token");
 
-    const inv = db
+    const [inv] = await db
       .select()
       .from(workspaceInvites)
       .where(eq(workspaceInvites.token, token))
-      .get();
+      ;
     if (!inv) return c.json({ error: "Приглашение не найдено" }, 404);
     if (inv.usedAt)
       return c.json({ error: "Приглашение уже использовано" }, 410);
@@ -898,18 +898,18 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
       return c.json({ error: "Приглашение просрочено" }, 410);
 
     // Already in a workspace?
-    const existing = db
+    const [existing] = await db
       .select({ workspaceId: workspaceMembers.workspaceId })
       .from(workspaceMembers)
       .where(eq(workspaceMembers.userId, user.id))
-      .get();
+      ;
     if (existing) {
       if (existing.workspaceId === inv.workspaceId) {
         // Idempotent: same workspace → just consume the invite.
-        db.update(workspaceInvites)
+        await db.update(workspaceInvites)
           .set({ usedAt: new Date() })
           .where(eq(workspaceInvites.token, token))
-          .run();
+          ;
         return c.json({ ok: true, workspaceId: inv.workspaceId });
       }
       return c.json(
@@ -923,7 +923,7 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
 
     const now = new Date();
     db.transaction((tx) => {
-      tx.insert(workspaceMembers)
+      await tx.insert(workspaceMembers)
         .values({
           workspaceId: inv.workspaceId,
           userId: user.id,
@@ -931,36 +931,36 @@ export function inviteRoutes(db: DB): Hono<{ Variables: { user?: SessionUser } }
           status: "active",
           createdAt: now,
         })
-        .run();
-      tx.update(workspaceInvites)
+        ;
+      await tx.update(workspaceInvites)
         .set({ usedAt: now })
         .where(eq(workspaceInvites.token, token))
-        .run();
+        ;
 
       // Set active shop to first one of the workspace, if any.
-      const firstShop = tx
+      const [firstShop] = await tx
         .select({ id: shops.id })
         .from(shops)
         .where(eq(shops.workspaceId, inv.workspaceId))
-        .get();
-      const settings = tx
+        ;
+      const [settings] = await tx
         .select({ id: userSettings.id })
         .from(userSettings)
         .where(eq(userSettings.userId, user.id))
-        .get();
+        ;
       if (settings) {
-        tx.update(userSettings)
+        await tx.update(userSettings)
           .set({ activeShopId: firstShop?.id ?? null, updatedAt: now })
           .where(eq(userSettings.userId, user.id))
-          .run();
+          ;
       } else {
-        tx.insert(userSettings)
+        await tx.insert(userSettings)
           .values({
             userId: user.id,
             activeShopId: firstShop?.id ?? null,
             updatedAt: now,
           })
-          .run();
+          ;
       }
     });
 
