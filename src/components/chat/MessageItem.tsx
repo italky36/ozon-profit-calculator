@@ -211,6 +211,10 @@ interface Props {
   /** Touch-device mode: hide hover icons, enable long-press → bottom-sheet
    *  and swipe-left → open thread. Desktop pass false. */
   isTouch?: boolean;
+  /** True when the active conversation is a 1-on-1 DM. In DMs the reader
+   *  avatar strip is redundant (the only other participant is implied), so
+   *  ReadByIndicator is suppressed while ReadStatusTicks remain. */
+  isDm?: boolean;
   /** Open / find-or-create a DM with the given workspace member. Wired
    *  through ChatPage → ChatLayout → MessageStream. When omitted, the
    *  «Написать в личку» button hides from the avatar / mention popover. */
@@ -233,6 +237,7 @@ export default function MessageItem({
   members,
   otherMembersCount = 0,
   isTouch = false,
+  isDm = false,
   onOpenDm,
   onlineUsers,
 }: Props) {
@@ -682,10 +687,12 @@ export default function MessageItem({
                     members={members}
                     authorUserId={message.author.userId}
                   />
-                  <ReadByIndicator
-                    readerUserIds={message.readerUserIds}
-                    members={members}
-                  />
+                  {!isDm && (
+                    <ReadByIndicator
+                      readerUserIds={message.readerUserIds}
+                      members={members}
+                    />
+                  )}
                 </>
               ) : null;
               return (

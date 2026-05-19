@@ -14,6 +14,9 @@ interface MessageStreamProps {
   members: WorkspaceMember[];
   /** Touch-device mode — forwarded to MessageItem (long-press / swipe). */
   isTouch?: boolean;
+  /** True when the active channel is a DM. Forwarded so MessageItem can
+   *  suppress the «who read» avatar strip (redundant in 1-on-1 chats). */
+  isDm?: boolean;
   onLoadOlder: () => void;
   onDelete: (id: number) => void;
   onEdit: (id: number, body: string) => Promise<void>;
@@ -55,6 +58,7 @@ export default function MessageStream({
   onlineUsers,
   members,
   isTouch = false,
+  isDm = false,
   onLoadOlder,
   onDelete,
   onEdit,
@@ -234,6 +238,7 @@ export default function MessageStream({
           members={members}
           otherMembersCount={otherMembersCount}
           isTouch={isTouch}
+          isDm={isDm}
           onOpenDm={onOpenDm}
           onlineUsers={onlineUsers}
         />

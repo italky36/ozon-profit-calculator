@@ -3,7 +3,7 @@
  * Keeping them in one file so the three layout files (Desktop/Tablet/
  * Mobile) stay focused on arrangement, not on what's inside each region. */
 import type { ReactNode } from "react";
-import { Menu, Phone, Search, Video, X } from "lucide-react";
+import { Hash, Phone, Search, Video, X } from "lucide-react";
 import MessageStream from "../MessageStream";
 import Composer from "../Composer";
 import TypingIndicator from "../TypingIndicator";
@@ -167,6 +167,7 @@ export function FeedRegion({ v }: { v: ChatViewProps }) {
       onlineUsers={v.onlineUsers}
       members={v.members}
       isTouch={v.isTouch}
+      isDm={v.activeChannel?.type === "dm"}
       onLoadOlder={v.onLoadOlder}
       onDelete={v.onDelete}
       onEdit={v.onEdit}
@@ -267,7 +268,9 @@ export function InlineThreadPanel({ v }: { v: ChatViewProps }) {
   );
 }
 
-/** Hamburger button — used in MobileLayout to open the channels drawer. */
+/** Channels button — used in MobileLayout to open the channels drawer.
+ *  Uses Hash (not Menu) so it doesn't visually collide with the app-level
+ *  TabBar hamburger that sits right above the chat card. */
 export function HamburgerButton({ onClick }: { onClick: () => void }) {
   return (
     <button
@@ -278,7 +281,7 @@ export function HamburgerButton({ onClick }: { onClick: () => void }) {
       title="Каналы"
       style={{ flex: "0 0 auto" }}
     >
-      <Menu size={18} />
+      <Hash size={18} />
     </button>
   );
 }
