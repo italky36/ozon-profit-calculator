@@ -57,14 +57,18 @@ export interface AudioPlayerProps {
 export function AudioPlayer({ url, blob }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
+  /** Native <audio>.duration — may be Infinity for some webm/opus blobs
+   *  in Chrome. We fall back to `decodedDuration` below when that happens. */
   const [duration, setDuration] = useState<number>(0);
+  /** Authoritative duration from the AudioBuffer (decodeAudioData). Always
+   *  finite. Used both for the play-progress ratio and for seek arithmetic. */
+  const [decodedDuration, setDecodedDuration] = useState<number>(0);
   const [position, setPosition] = useState<number>(0);
   const [peaks, setPeaks] = useState<number[] | null>(null);
 
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-    const onTime = () => setPosition(a.currentTime);
     const onLoaded = () => {
       if (Number.isFinite(a.duration)) setDuration(a.duration);
     };
@@ -74,14 +78,12 @@ export function AudioPlayer({ url, blob }: AudioPlayerProps) {
     };
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onLoaded);
     a.addEventListener("durationchange", onLoaded);
     a.addEventListener("ended", onEnd);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
     return () => {
-      a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("loadedmetadata", onLoaded);
       a.removeEventListener("durationchange", onLoaded);
       a.removeEventListener("ended", onEnd);
@@ -90,21 +92,46 @@ export function AudioPlayer({ url, blob }: AudioPlayerProps) {
     };
   }, []);
 
-  // Decode peaks once per source. For previews we have the blob in memory;
-  // for feed attachments we fetch via URL. Either way the result is the
-  // same downsampled amplitude array.
+  // requestAnimationFrame loop while playing — gives ~60 Hz position
+  // updates so the played-portion of the waveform highlights smoothly
+  // (the <audio> element's `timeupdate` event only fires ~4 Hz, which
+  // shows as obvious staircase on a 48-bar waveform).
+  useEffect(() => {
+    if (!playing) return;
+    const a = audioRef.current;
+    if (!a) return;
+    let raf = 0;
+    const tick = () => {
+      setPosition(a.currentTime);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+
+  // Decode peaks once per source. The decoded AudioBuffer is also the only
+  // reliable source of duration for opus/webm blobs in Chrome — keep its
+  // .duration alongside the peaks array.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const result = blob
         ? await extractPeaksFromBlob(blob, WAVEFORM_BUCKETS)
         : await extractPeaksFromUrl(url, WAVEFORM_BUCKETS);
-      if (!cancelled && result) setPeaks(result);
+      if (cancelled || !result) return;
+      setPeaks(result.peaks);
+      if (Number.isFinite(result.durationSecs) && result.durationSecs > 0) {
+        setDecodedDuration(result.durationSecs);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [url, blob]);
+
+  /** Effective duration = native if finite, otherwise the decoded one. */
+  const effectiveDuration =
+    Number.isFinite(duration) && duration > 0 ? duration : decodedDuration;
 
   const toggle = () => {
     const a = audioRef.current;
@@ -118,9 +145,9 @@ export function AudioPlayer({ url, blob }: AudioPlayerProps) {
 
   const seekByRatio = (ratio: number) => {
     const a = audioRef.current;
-    if (!a || !duration || !Number.isFinite(duration)) return;
+    if (!a || effectiveDuration <= 0) return;
     const clamped = Math.max(0, Math.min(1, ratio));
-    a.currentTime = clamped * duration;
+    a.currentTime = clamped * effectiveDuration;
     setPosition(a.currentTime);
   };
 
@@ -129,8 +156,10 @@ export function AudioPlayer({ url, blob }: AudioPlayerProps) {
     seekByRatio((e.clientX - rect.left) / rect.width);
   };
 
-  const playedRatio = duration > 0 ? Math.min(1, position / duration) : 0;
-  const remaining = duration > 0 ? Math.max(0, duration - position) : 0;
+  const playedRatio =
+    effectiveDuration > 0 ? Math.min(1, position / effectiveDuration) : 0;
+  const remaining =
+    effectiveDuration > 0 ? Math.max(0, effectiveDuration - position) : 0;
 
   // Bars to render: either real peaks (when decoded) or flat placeholders.
   const bars = peaks ?? new Array(WAVEFORM_BUCKETS).fill(0.15);
@@ -218,8 +247,8 @@ export function AudioPlayer({ url, blob }: AudioPlayerProps) {
       >
         {playing || position > 0
           ? formatDuration(position)
-          : formatDuration(duration || 0)}
-        {playing && duration > 0 && ` / ${formatDuration(remaining)}`}
+          : formatDuration(effectiveDuration)}
+        {playing && effectiveDuration > 0 && ` / ${formatDuration(remaining)}`}
       </span>
       <audio ref={audioRef} src={url} preload="metadata" />
     </div>

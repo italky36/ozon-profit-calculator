@@ -85,17 +85,28 @@ async function decodeArrayBuffer(buf: ArrayBuffer): Promise<AudioBuffer | null> 
   });
 }
 
+export interface PeaksResult {
+  peaks: number[];
+  /** Decoded duration in seconds — always finite. Useful as a fallback when
+   *  `HTMLMediaElement.duration` reports Infinity (common for webm/opus
+   *  blobs in Chrome until you've played all the way through). */
+  durationSecs: number;
+}
+
 export async function extractPeaksFromUrl(
   url: string,
   buckets: number,
-): Promise<number[] | null> {
+): Promise<PeaksResult | null> {
   try {
     const res = await fetch(url, { credentials: "include" });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     const audio = await decodeArrayBuffer(buf);
     if (!audio) return null;
-    return bucketize(audio.getChannelData(0), buckets);
+    return {
+      peaks: bucketize(audio.getChannelData(0), buckets),
+      durationSecs: audio.duration,
+    };
   } catch {
     return null;
   }
@@ -104,12 +115,15 @@ export async function extractPeaksFromUrl(
 export async function extractPeaksFromBlob(
   blob: Blob,
   buckets: number,
-): Promise<number[] | null> {
+): Promise<PeaksResult | null> {
   try {
     const buf = await blob.arrayBuffer();
     const audio = await decodeArrayBuffer(buf);
     if (!audio) return null;
-    return bucketize(audio.getChannelData(0), buckets);
+    return {
+      peaks: bucketize(audio.getChannelData(0), buckets),
+      durationSecs: audio.duration,
+    };
   } catch {
     return null;
   }
