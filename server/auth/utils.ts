@@ -37,18 +37,19 @@ export interface SessionInfo {
   expiresAt: Date;
 }
 
-export function createSession(db: DB, userId: number): SessionInfo {
+export async function createSession(
+  db: DB,
+  userId: number,
+): Promise<SessionInfo> {
   const sessionId = generateToken();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
-  db.insert(sessions)
-    .values({
-      id: sessionId,
-      userId,
-      expiresAt,
-      createdAt: now,
-    })
-    .run();
+  await db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt,
+    createdAt: now,
+  });
   return { sessionId, expiresAt };
 }
 
@@ -71,8 +72,11 @@ export interface SessionUser {
 
 /** Validates a session token. Returns the associated user, or null if the
  * session is missing/expired. Expired sessions are deleted lazily. */
-export function validateSession(db: DB, sessionId: string): SessionUser | null {
-  const row = db
+export async function validateSession(
+  db: DB,
+  sessionId: string,
+): Promise<SessionUser | null> {
+  const [row] = await db
     .select({
       sessionId: sessions.id,
       expiresAt: sessions.expiresAt,
@@ -87,12 +91,11 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
     })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
-    .where(eq(sessions.id, sessionId))
-    .get();
+    .where(eq(sessions.id, sessionId));
 
   if (!row) return null;
   if (row.expiresAt.getTime() < Date.now()) {
-    db.delete(sessions).where(eq(sessions.id, sessionId)).run();
+    await db.delete(sessions).where(eq(sessions.id, sessionId));
     return null;
   }
   if (row.isBlocked) {
@@ -101,24 +104,22 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
     return null;
   }
 
-  const member = db
+  const [member] = await db
     .select({
       workspaceId: workspaceMembers.workspaceId,
       role: workspaceMembers.role,
     })
     .from(workspaceMembers)
-    .where(eq(workspaceMembers.userId, row.userId))
-    .get();
+    .where(eq(workspaceMembers.userId, row.userId));
 
   // Suspended workspace: lock out everyone except sysadmins (who don't belong
   // to a workspace anyway). Mirrors the isBlocked branch above — same intent,
   // different scope.
   if (!row.isSysadmin && member) {
-    const ws = db
+    const [ws] = await db
       .select({ suspendedAt: workspaces.suspendedAt })
       .from(workspaces)
-      .where(eq(workspaces.id, member.workspaceId))
-      .get();
+      .where(eq(workspaces.id, member.workspaceId));
     if (ws?.suspendedAt) return null;
   }
 
@@ -135,8 +136,11 @@ export function validateSession(db: DB, sessionId: string): SessionUser | null {
   };
 }
 
-export function deleteSession(db: DB, sessionId: string): void {
-  db.delete(sessions).where(eq(sessions.id, sessionId)).run();
+export async function deleteSession(
+  db: DB,
+  sessionId: string,
+): Promise<void> {
+  await db.delete(sessions).where(eq(sessions.id, sessionId));
 }
 
 export interface VerificationTokenInfo {
@@ -144,33 +148,32 @@ export interface VerificationTokenInfo {
   expiresAt: Date;
 }
 
-export function createVerificationToken(
+export async function createVerificationToken(
   db: DB,
   userId: number,
-): VerificationTokenInfo {
+): Promise<VerificationTokenInfo> {
   const token = generateToken();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + VERIFICATION_TTL_MS);
-  db.insert(emailVerificationTokens)
-    .values({ token, userId, expiresAt, createdAt: now })
-    .run();
+  await db
+    .insert(emailVerificationTokens)
+    .values({ token, userId, expiresAt, createdAt: now });
   return { token, expiresAt };
 }
 
 /** Consumes a verification token: validates expiry, deletes it, returns userId. */
-export function consumeVerificationToken(
+export async function consumeVerificationToken(
   db: DB,
   token: string,
-): { userId: number } | null {
-  const row = db
+): Promise<{ userId: number } | null> {
+  const [row] = await db
     .select()
     .from(emailVerificationTokens)
-    .where(eq(emailVerificationTokens.token, token))
-    .get();
+    .where(eq(emailVerificationTokens.token, token));
   if (!row) return null;
-  db.delete(emailVerificationTokens)
-    .where(eq(emailVerificationTokens.token, token))
-    .run();
+  await db
+    .delete(emailVerificationTokens)
+    .where(eq(emailVerificationTokens.token, token));
   if (row.expiresAt.getTime() < Date.now()) return null;
   return { userId: row.userId };
 }
@@ -183,25 +186,25 @@ export interface PasswordResetTokenInfo {
 /** Issues a single-use password-reset token. Any previous unused tokens for
  * the same user are invalidated (marked used) so the latest «forgot password»
  * always supersedes earlier attempts. */
-export function createPasswordResetToken(
+export async function createPasswordResetToken(
   db: DB,
   userId: number,
-): PasswordResetTokenInfo {
+): Promise<PasswordResetTokenInfo> {
   const token = generateToken();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + PASSWORD_RESET_TTL_MS);
-  db.update(passwordResetTokens)
+  await db
+    .update(passwordResetTokens)
     .set({ usedAt: now })
     .where(
       and(
         eq(passwordResetTokens.userId, userId),
         isNull(passwordResetTokens.usedAt),
       ),
-    )
-    .run();
-  db.insert(passwordResetTokens)
-    .values({ token, userId, expiresAt, createdAt: now })
-    .run();
+    );
+  await db
+    .insert(passwordResetTokens)
+    .values({ token, userId, expiresAt, createdAt: now });
   return { token, expiresAt };
 }
 
@@ -211,15 +214,14 @@ export type PasswordResetTokenStatus =
 
 /** Validates a reset token without consuming it. Use for the GET probe before
  * showing the «new password» form. */
-export function checkPasswordResetToken(
+export async function checkPasswordResetToken(
   db: DB,
   token: string,
-): PasswordResetTokenStatus {
-  const row = db
+): Promise<PasswordResetTokenStatus> {
+  const [row] = await db
     .select()
     .from(passwordResetTokens)
-    .where(eq(passwordResetTokens.token, token))
-    .get();
+    .where(eq(passwordResetTokens.token, token));
   if (!row) return { ok: false, reason: "not_found" };
   if (row.usedAt) return { ok: false, reason: "used" };
   if (row.expiresAt.getTime() < Date.now())
@@ -228,9 +230,12 @@ export function checkPasswordResetToken(
 }
 
 /** Marks a reset token as used. Idempotent: re-marking a used token is a no-op. */
-export function consumePasswordResetToken(db: DB, token: string): void {
-  db.update(passwordResetTokens)
+export async function consumePasswordResetToken(
+  db: DB,
+  token: string,
+): Promise<void> {
+  await db
+    .update(passwordResetTokens)
     .set({ usedAt: new Date() })
-    .where(eq(passwordResetTokens.token, token))
-    .run();
+    .where(eq(passwordResetTokens.token, token));
 }

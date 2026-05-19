@@ -31,13 +31,12 @@ export interface PushPayload {
 let cached: VapidConfig | null | undefined; // undefined = not yet checked
 let cachedDb: DB | null = null;
 
-function readVapidFromDb(db: DB): VapidConfig | null {
+async function readVapidFromDb(db: DB): Promise<VapidConfig | null> {
   try {
-    const row = db
+    const [row] = await db
       .select()
       .from(vapidSettings)
-      .where(eq(vapidSettings.id, 1))
-      .get();
+      .where(eq(vapidSettings.id, 1));
     if (!row) return null;
     if (!row.publicKey || !row.privateKey || !row.subject) return null;
     return {
@@ -66,9 +65,10 @@ export function setWebPushDb(db: DB): void {
 
 /** Returns the active VAPID config (DB row → env → null). Cached;
  * `invalidateVapid()` clears the cache after a sysadmin edit. */
-export function getVapidConfig(): VapidConfig | null {
+export async function getVapidConfig(): Promise<VapidConfig | null> {
   if (cached !== undefined) return cached;
-  cached = (cachedDb ? readVapidFromDb(cachedDb) : null) ?? readVapidFromEnv();
+  cached =
+    (cachedDb ? await readVapidFromDb(cachedDb) : null) ?? readVapidFromEnv();
   return cached;
 }
 
@@ -77,14 +77,14 @@ export function invalidateVapid(): void {
 }
 
 /** Just the public key — UI requests this to register a PushSubscription. */
-export function getVapidPublicKey(): string | null {
-  return getVapidConfig()?.publicKey ?? null;
+export async function getVapidPublicKey(): Promise<string | null> {
+  return (await getVapidConfig())?.publicKey ?? null;
 }
 
 /** True when push delivery is configured (VAPID present + at least one
  * subscription possible). Used by health checks and UI gating. */
-export function isPushConfigured(): boolean {
-  return getVapidConfig() != null;
+export async function isPushConfigured(): Promise<boolean> {
+  return (await getVapidConfig()) != null;
 }
 
 export interface SendPushOptions {
@@ -108,7 +108,7 @@ export async function sendPush(
   payload: PushPayload,
   opts: SendPushOptions = {},
 ): Promise<boolean> {
-  const cfg = getVapidConfig();
+  const cfg = await getVapidConfig();
   if (!cfg) return false;
   const cleanup = opts.cleanupOnExpired ?? true;
   webPush.setVapidDetails(cfg.subject, cfg.publicKey, cfg.privateKey);
@@ -153,7 +153,7 @@ export async function sendPushToUsers(
   userIds: ReadonlyArray<number>,
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number }> {
-  if (userIds.length === 0 || !isPushConfigured()) {
+  if (userIds.length === 0 || !(await isPushConfigured())) {
     return { sent: 0, failed: 0 };
   }
   const rows = await db

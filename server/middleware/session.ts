@@ -59,23 +59,23 @@ export function sessionMiddleware(db: DB): MiddlewareHandler {
     const workspaceSid = getCookie(c, SESSION_COOKIE_NAME);
     const sysadminSid = getCookie(c, SYSADMIN_COOKIE_NAME);
 
-    const tryWorkspace = (): SessionUser | null => {
+    const tryWorkspace = async (): Promise<SessionUser | null> => {
       if (!workspaceSid) return null;
-      const u = validateSession(db, workspaceSid);
+      const u = await validateSession(db, workspaceSid);
       return u && !u.isSysadmin ? u : null;
     };
-    const trySysadmin = (): SessionUser | null => {
+    const trySysadmin = async (): Promise<SessionUser | null> => {
       if (!sysadminSid) return null;
-      const u = validateSession(db, sysadminSid);
+      const u = await validateSession(db, sysadminSid);
       return u && u.isSysadmin ? u : null;
     };
 
     const user: SessionUser | null =
       scope === "sysadmin"
-        ? trySysadmin()
+        ? await trySysadmin()
         : scope === "workspace"
-          ? tryWorkspace()
-          : (tryWorkspace() ?? trySysadmin());
+          ? await tryWorkspace()
+          : ((await tryWorkspace()) ?? (await trySysadmin()));
 
     if (user) c.set("user", user);
     await next();
@@ -138,14 +138,13 @@ export async function canManageShop(
     return shopBelongsToWorkspace(db, user.workspaceId, shopId);
   }
   if (user.workspaceRole !== "manager") return false;
-  const row = await db
+  const [row] = await db
     .select({
       workspaceId: shops.workspaceId,
       createdBy: shops.createdBy,
     })
     .from(shops)
-    .where(eq(shops.id, shopId))
-    .get();
+    .where(eq(shops.id, shopId));
   if (!row) return false;
   if (row.workspaceId !== user.workspaceId) return false;
   return row.createdBy === user.id;

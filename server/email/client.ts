@@ -52,13 +52,12 @@ function resolveTlsOptions(mode: SmtpSecureMode, port: number): {
   }
 }
 
-function readSmtpFromDb(db: DB): SmtpConfig | null {
+async function readSmtpFromDb(db: DB): Promise<SmtpConfig | null> {
   try {
-    const row = db
+    const [row] = await db
       .select()
       .from(smtpSettings)
-      .where(eq(smtpSettings.id, 1))
-      .get();
+      .where(eq(smtpSettings.id, 1));
     if (!row) return null;
     if (!row.host || !row.user || !row.pass || !row.fromAddr) return null;
     return {
@@ -137,10 +136,9 @@ export function setEmailClientDb(db: DB): void {
 }
 
 /** Lazy singleton. Priority: DB row → env vars → stdout fallback. */
-export function getEmailClient(): EmailClient {
+export async function getEmailClient(): Promise<EmailClient> {
   if (cached) return cached;
-  const cfg =
-    (dbRef ? readSmtpFromDb(dbRef) : null) ?? readSmtpFromEnv();
+  const cfg = (dbRef ? await readSmtpFromDb(dbRef) : null) ?? readSmtpFromEnv();
   cached = cfg ? new SmtpClient(cfg) : new ConsoleClient();
   return cached;
 }
@@ -156,8 +154,8 @@ export function setEmailClient(client: EmailClient | null): void {
 }
 
 /** Describe current effective source for admin UI / diagnostics. */
-export function describeEmailSource(): "db" | "env" | "console" {
-  if (dbRef && readSmtpFromDb(dbRef)) return "db";
+export async function describeEmailSource(): Promise<"db" | "env" | "console"> {
+  if (dbRef && (await readSmtpFromDb(dbRef))) return "db";
   if (readSmtpFromEnv()) return "env";
   return "console";
 }

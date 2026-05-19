@@ -55,11 +55,10 @@ export async function pushMissedCall(
     (u) => u !== summary.initiatorUserId,
   );
   if (targets.length === 0) return;
-  const initiator = db
+  const [initiator] = await db
     .select({ fullName: users.fullName, email: users.email })
     .from(users)
-    .where(eq(users.id, summary.initiatorUserId))
-    .get();
+    .where(eq(users.id, summary.initiatorUserId));
   const initiatorName =
     initiator?.fullName || initiator?.email.split("@")[0] || "—";
   const kind = summary.callType === "video" ? "видеозвонок" : "аудиозвонок";

@@ -20,7 +20,7 @@ import { exportRoutes } from "./routes/export";
 import { inviteRoutes, workspaceRoutes } from "./routes/workspace";
 import { chatRoutes } from "./routes/chat";
 import { pushRoutes } from "./routes/push";
-import { getDb } from "./db/client";
+import { getDb, initDb } from "./db/client";
 import { setEmailClientDb } from "./email/client";
 import { setWebPushDb } from "./lib/webPush";
 
@@ -77,6 +77,7 @@ export function buildAppWithWs(opts: BuildAppOptions = {}): BuiltApp {
 const entry = process.argv[1];
 const isMain = entry ? import.meta.url === pathToFileURL(entry).href : false;
 if (isMain || process.env.START_SERVER === "1") {
+  await initDb();
   const { app, injectWebSocket } = buildAppWithWs();
   const port = Number(process.env.PORT ?? 3001);
   // Default to 127.0.0.1 (loopback) because the API sits behind the Vite

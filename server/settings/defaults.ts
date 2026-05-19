@@ -25,12 +25,11 @@ const readFromFile = (): TaxSettings | null => {
 /** Read default TaxSettings from ref_settings (filled by extract-data.mjs);
  * fall back to the checked-in JSON; finally — minimal hard-coded defaults
  * (used in test envs that skip extract-data). */
-export function readDefaultTaxSettings(db: DB): TaxSettings {
-  const row = db
+export async function readDefaultTaxSettings(db: DB): Promise<TaxSettings> {
+  const [row] = await db
     .select()
     .from(refSettings)
-    .where(eq(refSettings.key, "defaultTaxSettings"))
-    .get();
+    .where(eq(refSettings.key, "defaultTaxSettings"));
   if (row && row.value && typeof row.value === "object") {
     return row.value as TaxSettings;
   }
