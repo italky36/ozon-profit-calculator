@@ -723,6 +723,41 @@ export const api = {
       ),
     deleteWorkspace: (id: number) =>
       apiFetch<{ ok: true }>(`/admin/workspaces/${id}`, { method: "DELETE" }),
+    getDbMetrics: () =>
+      apiFetch<{
+        databaseSize: number;
+        databaseSizePretty: string;
+        topTables: { name: string; sizeBytes: number; sizePretty: string }[];
+        activeConnections: number;
+        maxConnections: number;
+      }>("/admin/metrics/db"),
+    getSystemMetrics: () =>
+      apiFetch<{
+        loadAvg: { "1m": number; "5m": number; "15m": number };
+        cpuCount: number;
+        memTotalBytes: number;
+        memFreeBytes: number;
+        memUsedBytes: number;
+        memUsedPercent: number;
+        diskTotalBytes: number;
+        diskFreeBytes: number;
+        diskUsedBytes: number;
+        diskUsedPercent: number;
+        diskPath: string;
+        systemUptimeSec: number;
+        processUptimeSec: number;
+      }>("/admin/metrics/system"),
+    getBackupsMetrics: () =>
+      apiFetch<{
+        files: { name: string; sizeBytes: number; mtime: string }[];
+        totalSizeBytes: number;
+        lastBackupAt: string | null;
+        lastBackupAgeHours: number | null;
+        backupDir: string;
+        configured: boolean;
+      }>("/admin/metrics/backups"),
+    backupDownloadUrl: (filename: string) =>
+      `/api/admin/backups/${encodeURIComponent(filename)}/download`,
   },
   refs: {
     get: (shopId?: number) => {

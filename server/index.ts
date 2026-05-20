@@ -23,6 +23,7 @@ import { pushRoutes } from "./routes/push";
 import { getDb, initDb } from "./db/client";
 import { setEmailClientDb } from "./email/client";
 import { setWebPushDb } from "./lib/webPush";
+import { runAlertChecks, ALERT_INTERVAL_MS } from "./lib/alerts";
 
 export interface BuildAppOptions {
   db?: ReturnType<typeof getDb>;
@@ -90,4 +91,14 @@ if (isMain || process.env.START_SERVER === "1") {
     console.log(`server: http://${hostname}:${info.port}`);
   });
   injectWebSocket(server);
+
+  // Email-алерты при превышении порогов (disk/RAM/stale-backup). Дедуп 1ч
+  // in-memory — после рестарта забывается. Отключается переменной DISABLE_ALERTS=1.
+  if (process.env.DISABLE_ALERTS !== "1") {
+    setInterval(() => {
+      void runAlertChecks().catch((e) =>
+        console.error("[alerts] check failed:", (e as Error).message),
+      );
+    }, ALERT_INTERVAL_MS);
+  }
 }

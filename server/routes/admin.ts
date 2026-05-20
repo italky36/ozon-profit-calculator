@@ -1,6 +1,14 @@
+import fs from "node:fs";
+import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { eq, inArray, sql } from "drizzle-orm";
 import type { DB } from "../db/client";
+import {
+  getDbMetrics,
+  getSystemMetrics,
+  getBackupsMetrics,
+  resolveBackupPath,
+} from "../lib/metrics";
 import {
   iceServers,
   sessions,
@@ -788,6 +796,28 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
     await db.delete(iceServers).where(eq(iceServers.id, id));
     return c.json({ ok: true });
+  });
+
+  // === Metrics & backups (sysadmin only — уже под requireSysadmin выше) ===
+
+  app.get("/metrics/db", async (c) => c.json(await getDbMetrics(db)));
+
+  app.get("/metrics/system", async (c) => c.json(await getSystemMetrics()));
+
+  app.get("/metrics/backups", async (c) => c.json(await getBackupsMetrics()));
+
+  app.get("/backups/:filename/download", async (c) => {
+    const filename = c.req.param("filename");
+    const resolved = await resolveBackupPath(filename);
+    if (!resolved) return c.json({ error: "not found" }, 404);
+    const stream = fs.createReadStream(resolved.fullPath);
+    return new Response(Readable.toWeb(stream) as ReadableStream, {
+      headers: {
+        "Content-Type": "application/gzip",
+        "Content-Length": String(resolved.sizeBytes),
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+    });
   });
 
   return app;

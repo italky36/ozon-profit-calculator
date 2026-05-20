@@ -20,6 +20,12 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    volumes:
+      - static_main:/srv/main
+      - static_sysadmin:/srv/sysadmin
+      # ro-mount host backup dir so /api/admin/metrics/backups + /api/admin/backups/:filename
+      # могут листать и стримить дампы. Сам скрипт backup-db.sh пишет с хоста.
+      - ${BACKUP_DIR:-/var/backups/profitcontrol}:/srv/backups:ro
     environment:
       DATABASE_URL: postgresql://${PG_USER:-app}:${PG_PASSWORD}@db:5432/${PG_DB:-ozon_calc}
       APP_URL: ${APP_URL:?APP_URL is required}
@@ -27,9 +33,7 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       START_SERVER: "1"
-    volumes:
-      - static_main:/srv/main
-      - static_sysadmin:/srv/sysadmin
+      BACKUP_DIR_IN_CONTAINER: /srv/backups
     networks: [internal]
     depends_on:
       db:
