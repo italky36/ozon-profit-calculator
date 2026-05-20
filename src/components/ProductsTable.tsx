@@ -18,6 +18,7 @@ import type {
   TaxSettings,
 } from "../types";
 import { exportShortExcel, exportFullExcel } from "../lib/exportExcel";
+import { calculateActualEconomics } from "../lib/calc/actualEconomics";
 import type { RealizedMarginRow } from "../api";
 import { fmtRub, fmtPct } from "../format";
 import EditableCell from "./EditableCell";
@@ -744,6 +745,7 @@ export default function ProductsTable({
                       checked={selectedIds.has(row.id)}
                       shop={shopsById?.get(row.shopId)}
                       actual={actuals?.get(row.input.articleId)}
+                      taxSettings={taxSettings}
                       searchQuery={searchQuery}
                       showChart={showChart}
                       showActuals={showActuals}
@@ -799,6 +801,7 @@ interface ProductRowProps {
   checked: boolean;
   shop: Shop | undefined;
   actual: RealizedMarginRow | undefined;
+  taxSettings: TaxSettings | undefined;
   searchQuery: string | undefined;
   showChart: boolean;
   showActuals: boolean;
@@ -818,6 +821,7 @@ const ProductRow = memo(function ProductRow({
   checked,
   shop,
   actual,
+  taxSettings,
   searchQuery,
   showChart,
   showActuals,
@@ -1048,9 +1052,37 @@ const ProductRow = memo(function ProductRow({
             {actual ? actual.salesCount : "—"}
           </td>
           <td className="num" style={{ color: "var(--muted-2)" }}>
-            {actual && actual.salesCount > 0
-              ? fmtRub(actual.actualRevenue / actual.salesCount)
-              : "—"}
+            {actual && actual.salesCount > 0 ? (
+              (() => {
+                const econ = taxSettings
+                  ? calculateActualEconomics(
+                      actual.actualRevenue,
+                      actual.actualMargin,
+                      actual.salesCount,
+                      row.input.costPrice,
+                      row.input.whitePurchase === true,
+                      taxSettings,
+                    )
+                  : null;
+                return (
+                  <>
+                    <div>
+                      {fmtRub(actual.actualRevenue / actual.salesCount)}
+                    </div>
+                    {econ && econ.profitability != null && (
+                      <div
+                        className="margin-roi"
+                        title="Рентабельность по факту: маржа после себестоимости и налогов на одну продажу, делённая на себестоимость"
+                      >
+                        {fmtPct(econ.profitability)}
+                      </div>
+                    )}
+                  </>
+                );
+              })()
+            ) : (
+              "—"
+            )}
           </td>
           <td className="num" style={{ color: "var(--muted-2)" }}>
             {actual ? fmtRub(actual.actualMargin) : "—"}
