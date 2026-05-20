@@ -1,0 +1,39 @@
+# Caddy config for app.profitcontrol.io + su.profitcontrol.io
+# TLS via automatic Let's Encrypt (Caddy handles ACME on first start).
+# Both sites: /api/* → Hono on app:3001 (incl. WebSocket), /* → static SPA.
+
+{
+	email admin@profitcontrol.io
+}
+
+app.profitcontrol.io {
+	encode zstd gzip
+
+	# API + WebSocket upgrade (chat, calls, push). Caddy handles `Upgrade`
+	# header automatically via reverse_proxy.
+	handle /api/* {
+		reverse_proxy app:3001
+	}
+
+	# Static SPA with client-side routing — try the requested file, then
+	# fall back to index.html so /chat, /shops, /finance etc. all render.
+	handle {
+		root * /srv/main
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+su.profitcontrol.io {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy app:3001
+	}
+
+	handle {
+		root * /srv/sysadmin
+		try_files {path} /index.html
+		file_server
+	}
+}

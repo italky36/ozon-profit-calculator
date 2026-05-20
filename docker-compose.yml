@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-app}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required}
+      POSTGRES_DB: ${PG_DB:-ozon_calc}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-app} -d ${PG_DB:-ozon_calc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${PG_USER:-app}:${PG_PASSWORD}@db:5432/${PG_DB:-ozon_calc}
+      APP_URL: ${APP_URL:?APP_URL is required}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-ozon_calc_session}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      START_SERVER: "1"
+    volumes:
+      - static_main:/srv/main
+      - static_sysadmin:/srv/sysadmin
+    networks: [internal]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - static_main:/srv/main:ro
+      - static_sysadmin:/srv/sysadmin:ro
+    networks: [internal]
+    depends_on:
+      - app
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+  static_main:
+  static_sysadmin:
+
+networks:
+  internal:
