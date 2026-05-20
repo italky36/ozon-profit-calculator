@@ -20,7 +20,13 @@ import {
   getFileStorage,
   safeFilename,
 } from "../storage/fileStorage";
-import { publish, subscribe, type ChatServerEvent } from "../chat/pubsub";
+import {
+  nextSessionId,
+  publish,
+  sessionIdsForUser,
+  subscribe,
+  type ChatServerEvent,
+} from "../chat/pubsub";
 import { bumpTyping, clearAllForUser, clearTyping } from "../chat/typing";
 import { attach, detach, isUserOnline, onlineUserIds } from "../chat/presence";
 import { loadMentionsForMessages, resolveMentions } from "../chat/mentions";
@@ -29,6 +35,7 @@ import { dispatchPushForMessage } from "../chat/notifications";
 import {
   acceptCall,
   activeCallsForUser,
+  activeSessionForUser,
   createCall,
   declineCall,
   endCall,
@@ -2688,6 +2695,10 @@ export function chatRoutes(
       upgradeWebSocket((c) => {
         const user = (c as { get: (k: string) => SessionUser }).get("user");
         const appUrl = resolveAppUrl(c);
+        // Уникальный id этого WS-сокета. Звонковый сигналинг адресует SDP/ICE
+        // конкретной сессии, чтобы два устройства одного юзера не отвечали
+        // на один offer параллельно (см. server/chat/calls.ts).
+        const sessionId = nextSessionId();
         let unsub: (() => void) | null = null;
         return {
           onOpen(_evt, ws) {
@@ -2701,6 +2712,7 @@ export function chatRoutes(
                 }
               },
               user.id,
+              sessionId,
             );
             const wasOffline = attach(user.workspaceId, user.id);
             // User just came online (0→1 ref-count transition) — cancel any
@@ -2804,6 +2816,7 @@ export function chatRoutes(
                   workspaceId: user.workspaceId,
                   channelId: channel.id,
                   initiatorUserId: user.id,
+                  initiatorSessionId: sessionId,
                   callType: callTypeIn as CallType,
                   inviteeUserIds: invitees,
                   onMissed: async (call) => {
@@ -2848,7 +2861,35 @@ export function chatRoutes(
                 const callId =
                   typeof parsed.callId === "number" ? parsed.callId : null;
                 if (callId == null) return;
-                await acceptCall(db, callId, user.id);
+                const beforeOwner = activeSessionForUser(callId, user.id);
+                await acceptCall(db, callId, user.id, sessionId);
+                const afterOwner = activeSessionForUser(callId, user.id);
+                // Если эта сессия только что забрала слот — снять баннер
+                // на остальных вкладках/устройствах того же юзера. Если
+                // звонок уже был забран другой сессией, всё равно шлём
+                // handled-elsewhere в эту сессию, чтобы её UI не остался
+                // на «дозвон».
+                if (beforeOwner == null && afterOwner === sessionId) {
+                  const others = sessionIdsForUser(
+                    user.workspaceId,
+                    user.id,
+                  ).filter((s) => s !== sessionId);
+                  if (others.length > 0) {
+                    const call = getActiveCall(callId);
+                    publish(
+                      user.workspaceId,
+                      {
+                        type: "call.handled-elsewhere",
+                        workspaceId: user.workspaceId,
+                        callId,
+                        channelId: call?.channelId ?? 0,
+                        payload: { by: user.id, action: "accepted" },
+                      },
+                      new Set([user.id]),
+                      { allowedSessionIds: new Set(others) },
+                    );
+                  }
+                }
                 return;
               }
               if (type === "call.decline") {
@@ -2857,6 +2898,28 @@ export function chatRoutes(
                 if (callId == null) return;
                 const call = getActiveCall(callId);
                 if (!call || !call.invitedUserIds.has(user.id)) return;
+                // Снять баннер на остальных вкладках того же юзера — иначе
+                // там бесконечно будет «дозвон».
+                {
+                  const others = sessionIdsForUser(
+                    user.workspaceId,
+                    user.id,
+                  ).filter((s) => s !== sessionId);
+                  if (others.length > 0) {
+                    publish(
+                      user.workspaceId,
+                      {
+                        type: "call.handled-elsewhere",
+                        workspaceId: user.workspaceId,
+                        callId,
+                        channelId: call.channelId,
+                        payload: { by: user.id, action: "declined" },
+                      },
+                      new Set([user.id]),
+                      { allowedSessionIds: new Set(others) },
+                    );
+                  }
+                }
                 // 1-on-1: decline tears down the whole call (legacy path).
                 // Group (≥3 invitees): one decline just removes that user;
                 // the call continues for everyone else. If the decline leaves
@@ -2971,9 +3034,19 @@ export function chatRoutes(
                 if (!isParticipant(callId, to)) return;
                 const call = getActiveCall(callId);
                 if (!call) return;
-                // Forward only to the addressed peer. The pubsub filter
-                // restricts to {to}, so other workspace subscribers (even
-                // call participants) won't see this SDP/ICE frame.
+                // Источник фрейма должен быть «активной» сессией звонка
+                // для своего userId. Если у юзера открыты две вкладки и
+                // вторая (не принимавшая звонок) почему-то решит слать
+                // SDP/ICE — отбрасываем, иначе у получателя в PC попадут
+                // конфликтующие SDP / candidate'ы из двух браузеров.
+                const ownerSession = activeSessionForUser(callId, user.id);
+                if (ownerSession !== sessionId) return;
+                // Получатель тоже должен иметь активный слот — иначе
+                // некому отвечать (e.g. callee ещё не принял). В этом
+                // случае не фанаутим SDP сразу всем сокетам userId=to,
+                // а просто дропаем — клиент перешлёт после accept'а.
+                const targetSession = activeSessionForUser(callId, to);
+                if (!targetSession) return;
                 publish(
                   user.workspaceId,
                   {
@@ -2994,6 +3067,7 @@ export function chatRoutes(
                     },
                   },
                   new Set([to]),
+                  { allowedSessionIds: new Set([targetSession]) },
                 );
                 return;
               }
@@ -3001,13 +3075,15 @@ export function chatRoutes(
           },
           onClose() {
             clearAllForUser(user.workspaceId, user.id);
-            // If the user was in any call, hang them up. For 2-party, this
-            // ends the call (completed if both joined, missed if not). For
-            // mesh, leaveCall returns true only when the call empties.
+            // Звонок «висит» на конкретной сессии юзера (см. calls.ts).
+            // Если закрылась не та сессия — звонок не трогаем (юзер
+            // продолжает разговор с другого устройства).
             const activeIds = activeCallsForUser(user.id);
             for (const callId of activeIds) {
               const call = getActiveCall(callId);
               if (!call) continue;
+              const ownerSession = call.connectedSessions.get(user.id);
+              if (ownerSession && ownerSession !== sessionId) continue;
               const isTwoParty = call.invitedUserIds.size === 2;
               const everConnected = call.connectedUserIds.size > 1;
               if (isTwoParty || !everConnected) {

@@ -587,3 +587,133 @@ describe("Group calls (Stage 5.5)", () => {
     expect(activeCallsForUser(owner.userId)).toContain(callId);
   });
 });
+
+describe("Multi-session per user", () => {
+  let env: TestEnv;
+  let owner: Awaited<ReturnType<typeof loginAs>>;
+  let mate: Awaited<ReturnType<typeof loginAs>>;
+  let channelId: number;
+
+  beforeEach(async () => {
+    env = await setupTestEnv();
+    _resetPubSub();
+    _resetCalls();
+    owner = await loginAs(env, "ms-owner@x.com", "password");
+    mate = await loginAs(env, "ms-mate@x.com", "password");
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    const dm = await env.app.request("/api/chat/dms", {
+      method: "POST",
+      headers: j(owner.cookie),
+      body: JSON.stringify({ userId: mate.userId }),
+    });
+    expect([200, 201]).toContain(dm.status);
+    channelId = ((await dm.json()) as { id: number }).id;
+  });
+  afterEach(async () => {
+    _resetPubSub();
+    _resetCalls();
+    await teardownTestEnv(env);
+  });
+
+  it("acceptCall забирает слот для первой сессии; повторный accept другой сессии того же юзера не меняет владельца", async () => {
+    const { acceptCall, activeSessionForUser } = await import(
+      "../../server/chat/calls"
+    );
+    const { callId } = await createCall({
+      db: env.db,
+      workspaceId: owner.workspaceId,
+      channelId,
+      initiatorUserId: owner.userId,
+      initiatorSessionId: "owner-s1",
+      callType: "audio",
+      inviteeUserIds: [mate.userId],
+      onMissed: () => {},
+    });
+    expect(activeSessionForUser(callId, owner.userId)).toBe("owner-s1");
+
+    const ok1 = await acceptCall(env.db, callId, mate.userId, "mate-s1");
+    expect(ok1).toBe(true);
+    expect(activeSessionForUser(callId, mate.userId)).toBe("mate-s1");
+
+    // Вторая сессия того же mate бьёт accept (например, нажал на втором
+    // устройстве до того, как пришёл handled-elsewhere) — слот не меняется.
+    const ok2 = await acceptCall(env.db, callId, mate.userId, "mate-s2");
+    expect(ok2).toBe(false);
+    expect(activeSessionForUser(callId, mate.userId)).toBe("mate-s1");
+  });
+
+  it("publish allowedSessionIds режет фанаут до одной сессии", async () => {
+    const events1: ChatServerEvent[] = [];
+    const events2: ChatServerEvent[] = [];
+    const { publish } = await import("../../server/chat/pubsub");
+    subscribe(
+      owner.workspaceId,
+      (e) => events1.push(e),
+      mate.userId,
+      "mate-s1",
+    );
+    subscribe(
+      owner.workspaceId,
+      (e) => events2.push(e),
+      mate.userId,
+      "mate-s2",
+    );
+
+    publish(
+      owner.workspaceId,
+      {
+        type: "call.offer",
+        workspaceId: owner.workspaceId,
+        callId: 1,
+        channelId: 1,
+        payload: { from: owner.userId, to: mate.userId, sdp: null },
+      },
+      new Set([mate.userId]),
+      { allowedSessionIds: new Set(["mate-s1"]) },
+    );
+    expect(events1).toHaveLength(1);
+    expect(events2).toHaveLength(0);
+  });
+
+  it("publish excludeSessionIds доставляет всем сокетам юзера, кроме указанной", async () => {
+    const events1: ChatServerEvent[] = [];
+    const events2: ChatServerEvent[] = [];
+    const { publish, sessionIdsForUser } = await import(
+      "../../server/chat/pubsub"
+    );
+    subscribe(
+      owner.workspaceId,
+      (e) => events1.push(e),
+      mate.userId,
+      "mate-s1",
+    );
+    subscribe(
+      owner.workspaceId,
+      (e) => events2.push(e),
+      mate.userId,
+      "mate-s2",
+    );
+
+    // sanity: оба сокета видны под одним userId
+    expect(sessionIdsForUser(owner.workspaceId, mate.userId).sort()).toEqual([
+      "mate-s1",
+      "mate-s2",
+    ]);
+
+    publish(
+      owner.workspaceId,
+      {
+        type: "call.handled-elsewhere",
+        workspaceId: owner.workspaceId,
+        callId: 5,
+        channelId: 1,
+        payload: { by: mate.userId, action: "accepted" },
+      },
+      new Set([mate.userId]),
+      { allowedSessionIds: new Set(["mate-s2"]) },
+    );
+    expect(events1).toHaveLength(0);
+    expect(events2).toHaveLength(1);
+    expect(events2[0]?.type).toBe("call.handled-elsewhere");
+  });
+});

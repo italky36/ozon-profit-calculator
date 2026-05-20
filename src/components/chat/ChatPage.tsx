@@ -567,6 +567,14 @@ export default function ChatPage({
         );
         return;
       }
+      if (event.type === "call.handled-elsewhere") {
+        // Другая вкладка/устройство этого же юзера обработали входящий —
+        // снимаем баннер тут, чтобы не звонил бесконечно.
+        setIncomingCall((cur) =>
+          cur && cur.callId === event.callId ? null : cur,
+        );
+        return;
+      }
     };
     const sock = new ChatSocket(handle);
     socketRef.current = sock;

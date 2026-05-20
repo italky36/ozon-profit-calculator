@@ -593,6 +593,15 @@ export type ChatServerEvent =
       payload: { userId: number };
     }
   | {
+      // Другая сессия этого же юзера приняла/отклонила звонок —
+      // снять входящий баннер на текущей вкладке, чтобы не звонил вечно.
+      type: "call.handled-elsewhere";
+      workspaceId: number;
+      callId: number;
+      channelId: number;
+      payload: { by: number; action: "accepted" | "declined" };
+    }
+  | {
       type: "call.created";
       callId: number;
       channelId: number;

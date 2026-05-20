@@ -36,6 +36,11 @@ interface ActiveCall {
   invitedUserIds: Set<number>;
   /** Users currently connected (sent accept + WS still open). */
   connectedUserIds: Set<number>;
+  /** WebSocket-сессия (sessionId), которой принадлежит участие юзера в этом
+   * звонке. Заполняется на createCall (для инициатора) и acceptCall (для
+   * принявшего). Все SDP/ICE-фреймы идут только в эти сессии — другие
+   * сокеты того же userId в звонок не вовлечены. */
+  connectedSessions: Map<number, string>;
   /** Pending ringing timeout — fires missed-call if no one accepts. */
   ringTimer: NodeJS.Timeout | null;
   startedAt: Date;
@@ -78,11 +83,27 @@ export function isParticipant(callId: number, userId: number): boolean {
   return activeCalls.get(callId)?.invitedUserIds.has(userId) ?? false;
 }
 
+/** Возвращает sessionId, через которую пользователь подключился к звонку
+ * (createCall — для инициатора, acceptCall — для принявшего). null, если
+ * юзер ещё не принял или уже вышел. SDP/ICE-роутер использует это, чтобы
+ * адресовать фрейм единственной «активной» сессии собеседника. */
+export function activeSessionForUser(
+  callId: number,
+  userId: number,
+): string | null {
+  return activeCalls.get(callId)?.connectedSessions.get(userId) ?? null;
+}
+
 interface CreateCallInput {
   db: DB;
   workspaceId: number;
   channelId: number;
   initiatorUserId: number;
+  /** WebSocket-сессия инициатора. SDP/ICE-фреймы от других сокетов того же
+   * юзера в звонок не вовлечены — это защищает от двойного offer'а, если
+   * инициатор открыт сразу на двух устройствах. Опционально для тестов и
+   * не-WS-вызовов; в проде chat.ts всегда передаёт реальную сессию. */
+  initiatorSessionId?: string;
   callType: CallType;
   /** Users to invite, excluding the initiator. */
   inviteeUserIds: number[];
@@ -138,6 +159,11 @@ export async function createCall(
     callType: input.callType,
     invitedUserIds: invited,
     connectedUserIds: new Set([input.initiatorUserId]),
+    connectedSessions: new Map(
+      input.initiatorSessionId
+        ? [[input.initiatorUserId, input.initiatorSessionId]]
+        : [],
+    ),
     ringTimer,
     startedAt: now,
   };
@@ -174,11 +200,20 @@ export async function acceptCall(
   db: DB,
   callId: number,
   userId: number,
+  sessionId?: string,
 ): Promise<boolean> {
   const call = activeCalls.get(callId);
   if (!call) return false;
   if (!call.invitedUserIds.has(userId)) return false;
+  // First-claim wins: только первая сессия юзера, дёрнувшая acceptCall,
+  // получает «слот» в звонке. Повторные accept от других сокетов того же
+  // юзера — no-op (без false), чтобы UI на той вкладке всё-таки увидел
+  // call.handled-elsewhere и снял баннер.
+  if (call.connectedSessions.has(userId)) {
+    return call.connectedSessions.get(userId) === sessionId;
+  }
   call.connectedUserIds.add(userId);
+  if (sessionId) call.connectedSessions.set(userId, sessionId);
   if (call.ringTimer) {
     clearTimeout(call.ringTimer);
     call.ringTimer = null;
@@ -284,6 +319,7 @@ export async function leaveCall(
   const call = activeCalls.get(callId);
   if (!call) return false;
   call.connectedUserIds.delete(userId);
+  call.connectedSessions.delete(userId);
   await db
     .update(chatCallParticipants)
     .set({ leftAt: new Date() })
@@ -331,6 +367,7 @@ export async function declineCall(
   if (!call) return { allDeclined: false };
   const wasInvited = call.invitedUserIds.delete(userId);
   call.connectedUserIds.delete(userId);
+  call.connectedSessions.delete(userId);
   if (wasInvited) unindexUser(userId, callId);
   await db
     .update(chatCallParticipants)
