@@ -1052,29 +1052,33 @@ const ProductRow = memo(function ProductRow({
               (() => {
                 const factOzonNetPerSale =
                   actual.actualRevenue / actual.salesCount;
-                // Та же формула что в SchemaResult.marginRub:
-                // ozonNetPayout - costPrice (только если white) - totalTax.
-                // totalTax берём из winner-схемы калькулятора — там вся
-                // tax-логика (УСН/АУСН/ОСНО/НПД + НДС + НДФЛ) уже
-                // посчитана для этой строки, дублировать незачем.
-                const whitePurchase = row.input.whitePurchase === true;
+                // Та же формула что в SchemaResult.marginRub в калькуляторе
+                // (см. src/lib/calc/index.ts:408): margin = promoPrice -
+                // totalExpenses, где totalExpenses включает costPrice +
+                // totalTax + всё прочее. Здесь Ozon-расходы уже вычтены
+                // из factOzonNetPerSale, поэтому вычитаем только
+                // costPrice + totalTax. costPrice вычитается всегда —
+                // это реально потраченные деньги, независимо от
+                // whitePurchase. Whitepurchase влияет только на totalTax
+                // (он уже учтён в calc[winner].totalTax из калькулятора).
                 const costPrice = row.input.costPrice;
                 const taxPerSale =
                   calc && winner ? calc[winner].totalTax : null;
-                const canCalc =
-                  taxPerSale != null && whitePurchase && costPrice > 0;
-                const factMargin = canCalc
-                  ? factOzonNetPerSale - costPrice - (taxPerSale as number)
-                  : null;
+                const factMargin =
+                  taxPerSale != null
+                    ? factOzonNetPerSale - costPrice - taxPerSale
+                    : null;
                 const factProfitability =
-                  factMargin != null ? factMargin / costPrice : null;
+                  factMargin != null && costPrice > 0
+                    ? factMargin / costPrice
+                    : null;
                 return (
                   <>
                     <div>{fmtRub(factOzonNetPerSale)}</div>
                     {factProfitability != null && (
                       <div
                         className="margin-roi"
-                        title={`Рентабельность по факту: (поступление от Ozon − себестоимость − налог) / себестоимость. Налог — из ${winner}-расчёта, белая поставка обязательна.`}
+                        title={`Рентабельность по факту: (поступление от Ozon − себестоимость − налог) / себестоимость. Налог — из ${winner}-расчёта.`}
                       >
                         {fmtPct(factProfitability)}
                       </div>
