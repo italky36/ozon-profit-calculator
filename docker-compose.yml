@@ -55,6 +55,30 @@ services:
     depends_on:
       - app
 
+  # TURN/STUN relay для WebRTC-звонков. network_mode: host обязателен —
+  # docker NAT не пропускает UDP-relay (relay-порты выбираются динамически
+  # из range min-port..max-port). На Windows docker desktop host mode может
+  # не работать; локально coturn в стек не нужен, можно запускать compose
+  # без него: `docker compose up -d db app caddy`.
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n
+      --listening-port=3478
+      --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP is required}
+      --realm=${TURN_REALM:-profitcontrol.io}
+      --user=${TURN_USERNAME:?TURN_USERNAME is required}:${TURN_PASSWORD:?TURN_PASSWORD is required}
+      --lt-cred-mech
+      --no-tls
+      --no-dtls
+      --no-cli
+      --fingerprint
+      --min-port=49160
+      --max-port=49200
+      --log-file=stdout
+
 volumes:
   pg_data:
   caddy_data:

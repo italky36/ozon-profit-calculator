@@ -146,5 +146,35 @@ if (adminUserId != null && adminWorkspaceId != null) {
   }
 }
 
+// 3. Seed ICE servers from TURN_* env vars (TURN+STUN для WebRTC-звонков).
+//    Идемпотентно: если в ice_servers уже что-то есть — не трогаем (значит
+//    sysadmin уже редактировал через /api/admin/ice). Иначе кладём три записи:
+//    TURN udp/tcp + публичный Google STUN как fallback.
+const iceCount = Number(
+  (await client.query("SELECT COUNT(*) AS n FROM ice_servers")).rows[0].n,
+);
+const turnIp = process.env.TURN_EXTERNAL_IP;
+const turnUser = process.env.TURN_USERNAME;
+const turnPass = process.env.TURN_PASSWORD;
+if (iceCount === 0 && turnIp && turnUser && turnPass) {
+  const entries = [
+    [`turn:${turnIp}:3478?transport=udp`, turnUser, turnPass, 0],
+    [`turn:${turnIp}:3478?transport=tcp`, turnUser, turnPass, 1],
+    ["stun:stun.l.google.com:19302", null, null, 99],
+  ];
+  for (const [urls, user, cred, sortOrder] of entries) {
+    await client.query(
+      `INSERT INTO ice_servers (urls, username, credential, enabled, sort_order, created_at, updated_at)
+       VALUES ($1, $2, $3, true, $4, $5, $5)`,
+      [urls, user, cred, sortOrder, now],
+    );
+  }
+  console.log(`seeded ${entries.length} ICE servers (turn://${turnIp})`);
+} else if (iceCount === 0) {
+  console.log(
+    "ice_servers empty + no TURN_* env — звонки пойдут только через Google STUN fallback",
+  );
+}
+
 await client.end();
 console.log(`\nDone. PG at ${DATABASE_URL.replace(/:[^:@]+@/, ":***@")}.`);
