@@ -336,6 +336,20 @@ function ShopRow({
               ? sourceLabel
               : "Нет ключа API — настройте в карточке магазина"}
           </div>
+          {run?.status === "error" && run.errorMessage && (
+            <div
+              style={{
+                marginTop: 4,
+                fontSize: 11.5,
+                color: "var(--err)",
+                wordBreak: "break-word",
+                lineHeight: 1.4,
+              }}
+              title={run.errorMessage}
+            >
+              {run.errorMessage}
+            </div>
+          )}
         </div>
         <RunStatusBadge run={run} onRetry={onRetry} eligible={eligible} />
         {eligible && (
