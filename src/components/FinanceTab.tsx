@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ArrowDownRight, Equal, Receipt } from "lucide-react";
+import {
+  ArrowUpRight,
+  ArrowDownRight,
+  ChevronDown,
+  Download,
+  Equal,
+  Receipt,
+} from "lucide-react";
 import {
   api,
   type FinanceSummaryRow,
@@ -43,6 +50,125 @@ const fmtDate = (ms: number): string => {
   const d = new Date(ms);
   return d.toLocaleDateString("ru-RU");
 };
+
+function ExportMenu({
+  from,
+  to,
+  type,
+}: {
+  from: string;
+  to: string;
+  type?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("click", onClick);
+    return () => window.removeEventListener("click", onClick);
+  }, [open]);
+
+  const trigger = (format: "xlsx" | "csv") => {
+    const url = api.finance.exportUrl(
+      { from, to, type: type as FinanceType | undefined },
+      format,
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    // браузер увидит Content-Disposition: attachment и запустит download.
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={() => setOpen((v) => !v)}
+        title="Экспорт текущей выборки финансов в файл"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+      >
+        <Download size={14} />
+        Экспорт
+        <ChevronDown
+          size={12}
+          style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .12s" }}
+        />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            background: "#fff",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            boxShadow: "0 8px 24px rgba(15, 23, 42, 0.12)",
+            minWidth: 180,
+            padding: 4,
+            zIndex: 10,
+          }}
+        >
+          <ExportMenuItem
+            label="Excel (.xlsx)"
+            onClick={() => trigger("xlsx")}
+          />
+          <ExportMenuItem
+            label="CSV (.csv)"
+            onClick={() => trigger("csv")}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExportMenuItem({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: "block",
+        width: "100%",
+        padding: "8px 12px",
+        textAlign: "left",
+        background: "transparent",
+        border: 0,
+        borderRadius: 6,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontSize: 13,
+      }}
+      onMouseEnter={(e) => {
+        (e.target as HTMLButtonElement).style.background = "var(--surface-muted, #f1f5f9)";
+      }}
+      onMouseLeave={(e) => {
+        (e.target as HTMLButtonElement).style.background = "transparent";
+      }}
+    >
+      {label}
+    </button>
+  );
+}
 
 function ShopRunPill({ run }: { run: ShopRunState }) {
   const common: React.CSSProperties = {
@@ -416,6 +542,8 @@ export default function FinanceTab({ shops, onOpenArticle }: Props) {
           >
             {relinking ? "Связываем…" : "Привязать неопознанные"}
           </button>
+          <ExportMenu from={from} to={to} type={filterType || undefined} />
+
           <button
             className="btn-secondary"
             onClick={clearAll}

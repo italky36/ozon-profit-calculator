@@ -1111,6 +1111,18 @@ export const api = {
         { method: "DELETE" },
       );
     },
+    exportUrl: (
+      query: FinanceListQuery & { shopId?: number },
+      format: "xlsx" | "csv",
+    ): string => {
+      const params = new URLSearchParams();
+      params.set("format", format);
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null && v !== "")
+          params.set(k, String(v));
+      }
+      return `${BASE}/finance/transactions/export?${params.toString()}`;
+    },
   },
   analytics: {
     realizedMargin: (

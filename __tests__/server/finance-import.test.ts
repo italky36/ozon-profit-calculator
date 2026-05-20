@@ -164,6 +164,64 @@ describe("finance import route + finance API", () => {
     expect(saleRows[0].type).toBe("sale");
   });
 
+  it("GET /api/finance/transactions/export csv возвращает text/csv c BOM", async () => {
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
+    const res = await env.app.request(
+      "/api/finance/transactions/export?format=csv",
+      { headers: headers(env.cookie) },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toMatch(/text\/csv/);
+    expect(res.headers.get("Content-Disposition")).toMatch(/attachment.*\.csv/);
+    // BOM проверяем через bytes — TextDecoder в Response.text() его срезает.
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(bytes[0]).toBe(0xef);
+    expect(bytes[1]).toBe(0xbb);
+    expect(bytes[2]).toBe(0xbf);
+    const text = new TextDecoder("utf-8").decode(bytes);
+    const lines = text.split("\n");
+    expect(lines[0]).toMatch(/Дата.*Магазин.*Тип/);
+    // 7 транзакций + заголовок
+    expect(lines.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("GET /api/finance/transactions/export xlsx возвращает binary", async () => {
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
+    const res = await env.app.request(
+      "/api/finance/transactions/export?format=xlsx",
+      { headers: headers(env.cookie) },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toMatch(/spreadsheetml/);
+    expect(res.headers.get("Content-Disposition")).toMatch(/attachment.*\.xlsx/);
+    const buf = await res.arrayBuffer();
+    // xlsx — это zip; первые 2 байта PK
+    const view = new Uint8Array(buf);
+    expect(view[0]).toBe(0x50);
+    expect(view[1]).toBe(0x4b);
+  });
+
+  it("GET /api/finance/transactions/export фильтрует по type", async () => {
+    await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
+    const res = await env.app.request(
+      "/api/finance/transactions/export?format=csv&type=sale",
+      { headers: headers(env.cookie) },
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    // заголовок + ровно 1 sale
+    expect(lines.length).toBe(2);
+  });
+
+  it("GET /api/finance/transactions/export rejects invalid format", async () => {
+    const res = await env.app.request(
+      "/api/finance/transactions/export?format=pdf",
+      { headers: headers(env.cookie) },
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("GET /api/finance/summary aggregates by type", async () => {
     await runFinanceImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId, FILTER);
     const app = env.app;
