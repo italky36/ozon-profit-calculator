@@ -18,7 +18,6 @@ import type {
   TaxSettings,
 } from "../types";
 import { exportShortExcel, exportFullExcel } from "../lib/exportExcel";
-import { calculateActualEconomics } from "../lib/calc/actualEconomics";
 import type { RealizedMarginRow } from "../api";
 import { fmtRub, fmtPct } from "../format";
 import EditableCell from "./EditableCell";
@@ -745,7 +744,6 @@ export default function ProductsTable({
                       checked={selectedIds.has(row.id)}
                       shop={shopsById?.get(row.shopId)}
                       actual={actuals?.get(row.input.articleId)}
-                      taxSettings={taxSettings}
                       searchQuery={searchQuery}
                       showChart={showChart}
                       showActuals={showActuals}
@@ -801,7 +799,6 @@ interface ProductRowProps {
   checked: boolean;
   shop: Shop | undefined;
   actual: RealizedMarginRow | undefined;
-  taxSettings: TaxSettings | undefined;
   searchQuery: string | undefined;
   showChart: boolean;
   showActuals: boolean;
@@ -821,7 +818,6 @@ const ProductRow = memo(function ProductRow({
   checked,
   shop,
   actual,
-  taxSettings,
   searchQuery,
   showChart,
   showActuals,
@@ -1054,27 +1050,33 @@ const ProductRow = memo(function ProductRow({
           <td className="num" style={{ color: "var(--muted-2)" }}>
             {actual && actual.salesCount > 0 ? (
               (() => {
-                const econ = taxSettings
-                  ? calculateActualEconomics(
-                      actual.actualRevenue,
-                      actual.actualMargin,
-                      actual.salesCount,
-                      row.input.costPrice,
-                      row.input.whitePurchase === true,
-                      taxSettings,
-                    )
+                const factOzonNetPerSale =
+                  actual.actualRevenue / actual.salesCount;
+                // Та же формула что в SchemaResult.marginRub:
+                // ozonNetPayout - costPrice (только если white) - totalTax.
+                // totalTax берём из winner-схемы калькулятора — там вся
+                // tax-логика (УСН/АУСН/ОСНО/НПД + НДС + НДФЛ) уже
+                // посчитана для этой строки, дублировать незачем.
+                const whitePurchase = row.input.whitePurchase === true;
+                const costPrice = row.input.costPrice;
+                const taxPerSale =
+                  calc && winner ? calc[winner].totalTax : null;
+                const canCalc =
+                  taxPerSale != null && whitePurchase && costPrice > 0;
+                const factMargin = canCalc
+                  ? factOzonNetPerSale - costPrice - (taxPerSale as number)
                   : null;
+                const factProfitability =
+                  factMargin != null ? factMargin / costPrice : null;
                 return (
                   <>
-                    <div>
-                      {fmtRub(actual.actualRevenue / actual.salesCount)}
-                    </div>
-                    {econ && econ.profitability != null && (
+                    <div>{fmtRub(factOzonNetPerSale)}</div>
+                    {factProfitability != null && (
                       <div
                         className="margin-roi"
-                        title="Рентабельность по факту: маржа после себестоимости и налогов на одну продажу, делённая на себестоимость"
+                        title={`Рентабельность по факту: (поступление от Ozon − себестоимость − налог) / себестоимость. Налог — из ${winner}-расчёта, белая поставка обязательна.`}
                       >
-                        {fmtPct(econ.profitability)}
+                        {fmtPct(factProfitability)}
                       </div>
                     )}
                   </>
