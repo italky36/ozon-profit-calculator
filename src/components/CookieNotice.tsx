@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { useMediaQuery } from "../lib/useMediaQuery";
 
 /** Persisted flag — once the user dismisses the notice, we don't show it
  *  again on this browser. The check runs entirely client-side; no server
@@ -14,6 +15,7 @@ const ACK_KEY = "ozon-calc.cookies-ack";
  *  require granular opt-in for. The notice is purely informational so
  *  users know what's stored on their device. */
 export default function CookieNotice() {
+  const narrow = useMediaQuery("(max-width: 560px)");
   // Lazy-init the visibility flag from localStorage so we never flash the
   // banner for returning users on first render.
   const [visible, setVisible] = useState<boolean>(() => {
@@ -26,6 +28,7 @@ export default function CookieNotice() {
       return true;
     }
   });
+  const [expanded, setExpanded] = useState(false);
 
   // Cross-tab sync: if the user dismisses in another tab, mirror the
   // change here so the banner doesn't linger.
@@ -54,66 +57,115 @@ export default function CookieNotice() {
       aria-label="Использование cookies"
       style={{
         position: "fixed",
-        bottom: 16,
-        left: 16,
-        right: 16,
+        bottom: narrow ? 12 : 16,
+        left: narrow ? 12 : 16,
+        right: narrow ? 12 : 16,
         maxWidth: 720,
         margin: "0 auto",
         background: "var(--surface, #fff)",
         border: "1px solid var(--border, #e2e2e2)",
         borderRadius: 12,
         boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
-        padding: "14px 18px",
+        padding: narrow ? "12px 14px" : "14px 18px",
         display: "flex",
-        alignItems: "center",
-        gap: 14,
+        flexDirection: narrow ? "column" : "row",
+        alignItems: narrow ? "stretch" : "center",
+        gap: narrow ? 10 : 14,
         zIndex: 1100,
         fontSize: 13,
         lineHeight: 1.4,
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <strong style={{ display: "block", marginBottom: 2 }}>
-          Этот сайт использует cookies
-        </strong>
-        <span style={{ color: "var(--muted, #555)" }}>
-          Мы храним cookie-сессию для авторизации и небольшие настройки
-          интерфейса в localStorage вашего браузера. Без них приложение
-          не сможет запомнить вас между визитами и сохранить пользовательские
-          предпочтения. Продолжая работу, вы соглашаетесь с этим.
-        </span>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <strong>Cookies</strong>
+          <span style={{ color: "var(--muted, #555)" }}>
+            используем для авторизации и UI-настроек.
+          </span>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            style={{
+              background: "transparent",
+              border: 0,
+              padding: 0,
+              color: "var(--accent, #2563eb)",
+              cursor: "pointer",
+              fontSize: 13,
+              fontFamily: "inherit",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 3,
+            }}
+          >
+            {expanded ? "Свернуть" : "Подробнее"}
+            {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+        </div>
+        {expanded && (
+          <div
+            style={{
+              marginTop: 8,
+              color: "var(--muted, #555)",
+              fontSize: 12.5,
+              lineHeight: 1.5,
+            }}
+          >
+            Сессионная cookie держит вход, без неё придётся логиниться на каждой
+            странице. В <code>localStorage</code> сохраняются UI-настройки (цвет
+            акцента, последний выбранный магазин, видимые колонки таблицы) —
+            ничего из этого не покидает ваш браузер. Сторонних трекеров и
+            рекламных cookies в приложении нет.
+          </div>
+        )}
       </div>
-      <button
-        type="button"
-        onClick={dismiss}
-        className="btn-primary"
+      <div
         style={{
-          padding: "6px 14px",
-          fontSize: 13,
-          flexShrink: 0,
-        }}
-      >
-        Понятно
-      </button>
-      <button
-        type="button"
-        onClick={dismiss}
-        title="Закрыть"
-        aria-label="Закрыть"
-        style={{
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-          color: "var(--muted, #888)",
-          padding: 4,
-          display: "inline-flex",
+          display: "flex",
           alignItems: "center",
-          justifyContent: "center",
+          gap: 8,
           flexShrink: 0,
+          justifyContent: narrow ? "flex-end" : "flex-start",
         }}
       >
-        <X size={16} />
-      </button>
+        <button
+          type="button"
+          onClick={dismiss}
+          className="btn-primary"
+          style={{
+            padding: "6px 14px",
+            fontSize: 13,
+          }}
+        >
+          Понятно
+        </button>
+        <button
+          type="button"
+          onClick={dismiss}
+          title="Закрыть"
+          aria-label="Закрыть"
+          style={{
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--muted, #888)",
+            padding: 4,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <X size={16} />
+        </button>
+      </div>
     </div>
   );
 }
