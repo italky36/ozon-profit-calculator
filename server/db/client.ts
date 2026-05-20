@@ -21,7 +21,17 @@ interface OpenOptions {
 export async function openDb(
   opts: OpenOptions,
 ): Promise<{ db: DB; pool: pg.Pool }> {
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl });
+  // Pool size 30 рассчитан под 8GB / 4 vCPU prod-сервер. Дефолт pg — 10,
+  // тонковато под одновременный чат + middleware-auth + batch-импорты.
+  // 30 × 10MB ≈ 300MB worst-case на PG-коннекты, далеко от max_connections=100.
+  // idleTimeoutMillis закрывает простаивающие коннекты, чтобы idle-load не
+  // держал лишние; connectionTimeoutMillis отдаёт fail-fast при exhausted pool.
+  const pool = new pg.Pool({
+    connectionString: opts.databaseUrl,
+    max: 30,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+  });
   const db = drizzle(pool, { schema });
 
   if (opts.runMigrations ?? true) {
