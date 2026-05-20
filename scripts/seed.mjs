@@ -5,7 +5,7 @@ import pg from "pg";
 const DATABASE_URL =
   process.env.DATABASE_URL ??
   "postgresql://postgres:dev_password_change_me@localhost:5433/ozon_calc";
-const FALLBACK_TAX_FILE = "src/data/defaultTaxSettings.json";
+const DATA_DIR = "src/data";
 
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? "admin@example.com")
   .trim()
@@ -15,6 +15,77 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "admin123";
 const client = new pg.Client({ connectionString: DATABASE_URL });
 await client.connect();
 
+function readJson(name) {
+  const file = `${DATA_DIR}/${name}`;
+  return fs.existsSync(file)
+    ? JSON.parse(fs.readFileSync(file, "utf8"))
+    : null;
+}
+
+// 0. Заполнить ref_* таблицы из src/data/*.json если они пусты.
+//    Эти JSON-снапшоты лежат в репо и копируются в Docker-образ. Они же
+//    используются acceptance-тестом `__tests__/calc.test.ts`. Полный
+//    источник правды — Excel-выгрузка через scripts/extract-data.mjs,
+//    но на проде Excel-файла нет, и без ref_* калькулятор показывает
+//    предупреждение «не нашли в таблице». Идемпотентно: если в таблице
+//    уже что-то есть, не трогаем (значит extract-data уже отработал
+//    или sysadmin загрузил вручную).
+async function seedIfEmpty(table, label, rowsLoader, insertOne) {
+  const cnt = Number(
+    (await client.query(`SELECT COUNT(*) AS n FROM ${table}`)).rows[0].n,
+  );
+  if (cnt > 0) {
+    console.log(`${label}: уже заполнено (${cnt} строк) — пропускаем`);
+    return;
+  }
+  const rows = rowsLoader();
+  if (!rows || rows.length === 0) {
+    console.log(`${label}: JSON-файл отсутствует или пуст — пропускаем`);
+    return;
+  }
+  for (const r of rows) {
+    await insertOne(r);
+  }
+  console.log(`${label}: засеяно ${rows.length} строк из JSON`);
+}
+
+await seedIfEmpty("ref_commissions", "ref_commissions", () => readJson("commissions.json"), async (c) => {
+  await client.query(
+    `INSERT INTO ref_commissions (key, category, product_type, fbo_buckets, fbs_buckets, real_fbs_buckets)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [c.key, c.category, c.productType, JSON.stringify(c.fbo), JSON.stringify(c.fbs), JSON.stringify(c.realFbs)],
+  );
+});
+await seedIfEmpty("ref_storage", "ref_storage", () => readJson("storage.json"), async (s) => {
+  await client.query(
+    `INSERT INTO ref_storage (key, category, product_type, free_storage_days, free_storage_days_kgt, free_storage_days_kz)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [s.key, s.category, s.productType, s.freeStorageDays, s.freeStorageDaysKgt, s.freeStorageDaysKz],
+  );
+});
+await seedIfEmpty("ref_logistics_tariffs", "ref_logistics_tariffs", () => readJson("logisticsTariffs.json"), async (t) => {
+  await client.query(
+    `INSERT INTO ref_logistics_tariffs (volume_from, volume_to, local_up_to_300, non_local_up_to_300, local_over_300, non_local_over_300)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [t.volumeFrom, t.volumeTo, t.localUpTo300, t.nonLocalUpTo300, t.localOver300, t.nonLocalOver300],
+  );
+});
+
+// ref_settings: lists / logisticsSettings / defaultTaxSettings — три ключа.
+const settingsSeeds = [
+  ["lists", readJson("lists.json")],
+  ["logisticsSettings", readJson("logisticsSettings.json")],
+  ["defaultTaxSettings", readJson("defaultTaxSettings.json")],
+];
+for (const [key, value] of settingsSeeds) {
+  if (!value) continue;
+  await client.query(
+    `INSERT INTO ref_settings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO NOTHING`,
+    [key, JSON.stringify(value)],
+  );
+}
+
 let defaultTaxSettings;
 const fromRefs = (
   await client.query("SELECT value FROM ref_settings WHERE key = $1", [
@@ -23,8 +94,6 @@ const fromRefs = (
 ).rows[0];
 if (fromRefs) {
   defaultTaxSettings = fromRefs.value; // jsonb already parsed
-} else if (fs.existsSync(FALLBACK_TAX_FILE)) {
-  defaultTaxSettings = JSON.parse(fs.readFileSync(FALLBACK_TAX_FILE, "utf8"));
 } else {
   console.error("no defaultTaxSettings available — run extract-data first");
   process.exit(1);
