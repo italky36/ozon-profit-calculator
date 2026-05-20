@@ -34,6 +34,12 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       START_SERVER: "1"
       BACKUP_DIR_IN_CONTAINER: /srv/backups
+      # TURN_* нужны seed.mjs для автозаполнения ice_servers при первом
+      # старте. Без них клиент получит только Google STUN fallback и
+      # звонки между разными NAT'ами не соединяются.
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
     networks: [internal]
     depends_on:
       db:
