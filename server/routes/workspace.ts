@@ -135,7 +135,7 @@ async function ownerCount(db: DB, workspaceId: number): Promise<number> {
       ),
     )
     ;
-  return row?.n ?? 0;
+  return Number(row?.n ?? 0);
 }
 
 /** Per-workspace «team» management routes. Mount under requireAuth. */

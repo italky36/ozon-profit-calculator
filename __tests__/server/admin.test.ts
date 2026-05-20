@@ -15,10 +15,10 @@ import {
 
 describe("admin routes", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   describe("authorization", () => {
     it("returns 401 without session", async () => {
@@ -38,8 +38,8 @@ describe("admin routes", () => {
   describe("GET /api/admin/users", () => {
     it("lists all users without password_hash", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      createUserDirect(env.db, "u1@x.com", "password123", "user");
-      createUserDirect(env.db, "u2@x.com", "password123", "user");
+      await createUserDirect(env.db, "u1@x.com", "password123", "user");
+      await createUserDirect(env.db, "u2@x.com", "password123", "user");
 
       const res = await env.app.request("/api/admin/users", {
         headers: { Cookie: cookie },
@@ -61,7 +61,7 @@ describe("admin routes", () => {
   describe("PUT /api/admin/users/:id/role", () => {
     it("changes user role", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123", "user");
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123", "user");
 
       const res = await env.app.request(`/api/admin/users/${targetId}/role`, {
         method: "PUT",
@@ -72,7 +72,7 @@ describe("admin routes", () => {
       const body = await res.json();
       expect(body.role).toBe("admin");
 
-      const row = env.db.select().from(users).where(eq(users.id, targetId)).get();
+      const [row] = await env.db.select().from(users).where(eq(users.id, targetId));
       expect(row!.isSysadmin).toBe(true);
     });
 
@@ -93,7 +93,7 @@ describe("admin routes", () => {
 
     it("rejects invalid role with 400", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123");
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123");
       const res = await env.app.request(`/api/admin/users/${targetId}/role`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Cookie: cookie },
@@ -116,8 +116,8 @@ describe("admin routes", () => {
   describe("PUT /api/admin/users/:id/blocked", () => {
     it("blocks user and revokes their sessions", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "victim@x.com", "password123");
-      env.db
+      const targetId = await createUserDirect(env.db, "victim@x.com", "password123");
+      await env.db
         .insert(sessions)
         .values({
           id: "victim-active",
@@ -125,7 +125,7 @@ describe("admin routes", () => {
           expiresAt: new Date(Date.now() + 60_000),
           createdAt: new Date(),
         })
-        .run();
+        ;
 
       const res = await env.app.request(
         `/api/admin/users/${targetId}/blocked`,
@@ -139,21 +139,21 @@ describe("admin routes", () => {
       const body = await res.json();
       expect(body.isBlocked).toBe(true);
 
-      const row = env.db.select().from(users).where(eq(users.id, targetId)).get();
+      const [row] = await env.db.select().from(users).where(eq(users.id, targetId));
       expect(row!.isBlocked).toBe(true);
       expect(
-        env.db.select().from(sessions).where(eq(sessions.userId, targetId)).all(),
+        await env.db.select().from(sessions).where(eq(sessions.userId, targetId)),
       ).toHaveLength(0);
     });
 
     it("unblocks user without restoring sessions", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123");
-      env.db
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123");
+      await env.db
         .update(users)
         .set({ isBlocked: true })
         .where(eq(users.id, targetId))
-        .run();
+        ;
 
       const res = await env.app.request(
         `/api/admin/users/${targetId}/blocked`,
@@ -164,7 +164,7 @@ describe("admin routes", () => {
         },
       );
       expect(res.status).toBe(200);
-      const row = env.db.select().from(users).where(eq(users.id, targetId)).get();
+      const [row] = await env.db.select().from(users).where(eq(users.id, targetId));
       expect(row!.isBlocked).toBe(false);
     });
 
@@ -187,9 +187,9 @@ describe("admin routes", () => {
   describe("DELETE /api/admin/users/:id", () => {
     it("deletes user and cascades sessions", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "victim@x.com", "password123");
+      const targetId = await createUserDirect(env.db, "victim@x.com", "password123");
       // Give the victim a session.
-      env.db
+      await env.db
         .insert(sessions)
         .values({
           id: "victim-sess",
@@ -197,7 +197,7 @@ describe("admin routes", () => {
           expiresAt: new Date(Date.now() + 60_000),
           createdAt: new Date(),
         })
-        .run();
+        ;
 
       const res = await env.app.request(`/api/admin/users/${targetId}`, {
         method: "DELETE",
@@ -205,15 +205,16 @@ describe("admin routes", () => {
       });
       expect(res.status).toBe(200);
 
+      const [deletedUser] = await env.db
+        .select()
+        .from(users)
+        .where(eq(users.id, targetId));
+      expect(deletedUser).toBeUndefined();
       expect(
-        env.db.select().from(users).where(eq(users.id, targetId)).get(),
-      ).toBeUndefined();
-      expect(
-        env.db
+        await env.db
           .select()
           .from(sessions)
-          .where(eq(sessions.userId, targetId))
-          .all(),
+          .where(eq(sessions.userId, targetId)),
       ).toHaveLength(0);
     });
 
@@ -235,8 +236,8 @@ describe("admin routes", () => {
   describe("POST /api/admin/users/:id/resend-verification", () => {
     it("creates a new token and sends email", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123");
-      env.db.update(users).set({ isVerified: false }).where(eq(users.id, targetId)).run();
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123");
+      await env.db.update(users).set({ isVerified: false }).where(eq(users.id, targetId));
       env.emails.length = 0;
 
       const res = await env.app.request(
@@ -245,11 +246,11 @@ describe("admin routes", () => {
       );
       expect(res.status).toBe(200);
 
-      const tokens = env.db
+      const tokens = await env.db
         .select()
         .from(emailVerificationTokens)
         .where(eq(emailVerificationTokens.userId, targetId))
-        .all();
+        ;
       expect(tokens).toHaveLength(1);
       expect(env.emails).toHaveLength(1);
       expect(env.emails[0].to).toBe("u@x.com");
@@ -257,7 +258,7 @@ describe("admin routes", () => {
 
     it("rejects already-verified user with 400", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123");
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123");
       const res = await env.app.request(
         `/api/admin/users/${targetId}/resend-verification`,
         { method: "POST", headers: { Cookie: cookie } },
@@ -269,10 +270,10 @@ describe("admin routes", () => {
   describe("POST /api/admin/users/:id/revoke-sessions", () => {
     it("removes all sessions for the target user", async () => {
       const { cookie } = await loginAs(env, "admin@x.com", "password123", "admin");
-      const targetId = createUserDirect(env.db, "u@x.com", "password123");
+      const targetId = await createUserDirect(env.db, "u@x.com", "password123");
       const now = Date.now();
       for (let i = 0; i < 3; i++) {
-        env.db
+        await env.db
           .insert(sessions)
           .values({
             id: `sess-${i}`,
@@ -280,7 +281,7 @@ describe("admin routes", () => {
             expiresAt: new Date(now + 60_000),
             createdAt: new Date(now),
           })
-          .run();
+          ;
       }
       const res = await env.app.request(
         `/api/admin/users/${targetId}/revoke-sessions`,
@@ -288,11 +289,10 @@ describe("admin routes", () => {
       );
       expect(res.status).toBe(200);
       expect(
-        env.db
+        await env.db
           .select()
           .from(sessions)
-          .where(eq(sessions.userId, targetId))
-          .all(),
+          .where(eq(sessions.userId, targetId)),
       ).toHaveLength(0);
     });
   });
@@ -344,11 +344,11 @@ describe("admin routes", () => {
       );
       expect(res.status).toBe(200);
 
-      const remaining = env.db
+      const remaining = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "victim@x.com"))
-        .all();
+        ;
       expect(remaining).toHaveLength(1); // user itself stays
 
       const list = await env.app.request("/api/admin/workspaces", {

@@ -16,21 +16,21 @@ import {
 
 describe("workspace suspension", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   describe("PUT /api/admin/workspaces/:id/suspended", () => {
     it("suspends workspace, marks timestamp, revokes member sessions", async () => {
       const admin = await loginAs(env, "admin@x.com", "password123", "admin");
       const member = await loginAs(env, "u@x.com", "password123", "user");
       // Confirm the member's session exists before suspension.
-      const before = env.db
+      const before = await env.db
         .select()
         .from(sessions)
         .where(eq(sessions.userId, member.userId))
-        .all();
+        ;
       expect(before.length).toBeGreaterThan(0);
 
       const res = await env.app.request(
@@ -46,30 +46,30 @@ describe("workspace suspension", () => {
       expect(body.suspendedAt).toBeTypeOf("number");
 
       // Timestamp written in DB.
-      const ws = env.db
+      const [ws] = await env.db
         .select()
         .from(workspaces)
         .where(eq(workspaces.id, member.workspaceId))
-        .get();
+        ;
       expect(ws!.suspendedAt).toBeInstanceOf(Date);
 
       // Member sessions deleted.
-      const after = env.db
+      const after = await env.db
         .select()
         .from(sessions)
         .where(eq(sessions.userId, member.userId))
-        .all();
+        ;
       expect(after).toHaveLength(0);
     });
 
     it("does not revoke sysadmin sessions", async () => {
       const admin = await loginAs(env, "admin@x.com", "password123", "admin");
       const member = await loginAs(env, "u@x.com", "password123", "user");
-      const sysadminBefore = env.db
+      const sysadminBefore = await env.db
         .select()
         .from(sessions)
         .where(eq(sessions.userId, admin.userId))
-        .all();
+        ;
       expect(sysadminBefore.length).toBeGreaterThan(0);
 
       await env.app.request(
@@ -81,11 +81,11 @@ describe("workspace suspension", () => {
         },
       );
 
-      const sysadminAfter = env.db
+      const sysadminAfter = await env.db
         .select()
         .from(sessions)
         .where(eq(sessions.userId, admin.userId))
-        .all();
+        ;
       expect(sysadminAfter).toHaveLength(sysadminBefore.length);
     });
 
@@ -125,11 +125,11 @@ describe("workspace suspension", () => {
       const offBody = await off.json();
       expect(offBody.suspendedAt).toBeNull();
 
-      const ws = env.db
+      const [ws] = await env.db
         .select()
         .from(workspaces)
         .where(eq(workspaces.id, member.workspaceId))
-        .get();
+        ;
       expect(ws!.suspendedAt).toBeNull();
 
       // Fresh login allowed.
@@ -187,17 +187,17 @@ describe("workspace suspension", () => {
 
   describe("login + scoped access while suspended", () => {
     it("login fails with localized 403 for suspended workspace member", async () => {
-      const uid = createUserDirect(env.db, "u@x.com", "password123");
-      const wsId = env.db
+      const uid = await createUserDirect(env.db, "u@x.com", "password123");
+      const wsId = (await env.db
         .select({ id: workspaceMembers.workspaceId })
         .from(workspaceMembers)
         .where(eq(workspaceMembers.userId, uid))
-        .get()!.id;
-      env.db
+        )[0]!.id;
+      await env.db
         .update(workspaces)
         .set({ suspendedAt: new Date(), updatedAt: new Date() })
         .where(eq(workspaces.id, wsId))
-        .run();
+        ;
 
       const res = await env.app.request("/api/auth/login", {
         method: "POST",

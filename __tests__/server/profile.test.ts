@@ -14,10 +14,10 @@ const TINY_PNG =
 
 describe("user profile", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   const h = (cookie: string) => ({
     "Content-Type": "application/json",
@@ -38,11 +38,11 @@ describe("user profile", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const row = env.db
+      const [row] = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "ivan@test.local"))
-        .get();
+        ;
       expect(row?.fullName).toBe("Иван Иванов");
       expect(row?.jobTitle).toBe("Менеджер по продажам");
     });
@@ -58,11 +58,11 @@ describe("user profile", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const row = env.db
+      const [row] = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "skarlatuka@test.local"))
-        .get();
+        ;
       expect(row?.fullName).toBe("Skarlatuka");
       expect(row?.jobTitle).toBeNull();
     });
@@ -179,11 +179,11 @@ describe("user profile", () => {
       const owner = await loginAs(env, "owner@test.local", "password123");
       // Seed a manager directly in the owner's workspace.
       const m = await loginAs(env, "manager@test.local", "password123");
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({ workspaceId: owner.workspaceId, role: "manager" })
         .where(eq(workspaceMembers.userId, m.userId))
-        .run();
+        ;
 
       const res = await env.app.request(
         `/api/workspace/me/members/${m.userId}/profile`,
@@ -197,11 +197,11 @@ describe("user profile", () => {
         },
       );
       expect(res.status).toBe(200);
-      const row = env.db
+      const [row] = await env.db
         .select({ fullName: users.fullName, jobTitle: users.jobTitle })
         .from(users)
         .where(eq(users.id, m.userId))
-        .get();
+        ;
       expect(row?.fullName).toBe("Изменённое имя");
       expect(row?.jobTitle).toBe("Логист");
     });
@@ -211,16 +211,16 @@ describe("user profile", () => {
       const mgrSeed = await loginAs(env, "manager@test.local", "password123");
       const targetSeed = await loginAs(env, "target@test.local", "password123");
       // Join manager + target to owner workspace.
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({ workspaceId: owner.workspaceId, role: "manager" })
         .where(eq(workspaceMembers.userId, mgrSeed.userId))
-        .run();
-      env.db
+        ;
+      await env.db
         .update(workspaceMembers)
         .set({ workspaceId: owner.workspaceId, role: "member" })
         .where(eq(workspaceMembers.userId, targetSeed.userId))
-        .run();
+        ;
       // Re-login manager so session reflects new workspace + role.
       const mgr = await loginAs(env, "manager@test.local", "password123");
 

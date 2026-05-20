@@ -17,13 +17,13 @@ describe("classifyOperationType", () => {
     expect(classifyOperationType(op)).toBe(expected);
   });
 
-  it("falls back via keyword for unknown patterns", () => {
+  it("falls back via keyword for unknown patterns", async () => {
     expect(classifyOperationType("NewlyAddedReturnSomething")).toBe("refund");
     expect(classifyOperationType("XStorageY")).toBe("storage");
     expect(classifyOperationType("FooFulfillmentBar")).toBe("logistics");
   });
 
-  it("returns 'other' for empty / unrelated", () => {
+  it("returns 'other' for empty / unrelated", async () => {
     expect(classifyOperationType("")).toBe("other");
     expect(classifyOperationType("MarketplaceMarketingActionCostOperation")).toBe(
       "other",

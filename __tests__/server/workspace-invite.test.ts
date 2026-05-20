@@ -17,10 +17,10 @@ describe("workspace + invite routes", () => {
   let env: TestEnv;
   let owner: Awaited<ReturnType<typeof loginAs>>;
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     owner = await loginAs(env, "owner@test.local", "password");
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   const h = (cookie: string) => ({
     "Content-Type": "application/json",
@@ -143,11 +143,11 @@ describe("workspace + invite routes", () => {
         headers: h(owner.cookie),
         body: JSON.stringify({ email: "dup@test.local", role: "manager" }),
       });
-      const list = env.db
+      const list = await env.db
         .select()
         .from(workspaceInvites)
         .where(eq(workspaceInvites.email, "dup@test.local"))
-        .all();
+        ;
       expect(list).toHaveLength(1);
       expect(list[0].role).toBe("manager");
     });
@@ -188,11 +188,11 @@ describe("workspace + invite routes", () => {
           body: JSON.stringify({ email: "x@test.local", role: "member" }),
         })
         .then((r) => r.json() as Promise<{ token: string }>);
-      env.db
+      await env.db
         .update(workspaceInvites)
         .set({ usedAt: new Date() })
         .where(eq(workspaceInvites.token, created.token))
-        .run();
+        ;
       const res = await env.app.request(`/api/invites/${created.token}`);
       expect(res.status).toBe(410);
     });
@@ -220,25 +220,25 @@ describe("workspace + invite routes", () => {
       });
       expect(res.status).toBe(200);
 
-      const u = env.db
+      const [u] = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "newhire@test.local"))
-        .get();
+        ;
       expect(u).toBeTruthy();
-      const m = env.db
+      const [m] = await env.db
         .select()
         .from(workspaceMembers)
         .where(eq(workspaceMembers.userId, u!.id))
-        .get();
+        ;
       expect(m?.workspaceId).toBe(owner.workspaceId);
       expect(m?.role).toBe("manager");
 
-      const inv = env.db
+      const [inv] = await env.db
         .select()
         .from(workspaceInvites)
         .where(eq(workspaceInvites.token, created.token))
-        .get();
+        ;
       expect(inv?.usedAt).not.toBeNull();
     });
 
@@ -250,11 +250,11 @@ describe("workspace + invite routes", () => {
           body: JSON.stringify({ email: "exp@test.local", role: "member" }),
         })
         .then((r) => r.json() as Promise<{ token: string }>);
-      env.db
+      await env.db
         .update(workspaceInvites)
         .set({ expiresAt: new Date(Date.now() - 1000) })
         .where(eq(workspaceInvites.token, created.token))
-        .run();
+        ;
 
       const res = await env.app.request("/api/auth/register", {
         method: "POST",
@@ -292,7 +292,7 @@ describe("workspace + invite routes", () => {
   describe("POST /api/invites/:token/accept", () => {
     it("existing user accepts and joins workspace", async () => {
       // Manually create a user with no workspace.
-      const orphan = env.db
+      const [orphan] = await env.db
         .insert(users)
         .values({
           email: "orphan@test.local",
@@ -303,14 +303,14 @@ describe("workspace + invite routes", () => {
           updatedAt: new Date(),
         })
         .returning({ id: users.id })
-        .get();
+        ;
       // Set a real password we can log in with.
       const bcrypt = await import("bcryptjs");
-      env.db
+      await env.db
         .update(users)
         .set({ passwordHash: bcrypt.default.hashSync("password", 4) })
         .where(eq(users.id, orphan.id))
-        .run();
+        ;
 
       const cookie = await loginAndGetCookie(
         env.app,
@@ -331,11 +331,11 @@ describe("workspace + invite routes", () => {
         { method: "POST", headers: { Cookie: cookie } },
       );
       expect(res.status).toBe(200);
-      const m = env.db
+      const [m] = await env.db
         .select()
         .from(workspaceMembers)
         .where(eq(workspaceMembers.userId, orphan.id))
-        .get();
+        ;
       expect(m?.workspaceId).toBe(owner.workspaceId);
       expect(m?.role).toBe("member");
     });
@@ -392,11 +392,11 @@ describe("workspace + invite routes", () => {
       );
       expect(del.status).toBe(200);
 
-      const remaining = env.db
+      const [remaining] = await env.db
         .select()
         .from(workspaceInvites)
         .where(eq(workspaceInvites.token, created.token))
-        .get();
+        ;
       expect(remaining).toBeUndefined();
     });
   });
@@ -424,7 +424,7 @@ describe("workspace + invite routes", () => {
 
     it("member cannot manage invites or members", async () => {
       // Create a second user, invite + accept as member.
-      const stranger = env.db
+      const [stranger] = await env.db
         .insert(users)
         .values({
           email: "member@test.local",
@@ -438,7 +438,7 @@ describe("workspace + invite routes", () => {
           updatedAt: new Date(),
         })
         .returning({ id: users.id })
-        .get();
+        ;
       const sCookie = await loginAndGetCookie(
         env.app,
         "member@test.local",

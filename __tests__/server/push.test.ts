@@ -45,12 +45,12 @@ function makeMemStorage() {
   };
 }
 
-function joinSameWorkspace(env: TestEnv, workspaceId: number, userId: number) {
-  env.db
+async function joinSameWorkspace(env: TestEnv, workspaceId: number, userId: number) {
+  await env.db
     .delete(workspaceMembers)
     .where(eq(workspaceMembers.userId, userId))
-    .run();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId,
@@ -59,7 +59,7 @@ function joinSameWorkspace(env: TestEnv, workspaceId: number, userId: number) {
       status: "active",
       createdAt: new Date(),
     })
-    .run();
+    ;
 }
 
 describe("push subscriptions API", () => {
@@ -67,19 +67,19 @@ describe("push subscriptions API", () => {
   let user: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
     invalidateVapid();
     user = await loginAs(env, "push-user@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
     invalidateVapid();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("GET /api/push/public-key → null when not configured", async () => {
@@ -96,7 +96,7 @@ describe("push subscriptions API", () => {
   });
 
   it("GET /api/push/public-key returns the key when VAPID is set in DB", async () => {
-    env.db
+    await env.db
       .insert(vapidSettings)
       .values({
         id: 1,
@@ -105,7 +105,7 @@ describe("push subscriptions API", () => {
         subject: "mailto:test@x.com",
         updatedAt: new Date(),
       })
-      .run();
+      ;
     invalidateVapid();
     const res = await env.app.request("/api/push/public-key", {
       headers: { Cookie: user.cookie },
@@ -129,11 +129,11 @@ describe("push subscriptions API", () => {
       }),
     });
     expect(res.status).toBe(201);
-    const rows = env.db
+    const rows = await env.db
       .select()
       .from(pushSubscriptions)
       .where(eq(pushSubscriptions.userId, user.userId))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.endpoint).toContain("abc123");
     expect(rows[0]!.userAgent).toBe("Vitest");
@@ -158,11 +158,11 @@ describe("push subscriptions API", () => {
       }),
     });
     expect(res.status).toBe(200);
-    const rows = env.db
+    const rows = await env.db
       .select()
       .from(pushSubscriptions)
       .where(eq(pushSubscriptions.endpoint, endpoint))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.p256dhKey).toBe("new-p");
     expect(rows[0]!.authKey).toBe("new-a");
@@ -195,11 +195,10 @@ describe("push subscriptions API", () => {
       body: JSON.stringify({ endpoint }),
     });
     expect(evil.status).toBe(200); // success but didn't delete
-    let rows = env.db
+    let rows = await env.db
       .select()
       .from(pushSubscriptions)
-      .where(eq(pushSubscriptions.endpoint, endpoint))
-      .all();
+      .where(eq(pushSubscriptions.endpoint, endpoint));
     expect(rows).toHaveLength(1);
     // Owner can delete.
     const ok = await env.app.request("/api/push/subscriptions", {
@@ -208,11 +207,10 @@ describe("push subscriptions API", () => {
       body: JSON.stringify({ endpoint }),
     });
     expect(ok.status).toBe(200);
-    rows = env.db
+    rows = await env.db
       .select()
       .from(pushSubscriptions)
-      .where(eq(pushSubscriptions.endpoint, endpoint))
-      .all();
+      .where(eq(pushSubscriptions.endpoint, endpoint));
     expect(rows).toHaveLength(0);
   });
 
@@ -240,7 +238,7 @@ describe("push notifications audience selection", () => {
   let third: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
@@ -248,14 +246,14 @@ describe("push notifications audience selection", () => {
     owner = await loginAs(env, "pn-owner@x.com", "password");
     mate = await loginAs(env, "pn-mate@x.com", "password");
     third = await loginAs(env, "pn-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("DM: includes the other participant when offline", async () => {
@@ -338,16 +336,16 @@ describe("sysadmin VAPID admin", () => {
   let regular: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     invalidateVapid();
     admin = await loginAs(env, "admin@x.com", "password", "admin");
     regular = await loginAs(env, "regular@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     invalidateVapid();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("non-sysadmin gets 403 on GET /admin/vapid", async () => {

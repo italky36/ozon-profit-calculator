@@ -58,16 +58,16 @@ describe("Inline quotes (Telegram/WhatsApp-style reply)", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(memStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "q-owner@x.com", "password");
     mate = await loginAs(env, "q-mate@x.com", "password");
-    env.db
+    await env.db
       .delete(workspaceMembers)
       .where(eq(workspaceMembers.userId, mate.userId))
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(workspaceMembers)
       .values({
         userId: mate.userId,
@@ -76,16 +76,16 @@ describe("Inline quotes (Telegram/WhatsApp-style reply)", () => {
         status: "active",
         createdAt: new Date(),
       })
-      .run();
+      ;
     const list = await env.app.request("/api/chat/channels", {
       headers: { Cookie: owner.cookie },
     });
     channelId = ((await list.json()) as Array<{ id: number }>)[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("stores quotedMessageId + returns quotedMessage in the response", async () => {
@@ -267,7 +267,7 @@ describe("Inline quotes (Telegram/WhatsApp-style reply)", () => {
     );
     const replyId = ((await replyRes.json()) as { id: number }).id;
     // Hard-delete bypassing soft-delete (simulating a future admin op).
-    env.db.delete(chatMessages).where(eq(chatMessages.id, firstId)).run();
+    await env.db.delete(chatMessages).where(eq(chatMessages.id, firstId));
     // Reply should remain; quoted_message_id NULLed by ON DELETE SET NULL.
     const list = await env.app.request(
       `/api/chat/channels/${channelId}/messages`,

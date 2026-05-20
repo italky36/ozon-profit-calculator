@@ -453,8 +453,9 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         memberCount: Number(r.member_count),
         shopCount: Number(r.shop_count),
         ownerEmail: r.owner_email ?? null,
-        createdAt: r.created_at.getTime(),
-        suspendedAt: r.suspended_at?.getTime() ?? null,
+        createdAt: new Date(r.created_at).getTime(),
+        suspendedAt:
+          r.suspended_at == null ? null : new Date(r.suspended_at).getTime(),
       })),
     );
   });

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   chatCallParticipants,
   chatCalls,
@@ -37,16 +37,16 @@ const j = (cookie: string) => ({
   Cookie: cookie,
 });
 
-function joinSameWorkspace(
+async function joinSameWorkspace(
   env: TestEnv,
   workspaceId: number,
   userId: number,
-): void {
-  env.db
+): Promise<void> {
+  await env.db
     .delete(workspaceMembers)
     .where(eq(workspaceMembers.userId, userId))
-    .run();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId,
@@ -55,7 +55,7 @@ function joinSameWorkspace(
       status: "active",
       createdAt: new Date(),
     })
-    .run();
+    ;
 }
 
 describe("ICE servers endpoint", () => {
@@ -63,15 +63,15 @@ describe("ICE servers endpoint", () => {
   let owner: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPubSub();
     _resetCalls();
     owner = await loginAs(env, "ice-owner@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
     _resetCalls();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("GET /api/chat/ice returns the seeded STUN entry for any logged-in user", async () => {
@@ -87,7 +87,7 @@ describe("ICE servers endpoint", () => {
   it("GET /api/chat/ice omits disabled rows", async () => {
     // Seed migration already inserted one stun entry; mark it disabled and
     // confirm the API falls back to the public-STUN default.
-    env.sqlite.exec(`UPDATE ice_servers SET enabled = 0`);
+    await env.db.execute(sql`UPDATE ice_servers SET enabled = false`);
     const res = await env.app.request("/api/chat/ice", {
       headers: { Cookie: owner.cookie },
     });
@@ -106,7 +106,7 @@ describe("ICE servers endpoint", () => {
   });
 
   it("sysadmin can add a TURN entry and toggle it visible to clients", async () => {
-    const sysCookie = adminSessionCookie(env);
+    const sysCookie = await adminSessionCookie(env);
     const create = await env.app.request("/api/admin/ice", {
       method: "POST",
       headers: j(sysCookie),
@@ -132,7 +132,7 @@ describe("ICE servers endpoint", () => {
   });
 
   it("rejects bad URL schemes", async () => {
-    const sysCookie = adminSessionCookie(env);
+    const sysCookie = await adminSessionCookie(env);
     const res = await env.app.request("/api/admin/ice", {
       method: "POST",
       headers: j(sysCookie),
@@ -150,14 +150,14 @@ describe("Call signaling routing", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPubSub();
     _resetCalls();
     owner = await loginAs(env, "call-owner@x.com", "password");
     mate = await loginAs(env, "call-mate@x.com", "password");
     stranger = await loginAs(env, "call-stranger@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, stranger.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, stranger.userId);
     // Create a DM channel via the API so chat_channel_members is correct.
     const dm = await env.app.request("/api/chat/dms", {
       method: "POST",
@@ -167,10 +167,10 @@ describe("Call signaling routing", () => {
     expect([200, 201]).toContain(dm.status);
     channelId = ((await dm.json()) as { id: number }).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
     _resetCalls();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("createCall publishes call.incoming only to invitees, not to stranger", async () => {
@@ -212,18 +212,18 @@ describe("Call signaling routing", () => {
       inviteeUserIds: [mate.userId],
       onMissed: () => {},
     });
-    const call = env.db
+    const [call] = await env.db
       .select()
       .from(chatCalls)
       .where(eq(chatCalls.id, callId))
-      .get();
+      ;
     expect(call?.callType).toBe("video");
     expect(call?.endedAt).toBeNull();
-    const parts = env.db
+    const parts = await env.db
       .select()
       .from(chatCallParticipants)
       .where(eq(chatCallParticipants.callId, callId))
-      .all();
+      ;
     expect(parts).toHaveLength(2);
   });
 
@@ -249,11 +249,11 @@ describe("Call signaling routing", () => {
     expect(ok).toBe(true);
     expect(mateEvents.some((e) => e.type === "call.accepted")).toBe(true);
     expect(strangerEvents.some((e) => e.type === "call.accepted")).toBe(false);
-    const mateRow = env.db
+    const [mateRow] = await env.db
       .select()
       .from(chatCallParticipants)
       .where(eq(chatCallParticipants.userId, mate.userId))
-      .get();
+      ;
     expect(mateRow?.joinedAt).not.toBeNull();
   });
 
@@ -288,11 +288,11 @@ describe("Call signaling routing", () => {
       byUserId: owner.userId,
       reason: "completed",
     });
-    const call = env.db
+    const [call] = await env.db
       .select()
       .from(chatCalls)
       .where(eq(chatCalls.id, callId))
-      .get();
+      ;
     expect(call?.endedAt).not.toBeNull();
     expect(call?.endReason).toBe("completed");
     expect(getActiveCall(callId)).toBeUndefined();
@@ -328,20 +328,20 @@ describe("Missed-call: push + system message helpers", () => {
   let mate: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPubSub();
     _resetCalls();
     owner = await loginAs(env, "miss-owner@x.com", "password");
     mate = await loginAs(env, "miss-mate@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
     _resetCalls();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
-  it("callSystemMessageBody formats outcomes in Russian", () => {
+  it("callSystemMessageBody formats outcomes in Russian", async () => {
     const base: CallEndSummary = {
       callId: 1,
       channelId: 1,
@@ -369,7 +369,7 @@ describe("Missed-call: push + system message helpers", () => {
     // Seed a push subscription for the invitee so sendPushToUsers has work
     // to do. The push call itself fails (no VAPID configured) — we just
     // assert the row selection logic.
-    env.db
+    await env.db
       .insert(pushSubscriptions)
       .values({
         userId: mate.userId,
@@ -378,8 +378,8 @@ describe("Missed-call: push + system message helpers", () => {
         authKey: "a",
         createdAt: new Date(),
       })
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(pushSubscriptions)
       .values({
         userId: owner.userId,
@@ -388,7 +388,7 @@ describe("Missed-call: push + system message helpers", () => {
         authKey: "a",
         createdAt: new Date(),
       })
-      .run();
+      ;
     // Simulate the missed-call by directly invoking the helper. We don't
     // actually send (no VAPID), but the function shouldn't throw, and it
     // should leave the initiator's subscription untouched. The internal
@@ -413,7 +413,7 @@ describe("Missed-call: push + system message helpers", () => {
     );
     // Both subscription rows still exist (no 410 from a real push service
     // since we never hit the network without VAPID).
-    const subs = env.db.select().from(pushSubscriptions).all();
+    const subs = await env.db.select().from(pushSubscriptions);
     expect(subs.length).toBe(2);
   });
 });
@@ -426,14 +426,14 @@ describe("Group calls (Stage 5.5)", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPubSub();
     _resetCalls();
     owner = await loginAs(env, "g-owner@x.com", "password");
     mate = await loginAs(env, "g-mate@x.com", "password");
     third = await loginAs(env, "g-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
     // Create an open channel in owner's workspace.
     const res = await env.app.request("/api/chat/channels", {
       method: "POST",
@@ -443,10 +443,10 @@ describe("Group calls (Stage 5.5)", () => {
     expect(res.status).toBe(201);
     channelId = ((await res.json()) as { id: number }).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
     _resetCalls();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("acceptCall publishes call.peer-joined with the connectedUserIds snapshot", async () => {
@@ -543,11 +543,11 @@ describe("Group calls (Stage 5.5)", () => {
       byUserId: third.userId,
       reason: "declined",
     });
-    const persisted = env.db
+    const [persisted] = await env.db
       .select()
       .from(chatCalls)
       .where(eq(chatCalls.id, callId))
-      .get();
+      ;
     expect(persisted?.endReason).toBe("declined");
     expect(getActiveCall(callId)).toBeUndefined();
   });

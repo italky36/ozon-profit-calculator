@@ -50,16 +50,16 @@ interface ChannelOut {
   peer: { userId: number; email: string; fullName: string } | null;
 }
 
-function joinSameWorkspace(
+async function joinSameWorkspace(
   env: TestEnv,
   workspaceId: number,
   userId: number,
-): void {
-  env.db
+): Promise<void> {
+  await env.db
     .delete(workspaceMembers)
     .where(eq(workspaceMembers.userId, userId))
-    .run();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId,
@@ -68,7 +68,7 @@ function joinSameWorkspace(
       status: "active",
       createdAt: new Date(),
     })
-    .run();
+    ;
 }
 
 describe("chat DMs: find-or-create", () => {
@@ -77,17 +77,17 @@ describe("chat DMs: find-or-create", () => {
   let mate: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "dm-owner@x.com", "password");
     mate = await loginAs(env, "dm-mate@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("creates a DM channel with type='dm' + peer info", async () => {
@@ -171,15 +171,15 @@ describe("chat DMs: visibility / access", () => {
   let dmId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "dmv-owner@x.com", "password");
     mate = await loginAs(env, "dmv-mate@x.com", "password");
     third = await loginAs(env, "dmv-third@x.com", "password");
     // All three in the same workspace.
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
     const res = await env.app.request("/api/chat/dms", {
       method: "POST",
       headers: j(owner.cookie),
@@ -187,10 +187,10 @@ describe("chat DMs: visibility / access", () => {
     });
     dmId = ((await res.json()) as { id: number }).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("GET /channels returns the DM for the two members, hides it from the third", async () => {
@@ -262,14 +262,14 @@ describe("chat DMs: pubsub recipient filter", () => {
   let dmId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "dmp-owner@x.com", "password");
     mate = await loginAs(env, "dmp-mate@x.com", "password");
     third = await loginAs(env, "dmp-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
     const res = await env.app.request("/api/chat/dms", {
       method: "POST",
       headers: j(owner.cookie),
@@ -277,13 +277,13 @@ describe("chat DMs: pubsub recipient filter", () => {
     });
     dmId = ((await res.json()) as { id: number }).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
-  it("publish() with allowedUserIds delivers only to whitelisted subscribers", () => {
+  it("publish() with allowedUserIds delivers only to whitelisted subscribers", async () => {
     const ownerEvents: ChatServerEvent[] = [];
     const mateEvents: ChatServerEvent[] = [];
     const thirdEvents: ChatServerEvent[] = [];

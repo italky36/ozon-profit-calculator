@@ -56,16 +56,16 @@ describe("chat: workspace channel lifecycle", () => {
   let mem: ReturnType<typeof makeMemStorage>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     mem = makeMemStorage();
     setFileStorage(mem.impl);
     _resetPubSub();
     owner = await loginAs(env, "owner@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("backfill creates #общий channel for new workspace", async () => {
@@ -88,11 +88,11 @@ describe("chat: workspace channel lifecycle", () => {
     // demote member's own workspace to use them as a member elsewhere — but
     // simpler: just test the gate in their OWN workspace. Default role from
     // loginAs is owner. So we manually switch their role.
-    env.db
+    await env.db
       .update(workspaceMembers)
       .set({ role: "member" })
       .where(eq(workspaceMembers.userId, member.userId))
-      .run();
+      ;
 
     const ok = await env.app.request("/api/chat/channels", {
       method: "POST",
@@ -161,7 +161,7 @@ describe("chat: cross-workspace isolation", () => {
   let aChannelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     a = await loginAs(env, "a-owner@x.com", "password");
@@ -178,10 +178,10 @@ describe("chat: cross-workspace isolation", () => {
       body: JSON.stringify({ body: "SECRET-FROM-A" }),
     });
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("B cannot GET A's channel messages (404)", async () => {
@@ -223,7 +223,7 @@ describe("chat: cross-workspace isolation", () => {
     expect(list.map((c) => c.id)).not.toContain(aChannelId);
   });
 
-  it("pub/sub fans out only to subscribers of the same workspace", () => {
+  it("pub/sub fans out only to subscribers of the same workspace", async () => {
     const aEvents: ChatServerEvent[] = [];
     const bEvents: ChatServerEvent[] = [];
     subscribe(a.workspaceId, (e) => aEvents.push(e), a.userId);
@@ -248,18 +248,18 @@ describe("chat: messages & attachments", () => {
   let mem: ReturnType<typeof makeMemStorage>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     mem = makeMemStorage();
     setFileStorage(mem.impl);
     _resetPubSub();
     owner = await loginAs(env, "owner@chat.com", "password");
     other = await loginAs(env, "other@chat.com", "password");
     // Put `other` into owner's workspace as a member.
-    env.db
+    await env.db
       .delete(workspaceMembers)
       .where(eq(workspaceMembers.userId, other.userId))
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(workspaceMembers)
       .values({
         userId: other.userId,
@@ -268,17 +268,17 @@ describe("chat: messages & attachments", () => {
         status: "active",
         createdAt: new Date(),
       })
-      .run();
+      ;
     const list = await env.app.request("/api/chat/channels", {
       headers: { Cookie: owner.cookie },
     });
     const channels = (await list.json()) as Array<{ id: number }>;
     channelId = channels[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("posts a text message and returns author identity", async () => {
@@ -371,11 +371,11 @@ describe("chat: messages & attachments", () => {
       headers: { Cookie: owner.cookie },
     });
     expect(ok.status).toBe(200);
-    const stored = env.db
+    const [stored] = await env.db
       .select()
       .from(chatMessages)
       .where(eq(chatMessages.id, msg.id))
-      .get();
+      ;
     expect(stored?.deletedAt).not.toBeNull();
   });
 
@@ -525,7 +525,7 @@ describe("chat: pub/sub event delivery", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "owner@evt.com", "password");
@@ -535,10 +535,10 @@ describe("chat: pub/sub event delivery", () => {
     const channels = (await list.json()) as Array<{ id: number }>;
     channelId = channels[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("POST message publishes a message.created event to the workspace bus", async () => {
@@ -556,13 +556,13 @@ describe("chat: pub/sub event delivery", () => {
 
 describe("chat: sysadmin has no chat access", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
     _resetPubSub();
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("sysadmin GET /api/chat/channels → 403", async () => {
@@ -581,18 +581,18 @@ describe("chat: sysadmin has no chat access", () => {
 
 describe("chat: backfill seeded channel for new workspaces", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   it("a workspace created mid-test has #общий (runtime seed)", async () => {
     const user = await loginAs(env, "fresh@x.com", "password");
-    const row = env.db
+    const [row] = await env.db
       .select()
       .from(chatChannels)
       .where(eq(chatChannels.workspaceId, user.workspaceId))
-      .get();
+      ;
     expect(row).not.toBeNull();
     expect(row?.name).toBe("общий");
     expect(row?.isDefault).toBe(true);

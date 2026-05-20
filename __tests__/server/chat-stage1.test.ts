@@ -53,17 +53,17 @@ describe("chat stage 1.1 — edit messages", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(memStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "edit-owner@x.com", "password");
     member = await loginAs(env, "edit-member@x.com", "password");
     // Поместить member в workspace owner'а как member.
-    env.db
+    await env.db
       .delete(workspaceMembers)
       .where(eq(workspaceMembers.userId, member.userId))
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(workspaceMembers)
       .values({
         userId: member.userId,
@@ -72,16 +72,16 @@ describe("chat stage 1.1 — edit messages", () => {
         status: "active",
         createdAt: new Date(),
       })
-      .run();
+      ;
     const list = await env.app.request("/api/chat/channels", {
       headers: { Cookie: owner.cookie },
     });
     channelId = ((await list.json()) as Array<{ id: number }>)[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   async function postText(cookie: string, body: string): Promise<number> {
@@ -152,16 +152,16 @@ describe("chat stage 1.2 — reactions", () => {
   let messageId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(memStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "rx-owner@x.com", "password");
     member = await loginAs(env, "rx-member@x.com", "password");
-    env.db
+    await env.db
       .delete(workspaceMembers)
       .where(eq(workspaceMembers.userId, member.userId))
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(workspaceMembers)
       .values({
         userId: member.userId,
@@ -170,7 +170,7 @@ describe("chat stage 1.2 — reactions", () => {
         status: "active",
         createdAt: new Date(),
       })
-      .run();
+      ;
     const list = await env.app.request("/api/chat/channels", {
       headers: { Cookie: owner.cookie },
     });
@@ -185,10 +185,10 @@ describe("chat stage 1.2 — reactions", () => {
     );
     messageId = ((await posted.json()) as { id: number }).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("add then remove reaction toggles count", async () => {
@@ -232,11 +232,11 @@ describe("chat stage 1.2 — reactions", () => {
       },
     );
     expect(res.status).toBe(200);
-    const rows = env.db
+    const rows = await env.db
       .select()
       .from(chatMessageReactions)
       .where(eq(chatMessageReactions.messageId, messageId))
-      .all();
+      ;
     const tada = rows.filter((r) => r.emoji === "🎉");
     expect(tada).toHaveLength(1);
   });
@@ -279,13 +279,13 @@ describe("chat stage 1.4 — presence refcount", () => {
   let env: TestEnv;
   let owner: Awaited<ReturnType<typeof loginAs>>;
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPresence();
     owner = await loginAs(env, "pres@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPresence();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("attach/detach refcount: only last detach flips to offline", async () => {
@@ -319,15 +319,15 @@ describe("chat stage 1.3 — typing TTL", () => {
   let owner: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     _resetPubSub();
     _resetTyping();
     owner = await loginAs(env, "type@x.com", "password");
   });
-  afterEach(() => {
+  afterEach(async () => {
     _resetPubSub();
     _resetTyping();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("bumpTyping publishes typing.start once, clearTyping publishes typing.stop", async () => {
@@ -375,17 +375,17 @@ describe("chat stage 1.5 — mentions", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(memStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "mention-owner@x.com", "password");
     // Создадим member с осмысленным fullName для мэтчинга.
     member = await loginAs(env, "ivan.petrov@x.com", "password");
-    env.db
+    await env.db
       .delete(workspaceMembers)
       .where(eq(workspaceMembers.userId, member.userId))
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(workspaceMembers)
       .values({
         userId: member.userId,
@@ -394,23 +394,23 @@ describe("chat stage 1.5 — mentions", () => {
         status: "active",
         createdAt: new Date(),
       })
-      .run();
+      ;
     // Обновим fullName в DB для member.
     const { users } = await import("../../server/db/schema");
-    env.db
+    await env.db
       .update(users)
       .set({ fullName: "Иван Петров" })
       .where(eq(users.id, member.userId))
-      .run();
+      ;
     const list = await env.app.request("/api/chat/channels", {
       headers: { Cookie: owner.cookie },
     });
     channelId = ((await list.json()) as Array<{ id: number }>)[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("parses @ivan.petrov via email prefix → persists mention row", async () => {
@@ -429,11 +429,11 @@ describe("chat stage 1.5 — mentions", () => {
     };
     expect(out.mentions).toHaveLength(1);
     expect(out.mentions[0]!.userId).toBe(member.userId);
-    const rows = env.db
+    const rows = await env.db
       .select()
       .from(chatMessageMentions)
       .where(eq(chatMessageMentions.messageId, out.id))
-      .all();
+      ;
     expect(rows).toHaveLength(1);
   });
 
@@ -477,11 +477,10 @@ describe("chat stage 1.5 — mentions", () => {
     );
     const id = ((await posted.json()) as { id: number }).id;
     expect(
-      env.db
+      await env.db
         .select()
         .from(chatMessageMentions)
-        .where(eq(chatMessageMentions.messageId, id))
-        .all(),
+        .where(eq(chatMessageMentions.messageId, id)),
     ).toHaveLength(1);
     await env.app.request(`/api/chat/messages/${id}`, {
       method: "PATCH",
@@ -489,11 +488,10 @@ describe("chat stage 1.5 — mentions", () => {
       body: JSON.stringify({ body: "no mentions now" }),
     });
     expect(
-      env.db
+      await env.db
         .select()
         .from(chatMessageMentions)
-        .where(eq(chatMessageMentions.messageId, id))
-        .all(),
+        .where(eq(chatMessageMentions.messageId, id)),
     ).toHaveLength(0);
   });
 });
@@ -504,7 +502,7 @@ describe("chat stage 1.6 — FTS5 search", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(memStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "search@x.com", "password");
@@ -513,10 +511,10 @@ describe("chat stage 1.6 — FTS5 search", () => {
     });
     channelId = ((await list.json()) as Array<{ id: number }>)[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   async function post(body: string) {
@@ -555,11 +553,12 @@ describe("chat stage 1.6 — FTS5 search", () => {
 
   it("deleted messages are excluded", async () => {
     await post("findable text");
-    const msg = env.db
-      .select()
-      .from(chatMessages)
-      .where(eq(chatMessages.channelId, channelId))
-      .all()[0]!;
+    const msg = (
+      await env.db
+        .select()
+        .from(chatMessages)
+        .where(eq(chatMessages.channelId, channelId))
+    )[0]!;
     await env.app.request(`/api/chat/messages/${msg.id}`, {
       method: "DELETE",
       headers: { Cookie: owner.cookie },
@@ -618,18 +617,18 @@ describe("chat stage 1.6 — FTS5 search", () => {
 describe("chat stage 1 — channel default still seeded", () => {
   // Smoke-проверка что миграции 0029-0031 не сломали backfill миграции 0028.
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   it("new workspace still gets #общий via ensureDefaultChannel", async () => {
     const u = await loginAs(env, "smoke@x.com", "password");
-    const row = env.db
+    const [row] = await env.db
       .select()
       .from(chatChannels)
       .where(eq(chatChannels.workspaceId, u.workspaceId))
-      .get();
+      ;
     expect(row?.name).toBe("общий");
   });
 });

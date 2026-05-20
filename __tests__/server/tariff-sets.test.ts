@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import {
   logisticsClusterTariffSets,
   logisticsClusterTariffs,
+  shops,
 } from "../../server/db/schema";
 import * as XLSX from "xlsx";
 import {
@@ -55,11 +56,11 @@ describe("cluster tariff sets", () => {
   let user: { cookie: string; userId: number; shopId: number };
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     admin = await loginAs(env, "admin@test.local", "password", "admin");
     user = await loginAs(env, "user@test.local", "password", "user");
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   it("GET /sets returns globals + own personal", async () => {
     // Admin uploads a global, user uploads a personal one.
@@ -149,7 +150,7 @@ describe("cluster tariff sets", () => {
 
   it("resolveTariffSetId prefers shop's own selection over latest global", async () => {
     // Two globals — newer should win as default.
-    const oldGlobal = env.db
+    const [oldGlobal] = await env.db
       .insert(logisticsClusterTariffSets)
       .values({
         workspaceId: null,
@@ -158,8 +159,8 @@ describe("cluster tariff sets", () => {
         createdAt: new Date(),
       })
       .returning()
-      .get();
-    const newGlobal = env.db
+      ;
+    const [newGlobal] = await env.db
       .insert(logisticsClusterTariffSets)
       .values({
         workspaceId: null,
@@ -168,20 +169,21 @@ describe("cluster tariff sets", () => {
         createdAt: new Date(),
       })
       .returning()
-      .get();
+      ;
     void oldGlobal;
 
     expect(await resolveTariffSetId(env.db, user.shopId)).toBe(newGlobal.id);
 
     // Now user pins the old one.
-    env.sqlite
-      .prepare("UPDATE shops SET tariff_set_id = ? WHERE id = ?")
-      .run(oldGlobal.id, user.shopId);
+    await env.db
+      .update(shops)
+      .set({ tariffSetId: oldGlobal.id })
+      .where(eq(shops.id, user.shopId));
     expect(await resolveTariffSetId(env.db, user.shopId)).toBe(oldGlobal.id);
   });
 
   it("resolveTariffSetId rejects pointing at another workspace's personal set", async () => {
-    const adminPersonal = env.db
+    const [adminPersonal] = await env.db
       .insert(logisticsClusterTariffSets)
       .values({
         workspaceId: admin.workspaceId,
@@ -190,11 +192,12 @@ describe("cluster tariff sets", () => {
         createdAt: new Date(),
       })
       .returning()
-      .get();
+      ;
     // Pin user's shop to admin's personal set (would happen through bad client).
-    env.sqlite
-      .prepare("UPDATE shops SET tariff_set_id = ? WHERE id = ?")
-      .run(adminPersonal.id, user.shopId);
+    await env.db
+      .update(shops)
+      .set({ tariffSetId: adminPersonal.id })
+      .where(eq(shops.id, user.shopId));
     // Resolver should fall back to global (or null if no globals).
     const resolved = await resolveTariffSetId(env.db, user.shopId);
     expect(resolved).not.toBe(adminPersonal.id);
@@ -211,22 +214,22 @@ describe("cluster tariff sets", () => {
       ],
     });
     const set = (await created.json()) as { id: number };
-    const before = env.db
+    const before = await env.db
       .select()
       .from(logisticsClusterTariffs)
       .where(eq(logisticsClusterTariffs.setId, set.id))
-      .all();
+      ;
     expect(before).toHaveLength(2);
 
     await env.app.request(`/api/refs/cluster-logistics/sets/${set.id}`, {
       method: "DELETE",
       headers: { Cookie: user.cookie },
     });
-    const after = env.db
+    const after = await env.db
       .select()
       .from(logisticsClusterTariffs)
       .where(eq(logisticsClusterTariffs.setId, set.id))
-      .all();
+      ;
     expect(after).toHaveLength(0);
   });
 });

@@ -4,6 +4,7 @@ import { products, type ProductRow as DbProduct } from "../db/schema";
 import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
 import { resolveShopId, visibleShopIds } from "../middleware/session";
+import { isUniqueViolation } from "../lib/pgErrors";
 import type {
   ClustersCount,
   IncomingVatRate,
@@ -242,11 +243,10 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         updatedAt: now,
       });
     } catch (e) {
-      const msg = (e as Error).message;
-      if (msg.includes("UNIQUE")) {
+      if (isUniqueViolation(e)) {
         return c.json({ error: "articleId already exists" }, 409);
       }
-      return c.json({ error: msg }, 500);
+      return c.json({ error: (e as Error).message }, 500);
     }
     const [row] = await db.select().from(products).where(eq(products.id, id));
     return c.json(dbToRow(row), 201);
@@ -296,11 +296,10 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         .set({ ...inputToColumns(input), updatedAt: new Date() })
         .where(eq(products.id, id));
     } catch (e) {
-      const msg = (e as Error).message;
-      if (msg.includes("UNIQUE")) {
+      if (isUniqueViolation(e)) {
         return c.json({ error: "articleId already exists" }, 409);
       }
-      return c.json({ error: msg }, 500);
+      return c.json({ error: (e as Error).message }, 500);
     }
     const [row] = await db.select().from(products).where(eq(products.id, id));
     return c.json(dbToRow(row));

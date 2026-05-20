@@ -12,14 +12,14 @@ const SYSADMIN_COOKIE = /ozon_calc_sysadmin_session=/;
 
 describe("auth scope isolation", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   describe("login scope gates", () => {
     it("workspace user logging in via workspace scope sets workspace cookie", async () => {
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: {
@@ -35,7 +35,7 @@ describe("auth scope isolation", () => {
     });
 
     it("sysadmin logging in via sysadmin scope sets sysadmin cookie", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: {
@@ -51,7 +51,7 @@ describe("auth scope isolation", () => {
     });
 
     it("sysadmin attempting workspace scope is rejected with 403", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: {
@@ -66,7 +66,7 @@ describe("auth scope isolation", () => {
     });
 
     it("regular user attempting sysadmin scope is rejected with 403", async () => {
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: {
@@ -81,7 +81,7 @@ describe("auth scope isolation", () => {
     });
 
     it("default scope (no header) treats request as workspace", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -94,7 +94,7 @@ describe("auth scope isolation", () => {
 
   describe("session middleware scope routing", () => {
     it("workspace scope ignores sysadmin cookie (returns 401 for /auth/me)", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
       const sysadminCookie = await loginAndGetCookie(
         env.app,
         "admin@x.com",
@@ -109,7 +109,7 @@ describe("auth scope isolation", () => {
     });
 
     it("sysadmin scope ignores workspace cookie (returns 401 for /auth/me)", async () => {
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const workspaceCookie = await loginAndGetCookie(
         env.app,
         "u@x.com",
@@ -125,8 +125,8 @@ describe("auth scope isolation", () => {
     it("workspace scope reads workspace cookie even when sysadmin cookie is also set", async () => {
       // Two distinct accounts; both cookies sent simultaneously (browser
       // scenario where /5173 and /5174 share localhost).
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const sysadminCookie = await loginAndGetCookie(
         env.app,
         "admin@x.com",
@@ -150,8 +150,8 @@ describe("auth scope isolation", () => {
     });
 
     it("sysadmin scope reads sysadmin cookie even when workspace cookie is also set", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const sysadminCookie = await loginAndGetCookie(
         env.app,
         "admin@x.com",
@@ -177,7 +177,7 @@ describe("auth scope isolation", () => {
 
   describe("logout scope routing", () => {
     it("workspace logout clears workspace cookie only", async () => {
-      createUserDirect(env.db, "u@x.com", "password123", "user");
+      await createUserDirect(env.db, "u@x.com", "password123", "user");
       const cookie = await loginAndGetCookie(env.app, "u@x.com", "password123");
 
       const res = await env.app.request("/api/auth/logout", {
@@ -191,7 +191,7 @@ describe("auth scope isolation", () => {
     });
 
     it("sysadmin logout clears sysadmin cookie only", async () => {
-      createUserDirect(env.db, "admin@x.com", "password123", "admin");
+      await createUserDirect(env.db, "admin@x.com", "password123", "admin");
       const cookie = await loginAndGetCookie(
         env.app,
         "admin@x.com",

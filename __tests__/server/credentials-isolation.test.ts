@@ -14,10 +14,10 @@ import {
  * a `hasCredentials` boolean. */
 describe("credentials cross-workspace isolation", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   /** Workspace A's owner sets credentials, then workspace B's owner tries to
    * see / mutate them. */
@@ -26,7 +26,7 @@ describe("credentials cross-workspace isolation", () => {
     const b = await loginAs(env, "owner-b@x.com", "password123");
     // Set creds on A's shop directly via DB to keep the test independent of
     // PUT-flow bugs (we test reads & mutations from B in isolation).
-    env.db
+    await env.db
       .update(shops)
       .set({
         ozonClientId: "A-client-secret",
@@ -35,7 +35,7 @@ describe("credentials cross-workspace isolation", () => {
         updatedAt: new Date(),
       })
       .where(eq(shops.id, a.shopId))
-      .run();
+      ;
     return { a, b };
   }
 

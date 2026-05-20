@@ -60,7 +60,7 @@ async function addMemberToWorkspace(
 ): Promise<{ userId: number; cookie: string }> {
   const now = new Date();
   const hash = bcrypt.hashSync(password, 4);
-  const u = env.db
+  const [u] = await env.db
     .insert(users)
     .values({
       email,
@@ -71,8 +71,8 @@ async function addMemberToWorkspace(
       updatedAt: now,
     })
     .returning({ id: users.id })
-    .get();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId,
@@ -81,7 +81,7 @@ async function addMemberToWorkspace(
       status: "active",
       createdAt: now,
     })
-    .run();
+    ;
   const cookie = await loginAndGetCookie(env.app, email, password);
   return { userId: u.id, cookie };
 }
@@ -95,9 +95,9 @@ describe("shop assignment + per-user overrides", () => {
   let env: TestEnv;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   /** Create owner with two shops and a single member (Petya) assigned to shop1
    * only. Returns ids needed by individual tests. */
@@ -179,11 +179,11 @@ describe("shop assignment + per-user overrides", () => {
     expect(putRes.status).toBe(200);
 
     // Override must land in shop_user_settings.
-    const overrideRow = env.db
+    const [overrideRow] = await env.db
       .select()
       .from(shopUserSettings)
       .where(eq(shopUserSettings.userId, petya.userId))
-      .get();
+      ;
     expect(overrideRow).toBeDefined();
     expect(overrideRow!.taxSettings?.taxSystem).toBe("УСН Доходы");
 
@@ -217,11 +217,10 @@ describe("shop assignment + per-user overrides", () => {
       body: JSON.stringify({ ...customTax, shopId: shop1Id }),
     });
     expect(
-      env.db
+      (await env.db
         .select()
         .from(shopUserSettings)
-        .where(eq(shopUserSettings.userId, petya.userId))
-        .get()?.taxSettings,
+        .where(eq(shopUserSettings.userId, petya.userId)))[0]?.taxSettings,
     ).not.toBeNull();
 
     // 2. submit shop default exactly → override row's tax_settings is cleared.
@@ -230,11 +229,11 @@ describe("shop assignment + per-user overrides", () => {
       headers: headersFor(petya.cookie),
       body: JSON.stringify({ ...SAMPLE_TAX, shopId: shop1Id }),
     });
-    const row = env.db
+    const [row] = await env.db
       .select()
       .from(shopUserSettings)
       .where(eq(shopUserSettings.userId, petya.userId))
-      .get();
+      ;
     expect(row?.taxSettings).toBeNull();
   });
 
@@ -245,11 +244,11 @@ describe("shop assignment + per-user overrides", () => {
       headers: headersFor(petya.cookie),
       body: JSON.stringify({ ...SAMPLE_TAX, usnIncomeRate: 0.5, shopId: shop1Id }),
     });
-    const before = env.db
+    const before = await env.db
       .select()
       .from(shopUserSettings)
       .where(eq(shopUserSettings.userId, petya.userId))
-      .all();
+      ;
     expect(before).toHaveLength(1);
 
     const res = await env.app.request(
@@ -257,11 +256,11 @@ describe("shop assignment + per-user overrides", () => {
       { method: "POST", headers: headersFor(petya.cookie) },
     );
     expect(res.status).toBe(200);
-    const after = env.db
+    const after = await env.db
       .select()
       .from(shopUserSettings)
       .where(eq(shopUserSettings.userId, petya.userId))
-      .all();
+      ;
     expect(after).toHaveLength(0);
   });
 
@@ -304,7 +303,7 @@ describe("shop assignment + per-user overrides", () => {
 
   it("finance reads/writes are per-user in a shared shop", async () => {
     const { owner, petya, shop1Id } = await setupTeam();
-    env.db
+    await env.db
       .insert(financeTransactions)
       .values({
         shopId: shop1Id,
@@ -319,8 +318,8 @@ describe("shop assignment + per-user overrides", () => {
         type: "sale",
         raw: {},
       })
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(financeTransactions)
       .values({
         shopId: shop1Id,
@@ -335,7 +334,7 @@ describe("shop assignment + per-user overrides", () => {
         type: "sale",
         raw: {},
       })
-      .run();
+      ;
 
     const ownerRows = (await (
       await env.app.request("/api/finance/transactions", {
@@ -370,7 +369,7 @@ describe("shop assignment + per-user overrides", () => {
       headers: headersFor(petya.cookie),
       body: JSON.stringify({ ...sampleInput("PETYA-SKU"), shopId: shop1Id }),
     });
-    env.db
+    await env.db
       .insert(financeTransactions)
       .values({
         shopId: shop1Id,
@@ -385,7 +384,7 @@ describe("shop assignment + per-user overrides", () => {
         type: "sale",
         raw: {},
       })
-      .run();
+      ;
     await env.app.request("/api/settings", {
       method: "PUT",
       headers: headersFor(petya.cookie),
@@ -400,36 +399,32 @@ describe("shop assignment + per-user overrides", () => {
     expect(res.status).toBe(204);
 
     expect(
-      env.db
+      await env.db
         .select()
         .from(shopMember)
-        .where(eq(shopMember.userId, petya.userId))
-        .all(),
+        .where(eq(shopMember.userId, petya.userId)),
     ).toHaveLength(0);
 
     // Petya's data must be gone.
     const wsId = owner.workspaceId;
     const { products } = await import("../../server/db/schema");
     expect(
-      env.db
+      await env.db
         .select()
         .from(products)
-        .where(eq(products.userId, petya.userId))
-        .all(),
+        .where(eq(products.userId, petya.userId)),
     ).toHaveLength(0);
     expect(
-      env.db
+      await env.db
         .select()
         .from(financeTransactions)
-        .where(eq(financeTransactions.userId, petya.userId))
-        .all(),
+        .where(eq(financeTransactions.userId, petya.userId)),
     ).toHaveLength(0);
     expect(
-      env.db
+      await env.db
         .select()
         .from(shopUserSettings)
-        .where(eq(shopUserSettings.userId, petya.userId))
-        .all(),
+        .where(eq(shopUserSettings.userId, petya.userId)),
     ).toHaveLength(0);
 
     // Petya can no longer see this shop.
@@ -495,15 +490,15 @@ describe("shop assignment + per-user overrides", () => {
     expect(list.map((s) => s.id)).toContain(created.id);
 
     // shop_member row exists.
-    const row = env.db
+    const [row] = await env.db
       .select()
       .from(shopMember)
       .where(eq(shopMember.userId, manager.userId))
-      .get();
+      ;
     expect(row?.shopId).toBe(created.id);
     // Sanity: shops table sees it.
     expect(
-      env.db.select().from(shops).where(eq(shops.id, created.id)).get(),
+      (await env.db.select().from(shops).where(eq(shops.id, created.id)))[0],
     ).toBeDefined();
   });
 });

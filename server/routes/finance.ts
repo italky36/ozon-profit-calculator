@@ -162,7 +162,16 @@ export function financeRoutes(db: DB): Hono<FinanceEnv> {
       .groupBy(financeTransactions.type)
       .orderBy(asc(financeTransactions.type));
 
-    return c.json(rows);
+    // pg возвращает `count(*)` и `sum(...)` как строку (BIGINT/NUMERIC →
+    // лосс точности в JS double), драйвер не парсит обратно в число.
+    // Приводим вручную, чтобы API контракт остался number.
+    return c.json(
+      rows.map((r) => ({
+        ...r,
+        count: Number(r.count),
+        total: Number(r.total),
+      })),
+    );
   });
 
   // Удалить накопленные транзакции. Scope: либо ?shopId=N, либо все магазины

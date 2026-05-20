@@ -18,23 +18,23 @@ async function joinAs(
   role: "manager" | "member",
 ): Promise<Awaited<ReturnType<typeof loginAs>>> {
   const seeded = await loginAs(env, email, "password123");
-  env.db
+  await env.db
     .update(workspaceMembers)
     .set({
       workspaceId: ownerWorkspaceId,
       role,
     })
     .where(eq(workspaceMembers.userId, seeded.userId))
-    .run();
+    ;
   return await loginAs(env, email, "password123");
 }
 
 describe("per-shop permissions (creator-based)", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   describe("creation sets created_by", () => {
     it("POST /api/shops sets created_by to the caller", async () => {
@@ -68,11 +68,11 @@ describe("per-shop permissions (creator-based)", () => {
       expect(body.isOwner).toBe(true);
 
       // shop_member row auto-created so manager keeps visibility.
-      const sm = env.db
+      const sm = await env.db
         .select()
         .from(shopMember)
         .where(eq(shopMember.shopId, body.id))
-        .all();
+        ;
       expect(sm.some((r) => r.userId === mgr.userId)).toBe(true);
     });
 
@@ -159,11 +159,11 @@ describe("per-shop permissions (creator-based)", () => {
       const shopId = (await create.json()).id as number;
 
       // Demote.
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({ role: "member" })
         .where(eq(workspaceMembers.userId, mgr.userId))
-        .run();
+        ;
       const demoted = await loginAs(env, "m@x.com", "password123");
 
       const res = await env.app.request(`/api/shops/${shopId}`, {
@@ -185,7 +185,7 @@ describe("per-shop permissions (creator-based)", () => {
       const mgrB = await joinAs(env, "b@x.com", owner.workspaceId, "manager");
       // Need another existing shop in the workspace so deletion isn't blocked
       // by «can't remove the last shop» (server enforces total >= 1).
-      createShopFor(env.db, owner.userId, { shortName: "K1" });
+      await createShopFor(env.db, owner.userId, { shortName: "K1" });
       const create = await env.app.request("/api/shops", {
         method: "POST",
         headers: { Cookie: mgrA.cookie, "Content-Type": "application/json" },
@@ -303,11 +303,11 @@ describe("per-shop permissions (creator-based)", () => {
       expect(mgrBOk.status).toBe(200);
 
       // New creator gets a shop_member row so the shop appears in their list.
-      const sm = env.db
+      const sm = await env.db
         .select()
         .from(shopMember)
         .where(eq(shopMember.shopId, shopId))
-        .all();
+        ;
       expect(sm.some((r) => r.userId === mgrB.userId)).toBe(true);
     });
 
@@ -399,14 +399,14 @@ describe("per-shop permissions (creator-based)", () => {
   describe("backfill (existing data via _helpers.createShopFor)", () => {
     it("legacy shops created via createShopFor default to the user as creator", async () => {
       const owner = await loginAs(env, "owner@x.com", "password123");
-      const extraShopId = createShopFor(env.db, owner.userId, {
+      const extraShopId = await createShopFor(env.db, owner.userId, {
         shortName: "L1",
       });
-      const row = env.db
+      const [row] = await env.db
         .select()
         .from(shops)
         .where(eq(shops.id, extraShopId))
-        .get();
+        ;
       expect(row!.createdBy).toBe(owner.userId);
     });
   });
