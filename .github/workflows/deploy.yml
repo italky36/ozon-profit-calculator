@@ -1,0 +1,67 @@
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dev_password_change_me
+          POSTGRES_DB: ozon_calc_test
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ozon_calc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:dev_password_change_me@localhost:5433/ozon_calc_test
+      DATABASE_URL: postgresql://postgres:dev_password_change_me@localhost:5433/ozon_calc_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Apply migrations to test DB
+        run: npx tsx scripts/migrate.mts
+
+      - run: npm run lint
+
+      - run: npm test
+
+      - run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/profitcontrol
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            docker compose up -d --build
+            docker compose ps
