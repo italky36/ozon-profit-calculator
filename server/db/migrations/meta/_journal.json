@@ -15,6 +15,13 @@
       "when": 1779209000000,
       "tag": "0001_chat_fts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779266391091,
+      "tag": "0002_ozon_ids_bigint",
+      "breakpoints": true
     }
   ]
 }

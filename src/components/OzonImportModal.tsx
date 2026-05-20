@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, RefreshCw, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, Copy, RefreshCw, X } from "lucide-react";
 import { type Shop } from "../api";
 import {
   getAutoRefreshState,
@@ -337,18 +337,7 @@ function ShopRow({
               : "Нет ключа API — настройте в карточке магазина"}
           </div>
           {run?.status === "error" && run.errorMessage && (
-            <div
-              style={{
-                marginTop: 4,
-                fontSize: 11.5,
-                color: "var(--err)",
-                wordBreak: "break-word",
-                lineHeight: 1.4,
-              }}
-              title={run.errorMessage}
-            >
-              {run.errorMessage}
-            </div>
+            <ErrorMessage text={run.errorMessage} />
           )}
         </div>
         <RunStatusBadge run={run} onRetry={onRetry} eligible={eligible} />
@@ -479,6 +468,76 @@ function RunStatusBadge({
       </span>
     );
   return null;
+}
+
+function ErrorMessage({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const textRef = useRef<HTMLDivElement | null>(null);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API без HTTPS / в WebView отключён — fallback на selection.
+      const sel = window.getSelection();
+      const node = textRef.current;
+      if (sel && node) {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+  };
+  return (
+    <div
+      style={{
+        marginTop: 4,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 6,
+      }}
+    >
+      <div
+        ref={textRef}
+        style={{
+          flex: 1,
+          fontSize: 11.5,
+          color: "var(--err)",
+          wordBreak: "break-word",
+          lineHeight: 1.4,
+          userSelect: "text",
+          cursor: "text",
+        }}
+      >
+        {text}
+      </div>
+      <button
+        type="button"
+        onClick={copy}
+        title={copied ? "Скопировано" : "Скопировать"}
+        aria-label="Скопировать текст ошибки"
+        style={{
+          flex: "0 0 auto",
+          width: 22,
+          height: 22,
+          padding: 0,
+          borderRadius: 5,
+          border: "1px solid var(--border)",
+          background: copied ? "color-mix(in srgb, #16a34a 14%, transparent)" : "#fff",
+          color: copied ? "#15803d" : "var(--muted)",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          transition: "all .12s",
+        }}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+    </div>
+  );
 }
 
 function SelectedShopAutoRefresh({ shop }: { shop: Shop }) {

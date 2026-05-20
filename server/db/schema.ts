@@ -1,6 +1,7 @@
 import {
   pgTable,
   integer,
+  bigint,
   serial,
   text,
   boolean,
@@ -303,11 +304,14 @@ export const products = pgTable(
     incomingVatRate: doublePrecision("incoming_vat_rate").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
-    ozonProductId: integer("ozon_product_id"),
+    // bigint mode: "number" — id'ы Ozon легко > 2^31 (видели 3_097_497_118),
+    // integer ловит SQLSTATE 22003. JS Number безопасен до 2^53, чего хватает
+    // под Ozon-идентификаторы с большим запасом.
+    ozonProductId: bigint("ozon_product_id", { mode: "number" }),
     /** Public SKU used in `https://www.ozon.ru/product/{sku}/` URLs.
      * Different from `ozonProductId`: that's the seller's internal product_id;
      * `ozonSku` is the marketplace-facing identifier. */
-    ozonSku: integer("ozon_sku"),
+    ozonSku: bigint("ozon_sku", { mode: "number" }),
     ozonCommissions: jsonb("ozon_commissions").$type<OzonCommissions>(),
     ozonCommissionsUpdatedAt: timestamp("ozon_commissions_updated_at", {
       withTimezone: true,
