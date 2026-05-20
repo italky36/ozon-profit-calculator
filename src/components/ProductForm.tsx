@@ -221,9 +221,23 @@ export default function ProductForm({ value, onChange, lockedFields = [], refs =
       </fieldset>
 
       <fieldset>
-        <legend>Хранение</legend>
+        <legend>
+          Хранение
+          <span
+            style={{
+              marginLeft: 8,
+              fontSize: 11,
+              fontWeight: 400,
+              color: "var(--muted)",
+              textTransform: "none",
+              letterSpacing: 0,
+            }}
+          >
+            влияет только на FBO
+          </span>
+        </legend>
         <div className="grid">
-          <label><span>План хранения, дней</span>
+          <label><span>План хранения, дней <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 11 }}>(FBO)</span></span>
             <input type="number" step="1" min="0" value={value.plannedStorageDays}
               onChange={(e) => set("plannedStorageDays", num(e.target.value))} />
           </label>
