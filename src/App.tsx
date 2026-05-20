@@ -7,6 +7,9 @@ import TweaksPanel from "./components/TweaksPanel";
 
 const ProductDrawer = lazy(() => import("./components/ProductDrawer"));
 const OzonImportModal = lazy(() => import("./components/OzonImportModal"));
+const CostPriceImportModal = lazy(
+  () => import("./components/CostPriceImportModal"),
+);
 const FinanceTab = lazy(() => import("./components/FinanceTab"));
 const ShopsModal = lazy(() => import("./components/ShopsModal"));
 const TeamPage = lazy(() => import("./components/TeamPage"));
@@ -222,6 +225,7 @@ export default function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
+  const [costImportOpen, setCostImportOpen] = useState(false);
   const [shopsModalOpen, setShopsModalOpen] = useState(false);
   const [tweaksOpen, setTweaksOpen] = useState(false);
   const TAB_KEY = "ozon-calc.active-tab";
@@ -778,6 +782,7 @@ export default function App() {
                 onUpdate={updateRow}
                 onRemove={removeRow}
                 onImport={() => setImportOpen(true)}
+                onImportCostPrice={() => setCostImportOpen(true)}
                 onProductsRefresh={refreshProducts}
                 channelFilter={channelFilter}
                 onChannelFilterChange={setChannelFilter}
@@ -878,6 +883,15 @@ export default function App() {
           <OzonImportModal
             shops={shops}
             onClose={() => setImportOpen(false)}
+            onImported={refreshProducts}
+          />
+        </Suspense>
+      )}
+
+      {costImportOpen && (
+        <Suspense fallback={null}>
+          <CostPriceImportModal
+            onClose={() => setCostImportOpen(false)}
             onImported={refreshProducts}
           />
         </Suspense>

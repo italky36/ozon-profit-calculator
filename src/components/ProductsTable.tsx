@@ -43,6 +43,7 @@ interface Props {
   onUpdate: (id: string, next: ProductInput) => void;
   onRemove: (id: string) => void;
   onImport: () => void;
+  onImportCostPrice: () => void;
   channelFilter: FilterValue;
   onChannelFilterChange: (v: FilterValue) => void;
   showChart: boolean;
@@ -158,6 +159,7 @@ export default function ProductsTable({
   onUpdate,
   onRemove,
   onImport,
+  onImportCostPrice,
   channelFilter,
   onChannelFilterChange,
   showChart,
@@ -536,6 +538,15 @@ export default function ProductsTable({
             <Download size={14} />
             <span className="toolbar-btn-label toolbar-btn-label-full">Импорт из Ozon</span>
             <span className="toolbar-btn-label toolbar-btn-label-short">Импорт</span>
+          </button>
+          <button
+            className="btn-secondary toolbar-btn"
+            onClick={onImportCostPrice}
+            title="Импорт себестоимости из xlsx"
+          >
+            <FileSpreadsheet size={14} />
+            <span className="toolbar-btn-label toolbar-btn-label-full">Себестоимость xlsx</span>
+            <span className="toolbar-btn-label toolbar-btn-label-short">xlsx</span>
           </button>
           <button
             className="btn-primary toolbar-btn"

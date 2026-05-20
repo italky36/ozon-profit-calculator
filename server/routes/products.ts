@@ -5,6 +5,8 @@ import type { DB } from "../db/client";
 import type { SessionUser } from "../auth/utils";
 import { resolveShopId, visibleShopIds } from "../middleware/session";
 import { isUniqueViolation } from "../lib/pgErrors";
+import { parseCostPriceXlsx } from "../lib/costPriceXlsx";
+import { shops } from "../db/schema";
 import type {
   ClustersCount,
   IncomingVatRate,
@@ -391,6 +393,198 @@ export function productsRoutes(db: DB): Hono<ProductsEnv> {
         ),
       );
     return c.json({ updated: result.rowCount ?? 0 });
+  });
+
+  app.post("/import-cost-price", async (c) => {
+    const user = c.get("user");
+    const form = await c.req.formData().catch(() => null);
+    if (!form) return c.json({ error: "expected multipart form" }, 400);
+    const file = form.get("file");
+    if (!(file instanceof File)) {
+      return c.json({ error: "file required" }, 400);
+    }
+    const dryRun = form.get("dryRun") !== "false"; // default true
+    const buf = Buffer.from(await file.arrayBuffer());
+    const parsed = parseCostPriceXlsx(buf);
+    if (typeof parsed === "string") {
+      return c.json({ error: parsed }, 400);
+    }
+
+    const scope = await visibleShopIds(db, user);
+    if (scope.length === 0) {
+      return c.json({
+        totalRows: parsed.rows.length,
+        parsed: parsed.rows.length,
+        matched: [],
+        unchanged: [],
+        notFound: parsed.rows.map((r) => ({
+          sourceRow: r.sourceRow,
+          articleId: r.articleId,
+          ozonSku: r.ozonSku,
+          ozonProductId: r.ozonProductId,
+          productName: r.productName,
+          newCostPrice: r.costPrice,
+        })),
+        duplicates: [],
+        warnings: parsed.warnings,
+        dryRun,
+        didUpdate: 0,
+      });
+    }
+
+    // Все per-user товары в видимых shops — для cascade matching в памяти.
+    const userProducts = await db
+      .select({
+        id: products.id,
+        shopId: products.shopId,
+        shopShortName: shops.shortName,
+        articleId: products.articleId,
+        ozonSku: products.ozonSku,
+        ozonProductId: products.ozonProductId,
+        productName: products.productName,
+        costPrice: products.costPrice,
+      })
+      .from(products)
+      .innerJoin(shops, eq(shops.id, products.shopId))
+      .where(
+        and(
+          inArray(products.shopId, scope),
+          eq(products.workspaceId, user.workspaceId),
+          eq(products.userId, user.id),
+        ),
+      );
+
+    // Multimaps — один ключ может соответствовать нескольким товарам, если
+    // юзер держит одинаковый article_id в двух разных shops.
+    const byArticleId = new Map<string, typeof userProducts>();
+    const byOzonSku = new Map<number, typeof userProducts>();
+    const byOzonProductId = new Map<number, typeof userProducts>();
+    for (const p of userProducts) {
+      const ap = byArticleId.get(p.articleId) ?? [];
+      ap.push(p);
+      byArticleId.set(p.articleId, ap);
+      if (p.ozonSku != null) {
+        const sp = byOzonSku.get(p.ozonSku) ?? [];
+        sp.push(p);
+        byOzonSku.set(p.ozonSku, sp);
+      }
+      if (p.ozonProductId != null) {
+        const pp = byOzonProductId.get(p.ozonProductId) ?? [];
+        pp.push(p);
+        byOzonProductId.set(p.ozonProductId, pp);
+      }
+    }
+
+    type FoundRow = (typeof userProducts)[number];
+    const matched: Array<{
+      sourceRow: number;
+      productId: string;
+      articleId: string;
+      productName: string;
+      shopShortName: string;
+      oldCostPrice: number;
+      newCostPrice: number;
+      matchedBy: "articleId" | "ozonSku" | "ozonProductId";
+    }> = [];
+    const unchanged: typeof matched = [];
+    const notFound: Array<{
+      sourceRow: number;
+      articleId: string | null;
+      ozonSku: number | null;
+      ozonProductId: number | null;
+      productName: string | null;
+      newCostPrice: number;
+    }> = [];
+    const duplicateKeys = new Set<string>();
+
+    const pushHit = (
+      row: (typeof parsed.rows)[number],
+      hits: FoundRow[],
+      by: "articleId" | "ozonSku" | "ozonProductId",
+    ) => {
+      if (hits.length > 1) {
+        duplicateKeys.add(`${by}:${row.sourceRow}`);
+      }
+      for (const p of hits) {
+        const target = (p.costPrice === row.costPrice ? unchanged : matched);
+        target.push({
+          sourceRow: row.sourceRow,
+          productId: p.id,
+          articleId: p.articleId,
+          productName: p.productName,
+          shopShortName: p.shopShortName,
+          oldCostPrice: p.costPrice,
+          newCostPrice: row.costPrice,
+          matchedBy: by,
+        });
+      }
+    };
+
+    for (const row of parsed.rows) {
+      const byA = row.articleId ? byArticleId.get(row.articleId) : undefined;
+      if (byA && byA.length > 0) {
+        pushHit(row, byA, "articleId");
+        continue;
+      }
+      const byS = row.ozonSku != null ? byOzonSku.get(row.ozonSku) : undefined;
+      if (byS && byS.length > 0) {
+        pushHit(row, byS, "ozonSku");
+        continue;
+      }
+      const byP =
+        row.ozonProductId != null
+          ? byOzonProductId.get(row.ozonProductId)
+          : undefined;
+      if (byP && byP.length > 0) {
+        pushHit(row, byP, "ozonProductId");
+        continue;
+      }
+      notFound.push({
+        sourceRow: row.sourceRow,
+        articleId: row.articleId,
+        ozonSku: row.ozonSku,
+        ozonProductId: row.ozonProductId,
+        productName: row.productName,
+        newCostPrice: row.costPrice,
+      });
+    }
+
+    let didUpdate = 0;
+    if (!dryRun && matched.length > 0) {
+      // Group по newCostPrice — один UPDATE на каждое уникальное значение.
+      const byNewPrice = new Map<number, string[]>();
+      for (const m of matched) {
+        const arr = byNewPrice.get(m.newCostPrice) ?? [];
+        arr.push(m.productId);
+        byNewPrice.set(m.newCostPrice, arr);
+      }
+      for (const [price, ids] of byNewPrice) {
+        const res = await db
+          .update(products)
+          .set({ costPrice: price, updatedAt: new Date() })
+          .where(
+            and(
+              inArray(products.id, ids),
+              inArray(products.shopId, scope),
+              eq(products.workspaceId, user.workspaceId),
+              eq(products.userId, user.id),
+            ),
+          );
+        didUpdate += res.rowCount ?? 0;
+      }
+    }
+
+    return c.json({
+      totalRows: parsed.rows.length,
+      parsed: parsed.rows.length,
+      matched,
+      unchanged,
+      notFound,
+      duplicates: Array.from(duplicateKeys),
+      warnings: parsed.warnings,
+      dryRun,
+      didUpdate,
+    });
   });
 
   app.post("/bulk/delete", async (c) => {

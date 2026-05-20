@@ -184,9 +184,14 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
-async function apiUpload<T>(path: string, file: File): Promise<T> {
+async function apiUpload<T>(
+  path: string,
+  file: File,
+  extra?: Record<string, string>,
+): Promise<T> {
   const fd = new FormData();
   fd.append("file", file);
+  if (extra) for (const [k, v] of Object.entries(extra)) fd.append(k, v);
   // Не задаём Content-Type вручную — браузер добавит multipart/form-data с
   // правильным boundary.
   const res = await fetch(`${BASE}${path}`, {
@@ -206,6 +211,36 @@ async function apiUpload<T>(path: string, file: File): Promise<T> {
     throw new Error(msg);
   }
   return body as T;
+}
+
+export interface CostImportMatchedRow {
+  sourceRow: number;
+  productId: string;
+  articleId: string;
+  productName: string;
+  shopShortName: string;
+  oldCostPrice: number;
+  newCostPrice: number;
+  matchedBy: "articleId" | "ozonSku" | "ozonProductId";
+}
+export interface CostImportNotFoundRow {
+  sourceRow: number;
+  articleId: string | null;
+  ozonSku: number | null;
+  ozonProductId: number | null;
+  productName: string | null;
+  newCostPrice: number;
+}
+export interface CostImportReport {
+  totalRows: number;
+  parsed: number;
+  matched: CostImportMatchedRow[];
+  unchanged: CostImportMatchedRow[];
+  notFound: CostImportNotFoundRow[];
+  duplicates: string[];
+  warnings: string[];
+  dryRun: boolean;
+  didUpdate: number;
 }
 
 export interface AuthUser {
@@ -914,6 +949,10 @@ export const api = {
       apiFetch<{ deleted: number }>("/products/bulk/delete", {
         method: "POST",
         body: JSON.stringify({ ids }),
+      }),
+    importCostPrice: (file: File, dryRun: boolean) =>
+      apiUpload<CostImportReport>("/products/import-cost-price", file, {
+        dryRun: dryRun ? "true" : "false",
       }),
   },
   settings: {
