@@ -815,6 +815,11 @@ export default function App() {
                   onRefreshed={refreshProducts}
                   taxSettings={taxSettings}
                   refs={refs}
+                  actual={
+                    showActuals
+                      ? actualsByArticle.get(selectedRow.input.articleId) ?? null
+                      : null
+                  }
                 />
               </Suspense>
             )}

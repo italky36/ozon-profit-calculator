@@ -6,6 +6,7 @@ import type {
   SchemaResult,
   TaxSettings,
 } from "../types";
+import type { RealizedMarginRow } from "../api";
 import { fmtRub, fmtPct } from "../format";
 import { findClusterTariff } from "../lib/calc/logistics";
 
@@ -14,6 +15,7 @@ interface Props {
   input?: ProductInput;
   taxSettings?: TaxSettings;
   refs?: References | null;
+  actual?: RealizedMarginRow | null;
 }
 
 const SCHEMAS: Array<{
@@ -61,7 +63,7 @@ const fmtNum = (n: number, digits = 2): string =>
       })
     : "—";
 
-export default function ResultsPanel({ result, input, taxSettings, refs }: Props) {
+export default function ResultsPanel({ result, input, taxSettings, refs, actual }: Props) {
   const [openDetails, setOpenDetails] = useState(true);
   const [openTaxDebug, setOpenTaxDebug] = useState(false);
   const winner = bestKey(result);
@@ -187,6 +189,7 @@ export default function ResultsPanel({ result, input, taxSettings, refs }: Props
               input={input}
               taxSettings={taxSettings}
               refs={refs ?? null}
+              actual={actual ?? null}
             />
           )}
         </>
@@ -202,11 +205,13 @@ function TaxDebug({
   input,
   taxSettings,
   refs,
+  actual,
 }: {
   result: CalcResult;
   input: ProductInput;
   taxSettings: TaxSettings;
   refs: References | null;
+  actual: RealizedMarginRow | null;
 }) {
   const [techMode, setTechMode] = useState(false);
   const clusterTariff = findClusterTariff(
@@ -420,6 +425,70 @@ function TaxDebug({
         </label>
       </div>
       {SCHEMAS.map((s) => renderSchema(s.key, s.label))}
+      {actual && actual.salesCount > 0 && (() => {
+        const winner = bestKey(result);
+        const salesCount = actual.salesCount;
+        const factOzonNet = actual.actualRevenue / salesCount;
+        const taxPerSale = result[winner].totalTax;
+        const factMargin = factOzonNet - input.costPrice - taxPerSale;
+        const profitability =
+          input.costPrice > 0 ? factMargin / input.costPrice : null;
+        return (
+          <div className="rp-debug-block">
+            <div className="rp-debug-title">
+              Расчёт по факту (по {winner}-налогу)
+            </div>
+            <div className="rp-debug-grid">
+              <Step
+                human="Поступление от Ozon (всего за период)"
+                tech="actual.actualRevenue"
+                mode={techMode}
+                formula={fmtRub(actual.actualRevenue)}
+              />
+              <Step
+                human="Продаж за период"
+                tech="actual.salesCount"
+                mode={techMode}
+                formula={String(salesCount)}
+              />
+              <Step
+                human="Поступление за единицу"
+                tech="factOzonNet = actualRevenue / salesCount"
+                mode={techMode}
+                formula={`${fmtRub(actual.actualRevenue)} / ${salesCount} = ${fmtRub(factOzonNet)}`}
+              />
+              <Step
+                human="− Себестоимость"
+                tech="− costPrice"
+                mode={techMode}
+                formula={fmtRub(input.costPrice)}
+              />
+              <Step
+                human={`− Налог (из ${winner}-расчёта)`}
+                tech={`− result.${winner}.totalTax`}
+                mode={techMode}
+                formula={fmtRub(taxPerSale)}
+              />
+              <Step
+                human="Маржа за единицу"
+                tech="factMargin = factOzonNet − costPrice − totalTax"
+                mode={techMode}
+                formula={`${fmtRub(factOzonNet)} − ${fmtRub(input.costPrice)} − ${fmtRub(taxPerSale)} = ${fmtRub(factMargin)}`}
+                emphasis
+              />
+              {profitability != null && (
+                <Step
+                  human="Рентабельность к себестоимости"
+                  tech="profitability = factMargin / costPrice"
+                  mode={techMode}
+                  formula={`${fmtRub(factMargin)} / ${fmtRub(input.costPrice)} = ${fmtPct(profitability)}`}
+                  emphasis
+                />
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

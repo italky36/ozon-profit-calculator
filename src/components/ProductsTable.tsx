@@ -1075,10 +1075,18 @@ const ProductRow = memo(function ProductRow({
                 return (
                   <>
                     <div>{fmtRub(factOzonNetPerSale)}</div>
+                    {factMargin != null && (
+                      <div
+                        className="margin-secondary"
+                        title="Маржа по факту: поступление от Ozon − себестоимость − налог"
+                      >
+                        {fmtRub(factMargin)}
+                      </div>
+                    )}
                     {factProfitability != null && (
                       <div
                         className="margin-roi"
-                        title={`Рентабельность по факту: (поступление от Ozon − себестоимость − налог) / себестоимость. Налог — из ${winner}-расчёта.`}
+                        title={`Рентабельность по факту: маржа / себестоимость. Налог — из ${winner}-расчёта.`}
                       >
                         {fmtPct(factProfitability)}
                       </div>

@@ -5,7 +5,7 @@ import type { RowResult } from "./ProductsTable";
 import ProductForm, { type LockedField } from "./ProductForm";
 import OzonBreakdown from "./OzonBreakdown";
 import ResultsPanel from "./ResultsPanel";
-import { api } from "../api";
+import { api, type RealizedMarginRow } from "../api";
 
 const OzonPricesDebugModal = lazy(() => import("./OzonPricesDebugModal"));
 const OzonInfoDebugModal = lazy(() => import("./OzonInfoDebugModal"));
@@ -22,9 +22,12 @@ interface Props {
   onRefreshed?: () => void;
   taxSettings?: TaxSettings;
   refs?: References | null;
+  /** Факт.данные за выбранный период (когда юзер включил «Сравнить с
+   *  фактом»). Прокидывается в TaxDebug для блока «Расчёт по факту». */
+  actual?: RealizedMarginRow | null;
 }
 
-export default function ProductDrawer({ input, result, onChange, onClose, fromOzon, ozonProductId, ozonSku, onRefreshed, taxSettings, refs }: Props) {
+export default function ProductDrawer({ input, result, onChange, onClose, fromOzon, ozonProductId, ozonSku, onRefreshed, taxSettings, refs, actual }: Props) {
   const [debugOpen, setDebugOpen] = useState(false);
   const [infoDebugOpen, setInfoDebugOpen] = useState(false);
   const [financeOpen, setFinanceOpen] = useState(false);
@@ -171,6 +174,7 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
                 input={input}
                 taxSettings={taxSettings}
                 refs={refs}
+                actual={actual ?? null}
               />
             </>
           )}
