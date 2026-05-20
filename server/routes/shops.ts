@@ -41,6 +41,7 @@ interface ShopOut {
   hasOzonCreds: boolean;
   ozonUpdatedAt: number | null;
   tariffSetId: number | null;
+  kgtTariffSetId: number | null;
   createdAt: number;
   updatedAt: number;
   /** True when the current user can edit shop metadata + assignment. After
@@ -77,6 +78,7 @@ const buildOut = async (
     hasOzonCreds: !!(row.ozonClientId && row.ozonApiKey),
     ozonUpdatedAt: row.ozonUpdatedAt?.getTime() ?? null,
     tariffSetId: eff?.tariffSetId ?? row.tariffSetId ?? null,
+    kgtTariffSetId: eff?.kgtTariffSetId ?? row.kgtTariffSetId ?? null,
     createdAt: row.createdAt.getTime(),
     updatedAt: row.updatedAt.getTime(),
     isOwner:
@@ -353,6 +355,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       autoRefreshEnabled?: unknown;
       autoRefreshIntervalMin?: unknown;
       tariffSetId?: unknown;
+      kgtTariffSetId?: unknown;
     };
 
     const patch: Partial<typeof shops.$inferInsert> = {};
@@ -399,6 +402,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
           .where(
             and(
               eq(logisticsClusterTariffSets.id, n),
+              eq(logisticsClusterTariffSets.kind, "regular"),
               or(
                 isNull(logisticsClusterTariffSets.workspaceId),
                 eq(
@@ -414,6 +418,37 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
             404,
           );
         patch.tariffSetId = n;
+      }
+    }
+    if (r.kgtTariffSetId !== undefined) {
+      if (r.kgtTariffSetId === null) {
+        patch.kgtTariffSetId = null;
+      } else {
+        const n = Number(r.kgtTariffSetId);
+        if (!Number.isFinite(n) || n <= 0)
+          return c.json({ error: "kgtTariffSetId must be number or null" }, 400);
+        const [set] = await db
+          .select()
+          .from(logisticsClusterTariffSets)
+          .where(
+            and(
+              eq(logisticsClusterTariffSets.id, n),
+              eq(logisticsClusterTariffSets.kind, "kgt"),
+              or(
+                isNull(logisticsClusterTariffSets.workspaceId),
+                eq(
+                  logisticsClusterTariffSets.workspaceId,
+                  user.workspaceId,
+                ),
+              ),
+            ),
+          );
+        if (!set)
+          return c.json(
+            { error: "kgtTariffSetId not found, wrong kind, or not accessible" },
+            404,
+          );
+        patch.kgtTariffSetId = n;
       }
     }
     if (Object.keys(patch).length === 0) {

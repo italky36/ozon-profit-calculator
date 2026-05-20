@@ -118,11 +118,28 @@ export const calculateRow = (
     lastMileFbs = lm;
   }
 
-  // Override логистики точной матрицей, если включено и данные подходят.
-  // Матрица одна на пару → для FBO/FBS подменяем оба значения. last-mile,
-  // first-mile и комиссии остаются как были (API/таблица). baseDelivery тоже
-  // подменяется, чтобы tz-формула возврата работала с актуальной величиной.
-  if (taxSettings.useClusterLogistics) {
+  // Override логистики точной матрицей.
+  // Приоритет источника при isKgt=true: KGT-сетка (refs.kgtClusterTariffs),
+  // если она задана. Это бьёт даже useClusterLogistics=false — потому что
+  // для КГТ у Ozon отдельные тарифы, использовать таблично-формульный
+  // путь для КГТ-товара заведомо неверно. Если KGT-сетка не задана —
+  // обычный путь useClusterLogistics → refs.logisticsClusterTariffs →
+  // fallback на табличную формулу.
+  const kgtRows = input.isKgt ? refs.kgtClusterTariffs : null;
+  const kgtTariff = kgtRows
+    ? findClusterTariff(
+        kgtRows,
+        input.volumeL,
+        input.dispatchCluster,
+        input.destinationCluster,
+        promoPrice,
+      )
+    : null;
+  if (kgtTariff != null) {
+    logisticsFbo = kgtTariff;
+    logisticsFbs = kgtTariff;
+    baseDelivery = kgtTariff;
+  } else if (taxSettings.useClusterLogistics) {
     const clusterTariff = findClusterTariff(
       refs.logisticsClusterTariffs,
       input.volumeL,

@@ -174,21 +174,44 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     }
     for (const cat of Object.keys(categories)) categories[cat].sort();
 
-    let logisticsClusterTariffsRows: Array<{
+    type ClusterRow = {
       volumeFrom: number;
       fromCluster: string;
       toCluster: string;
       tariffLte300: number;
       tariffGt300: number;
-    }> = [];
+    };
+    let logisticsClusterTariffsRows: ClusterRow[] = [];
+    let kgtClusterTariffsRows: ClusterRow[] | null = null;
     let activeTariffSetId: number | null = null;
+    let activeKgtTariffSetId: number | null = null;
     if (typeof shopResult === "number") {
       logisticsClusterTariffsRows = await loadActiveTariffRows(
         db,
         shopResult,
         user.id,
+        "regular",
       );
-      activeTariffSetId = await resolveTariffSetId(db, shopResult, user.id);
+      activeTariffSetId = await resolveTariffSetId(
+        db,
+        shopResult,
+        user.id,
+        "regular",
+      );
+      activeKgtTariffSetId = await resolveTariffSetId(
+        db,
+        shopResult,
+        user.id,
+        "kgt",
+      );
+      if (activeKgtTariffSetId != null) {
+        kgtClusterTariffsRows = await loadActiveTariffRows(
+          db,
+          shopResult,
+          user.id,
+          "kgt",
+        );
+      }
     }
 
     return c.json({
@@ -196,10 +219,12 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
       storage,
       logisticsTariffs,
       logisticsClusterTariffs: logisticsClusterTariffsRows,
+      kgtClusterTariffs: kgtClusterTariffsRows,
       logisticsSettings: settingsMap.logisticsSettings ?? {},
       lists: settingsMap.lists ?? {},
       categories,
       activeTariffSetId,
+      activeKgtTariffSetId,
     });
   });
 
@@ -237,6 +262,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
         shopId: s.workspaceId,
         scope: s.workspaceId === null ? "global" : "shop",
         name: s.name,
+        kind: s.kind,
         uploadedAt: s.uploadedAt.getTime(),
         rowCount: counts.get(s.id) ?? 0,
       })),
@@ -266,6 +292,11 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
     if (scopeStr !== "global" && scopeStr !== "shop") {
       return c.json({ error: "scope must be 'global' or 'shop'" }, 400);
     }
+    const kindRaw = String(body.get("kind") ?? "regular");
+    if (kindRaw !== "regular" && kindRaw !== "kgt") {
+      return c.json({ error: "kind must be 'regular' or 'kgt'" }, 400);
+    }
+    const kind: "regular" | "kgt" = kindRaw;
 
     let workspaceIdForSet: number | null = null;
     if (scopeStr === "global") {
@@ -304,6 +335,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
       .values({
         workspaceId: workspaceIdForSet,
         name,
+        kind,
         uploadedAt: now,
         createdAt: now,
       })
@@ -325,6 +357,7 @@ export function refsRoutes(db: DB): Hono<RefsEnv> {
         shopId: created.workspaceId,
         scope: created.workspaceId === null ? "global" : "shop",
         name: created.name,
+        kind: created.kind,
         uploadedAt: created.uploadedAt.getTime(),
         rowCount: parsed.length,
         fromClusters: [...fromSet].sort(),

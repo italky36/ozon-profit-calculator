@@ -308,3 +308,44 @@ describe("Ozon API per-SKU override (Phase 5)", () => {
     expect(remote.fbs.logisticsRub).toBe(250);
   });
 });
+
+describe("KGT cluster tariff", () => {
+  const kgtRefs: References = {
+    ...refs,
+    kgtClusterTariffs: [
+      {
+        volumeFrom: 0,
+        fromCluster: "Москва, МО и Дальние регионы",
+        toCluster: "Москва, МО и Дальние регионы",
+        tariffLte300: 9999,
+        tariffGt300: 9999,
+      },
+    ],
+  };
+
+  it("при isKgt=true берёт тариф из refs.kgtClusterTariffs (FBO+FBS)", () => {
+    const kgt = calculateRow(
+      { ...baseInput, isKgt: true },
+      settings,
+      kgtRefs,
+    );
+    expect(kgt.fbo.logisticsRub).toBe(9999);
+    expect(kgt.fbs.logisticsRub).toBe(9999);
+    // realFBS не трогаем — для него своя логика
+    expect(kgt.realFbs.logisticsRub).not.toBe(9999);
+  });
+
+  it("при isKgt=false KGT-сетка игнорируется", () => {
+    const r = calculateRow({ ...baseInput, isKgt: false }, settings, kgtRefs);
+    expect(r.fbo.logisticsRub).not.toBe(9999);
+    expect(r.fbs.logisticsRub).not.toBe(9999);
+  });
+
+  it("при isKgt=true и отсутствии KGT-сетки — fallback на табличный расчёт", () => {
+    const noKgt = calculateRow({ ...baseInput, isKgt: true }, settings, refs);
+    const baseline = calculateRow(baseInput, settings, refs);
+    // Логистика для КГТ-товара без KGT-набора равна табличной (как для не-КГТ).
+    expect(noKgt.fbo.logisticsRub).toBe(baseline.fbo.logisticsRub);
+    expect(noKgt.fbs.logisticsRub).toBe(baseline.fbs.logisticsRub);
+  });
+});

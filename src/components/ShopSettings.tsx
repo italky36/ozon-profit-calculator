@@ -61,6 +61,7 @@ interface Props {
   /** Shop accent color (HEX). null → fall back to global --accent. */
   shopColor?: string | null;
   currentTariffSetId?: number | null;
+  currentKgtTariffSetId?: number | null;
   userIsAdmin?: boolean;
   /** Called when tariff selection / list changes — App refetches refs+shops. */
   onTariffChanged?: () => void | Promise<void>;
@@ -354,6 +355,7 @@ interface SectionsCtx {
    * control is hidden. */
   shopId: number | null;
   currentTariffSetId: number | null;
+  currentKgtTariffSetId: number | null;
   userIsAdmin: boolean;
   shopIsOwner: boolean;
   onTariffChanged: () => void | Promise<void>;
@@ -456,6 +458,7 @@ function LogisticsSection({
   onUploadCluster,
   shopId,
   currentTariffSetId,
+  currentKgtTariffSetId,
   userIsAdmin,
   shopIsOwner,
   onTariffChanged,
@@ -530,6 +533,24 @@ function LogisticsSection({
             userIsAdmin={userIsAdmin}
             isOwner={shopIsOwner}
             onChanged={onTariffChanged}
+            kind="regular"
+          />
+
+          <span className="gs-label" style={{ marginTop: 12 }}>
+            Сетка тарифов для КГТ{" "}
+            <HelpTip>
+              Применяется к товарам с признаком «КГТ» (приходит из Ozon
+              API). Отдельная тарифная сетка от Ozon — без неё для КГТ-
+              товаров используется обычный табличный расчёт.
+            </HelpTip>
+          </span>
+          <TariffSetsControl
+            shopId={shopId}
+            currentTariffSetId={currentKgtTariffSetId}
+            userIsAdmin={userIsAdmin}
+            isOwner={shopIsOwner}
+            onChanged={onTariffChanged}
+            kind="kgt"
           />
           <div className="gs-divider" />
         </>
@@ -861,6 +882,7 @@ export default function ShopSettings({
   shopName = null,
   shopColor = null,
   currentTariffSetId = null,
+  currentKgtTariffSetId = null,
   userIsAdmin = false,
   onTariffChanged,
   shopIsOwner = true,
@@ -1046,6 +1068,7 @@ export default function ShopSettings({
     onResetWhitePurchase,
     shopId,
     currentTariffSetId,
+    currentKgtTariffSetId,
     userIsAdmin,
     shopIsOwner,
     onTariffChanged: onTariffChanged ?? (() => {}),

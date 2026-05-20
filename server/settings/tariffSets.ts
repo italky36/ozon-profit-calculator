@@ -15,31 +15,45 @@ export interface ClusterTariffRow {
   tariffGt300: number;
 }
 
+export type TariffKind = "regular" | "kgt";
+
 /** Returns the tariff-set to apply for a (shop, user) pair. Priority:
- *   1) shop_user_settings.tariff_set_id override (per-user, if present);
- *   2) shops.tariff_set_id pinned by workspace owner/manager;
- *   3) latest global set by uploaded_at;
- *   4) null when there are no sets at all.
+ *   1) shop_user_settings.tariff_set_id (or kgt_*) override (per-user);
+ *   2) shops.tariff_set_id (or kgt_*) pinned by workspace owner/manager;
+ *   3) latest global set by uploaded_at — только для regular; для kgt
+ *      global fallback не делаем (NULL = «KGT-сетка не настроена»);
+ *   4) null when no sets are available.
  *
  * If a pinned set points at another workspace's personal set (would only
  * happen via direct DB write — the upload route blocks it), fall through to
- * the next tier.
+ * the next tier. Также набор проверяется на соответствие `kind` —
+ * случайно или вручную привязанный set другого вида игнорируется.
  */
 export async function resolveTariffSetId(
   db: DB,
   shopId: number,
   userId?: number,
+  kind: TariffKind = "regular",
 ): Promise<number | null> {
   const [shop] = await db
-    .select({ tariffSetId: shops.tariffSetId, workspaceId: shops.workspaceId })
+    .select({
+      tariffSetId: shops.tariffSetId,
+      kgtTariffSetId: shops.kgtTariffSetId,
+      workspaceId: shops.workspaceId,
+    })
     .from(shops)
     .where(eq(shops.id, shopId));
   if (!shop) return null;
 
+  const shopSetId = kind === "kgt" ? shop.kgtTariffSetId : shop.tariffSetId;
+
   // 1. Per-user override.
   if (userId !== undefined) {
     const [override] = await db
-      .select({ tariffSetId: shopUserSettings.tariffSetId })
+      .select({
+        tariffSetId: shopUserSettings.tariffSetId,
+        kgtTariffSetId: shopUserSettings.kgtTariffSetId,
+      })
       .from(shopUserSettings)
       .where(
         and(
@@ -47,13 +61,16 @@ export async function resolveTariffSetId(
           eq(shopUserSettings.userId, userId),
         ),
       );
-    if (override?.tariffSetId != null) {
+    const overrideSetId =
+      kind === "kgt" ? override?.kgtTariffSetId : override?.tariffSetId;
+    if (overrideSetId != null) {
       const [chosen] = await db
         .select({ id: logisticsClusterTariffSets.id })
         .from(logisticsClusterTariffSets)
         .where(
           and(
-            eq(logisticsClusterTariffSets.id, override.tariffSetId),
+            eq(logisticsClusterTariffSets.id, overrideSetId),
+            eq(logisticsClusterTariffSets.kind, kind),
             or(
               isNull(logisticsClusterTariffSets.workspaceId),
               eq(logisticsClusterTariffSets.workspaceId, shop.workspaceId),
@@ -65,13 +82,14 @@ export async function resolveTariffSetId(
   }
 
   // 2. Shop default.
-  if (shop.tariffSetId !== null) {
+  if (shopSetId != null) {
     const [chosen] = await db
       .select({ id: logisticsClusterTariffSets.id })
       .from(logisticsClusterTariffSets)
       .where(
         and(
-          eq(logisticsClusterTariffSets.id, shop.tariffSetId),
+          eq(logisticsClusterTariffSets.id, shopSetId),
+          eq(logisticsClusterTariffSets.kind, kind),
           or(
             isNull(logisticsClusterTariffSets.workspaceId),
             eq(logisticsClusterTariffSets.workspaceId, shop.workspaceId),
@@ -81,14 +99,24 @@ export async function resolveTariffSetId(
     if (chosen) return chosen.id;
   }
 
-  // 3. Latest global.
-  const [latestGlobal] = await db
-    .select({ id: logisticsClusterTariffSets.id })
-    .from(logisticsClusterTariffSets)
-    .where(isNull(logisticsClusterTariffSets.workspaceId))
-    .orderBy(desc(logisticsClusterTariffSets.uploadedAt))
-    .limit(1);
-  return latestGlobal?.id ?? null;
+  // 3. Для regular — latest global. Для KGT global fallback не делаем —
+  //    NULL значит «нет KGT-сетки», calc-engine откатится на табличный
+  //    логистический lookup.
+  if (kind === "regular") {
+    const [latestGlobal] = await db
+      .select({ id: logisticsClusterTariffSets.id })
+      .from(logisticsClusterTariffSets)
+      .where(
+        and(
+          isNull(logisticsClusterTariffSets.workspaceId),
+          eq(logisticsClusterTariffSets.kind, "regular"),
+        ),
+      )
+      .orderBy(desc(logisticsClusterTariffSets.uploadedAt))
+      .limit(1);
+    return latestGlobal?.id ?? null;
+  }
+  return null;
 }
 
 /** Returns the rows of the resolved tariff set for a (shop, user) pair,
@@ -97,8 +125,9 @@ export async function loadActiveTariffRows(
   db: DB,
   shopId: number,
   userId?: number,
+  kind: TariffKind = "regular",
 ): Promise<ClusterTariffRow[]> {
-  const setId = await resolveTariffSetId(db, shopId, userId);
+  const setId = await resolveTariffSetId(db, shopId, userId, kind);
   if (!setId) return [];
   const rows = await db
     .select()

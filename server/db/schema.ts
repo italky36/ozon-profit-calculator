@@ -64,6 +64,9 @@ export const logisticsClusterTariffSets = pgTable(
       onDelete: "cascade",
     }),
     name: text("name").notNull(),
+    // 'regular' — обычные товары; 'kgt' — крупногабариты (отдельная сетка
+    // тарифов Ozon, применяется к товарам с products.is_kgt = true).
+    kind: text("kind").notNull().default("regular"),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true, mode: "date" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
@@ -180,6 +183,10 @@ export const shops = pgTable(
      * глобальный набор по uploadedAt. FK enforced at SQL migration level —
      * not modeled here to avoid Drizzle circular ref. */
     tariffSetId: integer("tariff_set_id"),
+    /** Активный КГТ-набор тарифов. Применяется к товарам с
+     * `products.is_kgt = true` для FBO/FBS логистики. NULL → нет KGT-
+     * сетки, FBO/FBS для КГТ-товаров считаются по табличному lookup. */
+    kgtTariffSetId: integer("kgt_tariff_set_id"),
     /** Per-shop admin. Workspace owner can manage any shop; everyone else
      * (managers) can manage only shops they themselves created. NULL → the
      * creator was removed from the workspace; only workspace owner manages. */
@@ -232,6 +239,8 @@ export const shopUserSettings = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     taxSettings: jsonb("tax_settings").$type<TaxSettings>(),
     tariffSetId: integer("tariff_set_id"),
+    /** Per-user override активного KGT-набора (NULL = inherit с shops.kgt_tariff_set_id). */
+    kgtTariffSetId: integer("kgt_tariff_set_id"),
     autoRefreshEnabled: boolean("auto_refresh_enabled"),
     autoRefreshIntervalMin: integer("auto_refresh_interval_min"),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),

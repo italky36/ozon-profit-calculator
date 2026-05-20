@@ -29,6 +29,13 @@
       "when": 1779267826776,
       "tag": "0003_operation_id_bigint",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779287849553,
+      "tag": "0004_kgt_tariffs",
+      "breakpoints": true
     }
   ]
 }

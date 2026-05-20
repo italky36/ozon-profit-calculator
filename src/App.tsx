@@ -706,6 +706,7 @@ export default function App() {
               shopName={activeShop?.name ?? null}
               shopColor={activeShop?.color ?? null}
               currentTariffSetId={activeShop?.tariffSetId ?? null}
+              currentKgtTariffSetId={activeShop?.kgtTariffSetId ?? null}
               userIsAdmin={false}
               shopIsOwner={activeShop?.isOwner ?? true}
               shopHasOverrides={activeShop?.hasOverrides ?? false}

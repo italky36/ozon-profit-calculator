@@ -242,11 +242,21 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
     } catch {
       return c.json({ error: "invalid json" }, 400);
     }
-    const r = (body ?? {}) as { tariffSetId?: unknown; shopId?: unknown };
+    const r = (body ?? {}) as {
+      tariffSetId?: unknown;
+      shopId?: unknown;
+      kind?: unknown;
+    };
     const explicit =
       r.shopId !== undefined ? String(r.shopId) : c.req.query("shopId");
     const shop = await resolveShop(db, user, explicit);
     if (typeof shop !== "number") return c.json({ error: shop.error }, shop.status);
+
+    const kindRaw = r.kind === undefined ? "regular" : String(r.kind);
+    if (kindRaw !== "regular" && kindRaw !== "kgt") {
+      return c.json({ error: "kind must be 'regular' or 'kgt'" }, 400);
+    }
+    const kind: "regular" | "kgt" = kindRaw;
 
     let tariffSetId: number | null;
     if (r.tariffSetId === null || r.tariffSetId === undefined) {
@@ -261,27 +271,41 @@ export function settingsRoutes(db: DB): Hono<SettingsEnv> {
         .where(
           and(
             eq(logisticsClusterTariffSets.id, n),
+            eq(logisticsClusterTariffSets.kind, kind),
             or(
               isNull(logisticsClusterTariffSets.workspaceId),
               eq(logisticsClusterTariffSets.workspaceId, user.workspaceId),
             ),
           ),
         );
-      if (!set) return c.json({ error: "tariff set not found" }, 404);
+      if (!set)
+        return c.json(
+          { error: `tariff set not found for kind=${kind}` },
+          404,
+        );
       tariffSetId = n;
     }
 
     const [shopRow] = await db
-      .select({ tariffSetId: shops.tariffSetId })
+      .select({
+        tariffSetId: shops.tariffSetId,
+        kgtTariffSetId: shops.kgtTariffSetId,
+      })
       .from(shops)
       .where(eq(shops.id, shop));
     if (!shopRow) return c.json({ error: "shop not found" }, 404);
 
-    const matchesDefault = (shopRow.tariffSetId ?? null) === tariffSetId;
-    await upsertShopUserSettings(db, shop, user.id, {
-      tariffSetId: matchesDefault ? null : tariffSetId,
-    });
-    return c.json({ shopId: shop, tariffSetId });
+    const shopDefault =
+      (kind === "kgt" ? shopRow.kgtTariffSetId : shopRow.tariffSetId) ?? null;
+    const matchesDefault = shopDefault === tariffSetId;
+    const overridePatch: Record<string, number | null> = {};
+    if (kind === "kgt") {
+      overridePatch.kgtTariffSetId = matchesDefault ? null : tariffSetId;
+    } else {
+      overridePatch.tariffSetId = matchesDefault ? null : tariffSetId;
+    }
+    await upsertShopUserSettings(db, shop, user.id, overridePatch);
+    return c.json({ shopId: shop, kind, tariffSetId });
   });
 
   return app;

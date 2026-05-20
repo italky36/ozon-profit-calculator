@@ -11,6 +11,9 @@ interface Props {
   isOwner: boolean;
   /** Called whenever the selection / list changes — App refetches refs+shops. */
   onChanged: () => void | Promise<void>;
+  /** Тип набора: regular (по умолчанию) или kgt (отдельная сетка тарифов
+   *  для крупногабаритов). Фильтрует список + влияет на upload/select. */
+  kind?: "regular" | "kgt";
 }
 
 /** Cluster tariff-set selector with inline upload + delete.
@@ -22,8 +25,11 @@ export default function TariffSetsControl({
   userIsAdmin,
   isOwner,
   onChanged,
+  kind = "regular",
 }: Props) {
-  const [sets, setSets] = useState<TariffSet[]>([]);
+  const [allSets, setAllSets] = useState<TariffSet[]>([]);
+  const sets = allSets.filter((s) => (s.kind ?? "regular") === kind);
+  const setSets = setAllSets; // alias для совместимости c существующим кодом ниже
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -61,14 +67,15 @@ export default function TariffSetsControl({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setSets]);
 
-  // Resolve effective set: explicit override OR latest global.
+  // Resolve effective set: explicit override OR latest global (только для regular).
   const effectiveSetId = (() => {
     if (currentTariffSetId !== null) {
       const exists = sets.find((s) => s.id === currentTariffSetId);
       if (exists) return exists.id;
     }
+    if (kind !== "regular") return null;
     const globals = sets.filter((s) => s.scope === "global");
     if (globals.length === 0) return null;
     return globals.reduce((acc, s) => (s.uploadedAt > acc.uploadedAt ? s : acc))
@@ -82,9 +89,13 @@ export default function TariffSetsControl({
     setErr(null);
     try {
       if (isOwner) {
-        await api.shops.update(shopId, { tariffSetId: nextId });
+        const patch =
+          kind === "kgt"
+            ? { kgtTariffSetId: nextId }
+            : { tariffSetId: nextId };
+        await api.shops.update(shopId, patch);
       } else {
-        await api.settings.putTariffSet(nextId, shopId);
+        await api.settings.putTariffSet(nextId, shopId, kind);
       }
       await onChanged();
     } catch (e) {
@@ -112,11 +123,16 @@ export default function TariffSetsControl({
         name: uploadName.trim(),
         scope: uploadScope,
         shopId: uploadScope === "shop" ? shopId : undefined,
+        kind,
       });
       if (isOwner) {
-        await api.shops.update(shopId, { tariffSetId: created.id });
+        const patch =
+          kind === "kgt"
+            ? { kgtTariffSetId: created.id }
+            : { tariffSetId: created.id };
+        await api.shops.update(shopId, patch);
       } else {
-        await api.settings.putTariffSet(created.id, shopId);
+        await api.settings.putTariffSet(created.id, shopId, kind);
       }
       setShowUploadForm(false);
       setUploadName("");
@@ -171,9 +187,11 @@ export default function TariffSetsControl({
           style={{ minWidth: 220 }}
         >
           <option value="">
-            {sets.filter((s) => s.scope === "global").length > 0
-              ? "Авто (последний глобальный)"
-              : "— нет наборов —"}
+            {kind === "kgt"
+              ? "— не выбран (КГТ считаем по табличной формуле) —"
+              : sets.filter((s) => s.scope === "global").length > 0
+                ? "Авто (последний глобальный)"
+                : "— нет наборов —"}
           </option>
           {sets.map((s) => {
             const date = new Date(s.uploadedAt).toLocaleDateString("ru-RU");

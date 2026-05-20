@@ -6,6 +6,7 @@ import type { TaxSettings } from "../../src/types";
 export interface EffectiveShopSettings {
   taxSettings: TaxSettings;
   tariffSetId: number | null;
+  kgtTariffSetId: number | null;
   autoRefreshEnabled: boolean;
   autoRefreshIntervalMin: number;
 }
@@ -25,6 +26,7 @@ export async function resolveShopSettings(
     .select({
       taxSettings: shops.taxSettings,
       tariffSetId: shops.tariffSetId,
+      kgtTariffSetId: shops.kgtTariffSetId,
       autoRefreshEnabled: shops.autoRefreshEnabled,
       autoRefreshIntervalMin: shops.autoRefreshIntervalMin,
     })
@@ -44,8 +46,8 @@ export async function resolveShopSettings(
 
   return {
     taxSettings: override?.taxSettings ?? shop.taxSettings,
-    tariffSetId:
-      override?.tariffSetId ?? shop.tariffSetId,
+    tariffSetId: override?.tariffSetId ?? shop.tariffSetId,
+    kgtTariffSetId: override?.kgtTariffSetId ?? shop.kgtTariffSetId,
     autoRefreshEnabled:
       override?.autoRefreshEnabled ?? shop.autoRefreshEnabled,
     autoRefreshIntervalMin:
@@ -56,6 +58,7 @@ export async function resolveShopSettings(
 export interface ShopUserSettingsPatch {
   taxSettings?: TaxSettings | null;
   tariffSetId?: number | null;
+  kgtTariffSetId?: number | null;
   autoRefreshEnabled?: boolean | null;
   autoRefreshIntervalMin?: number | null;
 }
@@ -94,6 +97,7 @@ export async function upsertShopUserSettings(
       userId,
       taxSettings: patch.taxSettings ?? null,
       tariffSetId: patch.tariffSetId ?? null,
+      kgtTariffSetId: patch.kgtTariffSetId ?? null,
       autoRefreshEnabled: patch.autoRefreshEnabled ?? null,
       autoRefreshIntervalMin: patch.autoRefreshIntervalMin ?? null,
       updatedAt: now,

@@ -18,6 +18,9 @@ export interface Shop {
   /** Selected cluster tariff set (effective for current user). NULL → fall
    * back to latest global. */
   tariffSetId: number | null;
+  /** Selected KGT tariff set (effective for current user). NULL → нет
+   * KGT-сетки, для КГТ-товаров calc откатится на табличный logistics. */
+  kgtTariffSetId: number | null;
   createdAt: number;
   updatedAt: number;
   /** True when the current user can edit shop metadata + assignment.
@@ -35,6 +38,8 @@ export interface TariffSet {
   id: number;
   shopId: number | null;
   scope: "global" | "shop";
+  /** 'regular' — обычные товары; 'kgt' — крупногабариты. */
+  kind: "regular" | "kgt";
   name: string;
   uploadedAt: number;
   rowCount: number;
@@ -55,6 +60,7 @@ export interface ShopPatch {
   autoRefreshEnabled?: boolean;
   autoRefreshIntervalMin?: number;
   tariffSetId?: number | null;
+  kgtTariffSetId?: number | null;
 }
 
 interface RefsResponse extends References {
@@ -822,11 +828,13 @@ export const api = {
         name: string;
         scope: "global" | "shop";
         shopId?: number;
+        kind?: "regular" | "kgt";
       }): Promise<TariffSet & { fromClusters: string[]; toClusters: string[] }> => {
         const fd = new FormData();
         fd.append("file", input.file);
         fd.append("name", input.name);
         fd.append("scope", input.scope);
+        if (input.kind) fd.append("kind", input.kind);
         if (input.scope === "shop" && input.shopId != null) {
           fd.append("shopId", String(input.shopId));
         }
@@ -982,14 +990,20 @@ export const api = {
           body: JSON.stringify(shopId != null ? { ...next, shopId } : next),
         },
       ),
-    putTariffSet: (tariffSetId: number | null, shopId?: number) =>
-      apiFetch<{ shopId: number; tariffSetId: number | null }>(
+    putTariffSet: (
+      tariffSetId: number | null,
+      shopId?: number,
+      kind: "regular" | "kgt" = "regular",
+    ) =>
+      apiFetch<{ shopId: number; tariffSetId: number | null; kind: "regular" | "kgt" }>(
         "/settings/tariff-set",
         {
           method: "PUT",
-          body: JSON.stringify(
-            shopId != null ? { tariffSetId, shopId } : { tariffSetId },
-          ),
+          body: JSON.stringify({
+            tariffSetId,
+            kind,
+            ...(shopId != null ? { shopId } : {}),
+          }),
         },
       ),
   },

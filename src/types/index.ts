@@ -254,7 +254,13 @@ export interface References {
   storage: StorageRow[];
   logisticsTariffs: LogisticsTariffRow[];
   logisticsSettings: LogisticsSettings;
-  /** Точные тарифы per-cluster-pair, опциональные. Заполняются загрузкой
-   * `Тарифы_с_6_апреля`-листа из Excel-эталона Ozon. */
+  /** Точные тарифы per-cluster-pair для обычных (не-КГТ) товаров,
+   * опциональные. Заполняются загрузкой xlsx тарифной сетки Ozon. */
   logisticsClusterTariffs?: LogisticsClusterTariffRow[];
+  /** Отдельная тарифная сетка для КГТ-товаров (isKgt=true). Структура
+   * идентична logisticsClusterTariffs, но числа — из публикуемой Ozon
+   * сетки тарифов «Для КГТ». Применяется к FBO+FBS логистике. NULL
+   * означает «нет KGT-сетки» — calc для КГТ-товаров откатится на
+   * табличный logisticsTariffs (приближение). */
+  kgtClusterTariffs?: LogisticsClusterTariffRow[] | null;
 }
