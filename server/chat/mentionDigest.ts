@@ -94,11 +94,10 @@ async function flushUser(db: DB, userId: number): Promise<void> {
   const ids = [...pending.messageIds];
   if (ids.length === 0) return;
 
-  const user = await db
+  const [user] = await db
     .select({ id: users.id, email: users.email, fullName: users.fullName })
     .from(users)
-    .where(eq(users.id, userId))
-    .get();
+    .where(eq(users.id, userId));
   if (!user) return;
 
   const rows = await db
@@ -144,7 +143,8 @@ async function flushUser(db: DB, userId: number): Promise<void> {
     items,
   });
   try {
-    await getEmailClient().send(msg);
+    const client = await getEmailClient();
+    await client.send(msg);
   } catch {
     // Best-effort: digest send failures are not fatal. Next mention will
     // start a fresh batch.

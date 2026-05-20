@@ -101,11 +101,11 @@ async function joinSameWorkspace(
   ownerWorkspaceId: number,
   memberUserId: number,
 ) {
-  env.db
+  await env.db
     .delete(workspaceMembers)
     .where(eq(workspaceMembers.userId, memberUserId))
-    .run();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId: ownerWorkspaceId,
@@ -114,7 +114,7 @@ async function joinSameWorkspace(
       status: "active",
       createdAt: new Date(),
     })
-    .run();
+    ;
 }
 
 describe("chat stage 2.1 — read receipts", () => {
@@ -124,7 +124,7 @@ describe("chat stage 2.1 — read receipts", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
@@ -135,12 +135,12 @@ describe("chat stage 2.1 — read receipts", () => {
     const chs = await listChannels(env, owner.cookie);
     channelId = chs[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
     _resetMentionDigest();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("unreadCount=0 for fresh channel; bumps for messages from others; ignores own messages", async () => {
@@ -256,7 +256,7 @@ describe("chat stage 2.2 — threads", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
@@ -267,12 +267,12 @@ describe("chat stage 2.2 — threads", () => {
     const chs = await listChannels(env, owner.cookie);
     channelId = chs[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
     _resetMentionDigest();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("replies are NOT returned in the channel feed", async () => {
@@ -381,7 +381,7 @@ describe("chat stage 2.3 — mention email digest", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
@@ -394,12 +394,12 @@ describe("chat stage 2.3 — mention email digest", () => {
     const chs = await listChannels(env, owner.cookie);
     channelId = chs[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
     _resetMentionDigest();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("queues a digest when mentioned user is offline", async () => {
@@ -472,7 +472,7 @@ describe("chat per-message read indicator (readerUserIds)", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     _resetPresence();
@@ -483,12 +483,12 @@ describe("chat per-message read indicator (readerUserIds)", () => {
     const chs = await listChannels(env, owner.cookie);
     channelId = chs[0]!.id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
     _resetPresence();
     _resetMentionDigest();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   async function listMessages(cookie: string): Promise<MessageOut[]> {

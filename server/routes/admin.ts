@@ -52,10 +52,10 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   const app = new Hono<AdminEnv>();
   app.use("*", requireSysadmin);
 
-  app.get("/users", (c) => {
-    const rows = db.select().from(users).all();
+  app.get("/users", async (c) => {
+    const rows = await db.select().from(users);
     // Workspace lookup in a single query — keeps /users a constant-cost call.
-    const memberships = db
+    const memberships = await db
       .select({
         userId: workspaceMembers.userId,
         workspaceId: workspaces.id,
@@ -65,7 +65,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       })
       .from(workspaceMembers)
       .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
-      .all();
+      ;
     const byUser = new Map<
       number,
       { id: number; name: string; slug: string; role: string }
@@ -115,20 +115,21 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (id === me.id && !nextSysadmin)
       return c.json({ error: "cannot demote yourself" }, 400);
 
-    const existing = db
+    const [existing] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "user not found" }, 404);
 
     const now = new Date();
-    db.update(users)
+    await db.update(users)
       .set({ isSysadmin: nextSysadmin, updatedAt: now })
       .where(eq(users.id, id))
-      .run();
+      ;
 
-    const updated = db.select().from(users).where(eq(users.id, id)).get()!;
+    const [updated] = await db.select().from(users).where(eq(users.id, id));
+    if (!updated) return c.json({ error: "user not found" }, 404);
     return c.json(userPayload(updated));
   });
 
@@ -151,29 +152,30 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (id === me.id)
       return c.json({ error: "cannot block yourself" }, 400);
 
-    const existing = db
+    const [existing] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "user not found" }, 404);
 
     const now = new Date();
-    db.update(users)
+    await db.update(users)
       .set({ isBlocked: r.blocked, updatedAt: now })
       .where(eq(users.id, id))
-      .run();
+      ;
 
     if (r.blocked) {
       // Kick the user off all devices immediately.
-      db.delete(sessions).where(eq(sessions.userId, id)).run();
+      await db.delete(sessions).where(eq(sessions.userId, id));
     }
 
-    const updated = db.select().from(users).where(eq(users.id, id)).get()!;
+    const [updated] = await db.select().from(users).where(eq(users.id, id));
+    if (!updated) return c.json({ error: "user not found" }, 404);
     return c.json(userPayload(updated));
   });
 
-  app.delete("/users/:id", (c) => {
+  app.delete("/users/:id", async (c) => {
     const me = c.get("user")!;
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id <= 0)
@@ -181,16 +183,16 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (id === me.id)
       return c.json({ error: "cannot delete yourself" }, 400);
 
-    const existing = db
+    const [existing] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "user not found" }, 404);
 
     // sessions/email_verification_tokens/user_settings/workspace_members
     // cascade via FK.
-    db.delete(users).where(eq(users.id, id)).run();
+    await db.delete(users).where(eq(users.id, id));
     return c.json({ message: "user deleted" });
   });
 
@@ -199,15 +201,15 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (!Number.isInteger(id) || id <= 0)
       return c.json({ error: "invalid id" }, 400);
 
-    const row = db.select().from(users).where(eq(users.id, id)).get();
+    const [row] = await db.select().from(users).where(eq(users.id, id));
     if (!row) return c.json({ error: "user not found" }, 404);
     if (row.isVerified)
       return c.json({ error: "user already verified" }, 400);
 
-    const { token } = createVerificationToken(db, row.id);
+    const { token } = await createVerificationToken(db, row.id);
     const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generateVerificationEmail(row.email, verifyLink));
+      (await getEmailClient()).send(generateVerificationEmail(row.email, verifyLink));
     } catch (e) {
       console.error("[admin] failed to send verification email:", e);
       return c.json({ error: "failed to send email" }, 500);
@@ -215,32 +217,32 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     return c.json({ message: "verification email sent" });
   });
 
-  app.post("/users/:id/revoke-sessions", (c) => {
+  app.post("/users/:id/revoke-sessions", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id <= 0)
       return c.json({ error: "invalid id" }, 400);
 
-    const existing = db
+    const [existing] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "user not found" }, 404);
 
-    db.delete(sessions).where(eq(sessions.userId, id)).run();
+    await db.delete(sessions).where(eq(sessions.userId, id));
     return c.json({ message: "sessions revoked" });
   });
 
   // === SMTP settings ===
 
-  app.get("/smtp", (c) => {
-    const row = db
+  app.get("/smtp", async (c) => {
+    const [row] = await db
       .select()
       .from(smtpSettings)
       .where(eq(smtpSettings.id, 1))
-      .get();
+      ;
     return c.json({
-      source: describeEmailSource(),
+      source: await describeEmailSource(),
       host: row?.host ?? null,
       port: row?.port ?? null,
       user: row?.user ?? null,
@@ -300,11 +302,11 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       secure = r.secure as SecureMode;
     }
 
-    const existing = db
+    const [existing] = await db
       .select()
       .from(smtpSettings)
       .where(eq(smtpSettings.id, 1))
-      .get();
+      ;
     const pass =
       typeof r.pass === "string" && r.pass.length > 0
         ? r.pass
@@ -313,7 +315,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
 
     const now = new Date();
     if (existing) {
-      db.update(smtpSettings)
+      await db.update(smtpSettings)
         .set({
           host: r.host,
           port: r.port,
@@ -324,9 +326,9 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
           updatedAt: now,
         })
         .where(eq(smtpSettings.id, 1))
-        .run();
+        ;
     } else {
-      db.insert(smtpSettings)
+      await db.insert(smtpSettings)
         .values({
           id: 1,
           host: r.host,
@@ -337,14 +339,14 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
           secure,
           updatedAt: now,
         })
-        .run();
+        ;
     }
     invalidateEmailClient();
     return c.json({ ok: true });
   });
 
-  app.delete("/smtp", (c) => {
-    db.delete(smtpSettings).where(eq(smtpSettings.id, 1)).run();
+  app.delete("/smtp", async (c) => {
+    await db.delete(smtpSettings).where(eq(smtpSettings.id, 1));
     invalidateEmailClient();
     return c.json({ ok: true });
   });
@@ -364,7 +366,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         ? r.subject.trim()
         : "Тест отправки писем — Калькулятор Ozon";
 
-    const source = describeEmailSource();
+    const source = await describeEmailSource();
     if (source === "console") {
       return c.json(
         {
@@ -378,7 +380,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     }
 
     try {
-      await getEmailClient().send({
+      (await getEmailClient()).send({
         to: r.to,
         subject,
         text:
@@ -413,13 +415,13 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
 
   /** All workspaces in the platform with member/shop counts and the email of
    * the primary owner. Paginated only by limit (we expect <10k workspaces). */
-  app.get("/workspaces", (c) => {
-    const rows = db.all<{
+  app.get("/workspaces", async (c) => {
+    const result = await db.execute<{
       id: number;
       name: string;
       slug: string;
-      created_at: number;
-      suspended_at: number | null;
+      created_at: Date;
+      suspended_at: Date | null;
       member_count: number;
       shop_count: number;
       owner_email: string | null;
@@ -442,6 +444,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       FROM workspaces w
       ORDER BY w.created_at ASC
     `);
+    const rows = result.rows;
     return c.json(
       rows.map((r) => ({
         id: r.id,
@@ -450,16 +453,9 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         memberCount: Number(r.member_count),
         shopCount: Number(r.shop_count),
         ownerEmail: r.owner_email ?? null,
-        createdAt:
-          typeof r.created_at === "number"
-            ? r.created_at
-            : new Date(r.created_at).getTime(),
+        createdAt: new Date(r.created_at).getTime(),
         suspendedAt:
-          r.suspended_at == null
-            ? null
-            : typeof r.suspended_at === "number"
-              ? r.suspended_at
-              : new Date(r.suspended_at).getTime(),
+          r.suspended_at == null ? null : new Date(r.suspended_at).getTime(),
       })),
     );
   });
@@ -482,35 +478,35 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     if (typeof r.suspended !== "boolean")
       return c.json({ error: "suspended must be boolean" }, 400);
 
-    const existing = db
+    const [existing] = await db
       .select({ id: workspaces.id, suspendedAt: workspaces.suspendedAt })
       .from(workspaces)
       .where(eq(workspaces.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "workspace not found" }, 404);
 
     const now = new Date();
-    db.update(workspaces)
+    await db.update(workspaces)
       .set({
         suspendedAt: r.suspended ? now : null,
         updatedAt: now,
       })
       .where(eq(workspaces.id, id))
-      .run();
+      ;
 
     if (r.suspended) {
       // Kick every non-sysadmin member off all devices. Sysadmins shouldn't be
       // in workspace_members in the first place, but filter defensively in
       // case a future migration puts them there.
-      const memberIds = db
-        .select({ userId: workspaceMembers.userId })
-        .from(workspaceMembers)
-        .innerJoin(users, eq(users.id, workspaceMembers.userId))
-        .where(eq(workspaceMembers.workspaceId, id))
-        .all()
-        .map((m) => m.userId);
+      const memberIds = (
+        await db
+          .select({ userId: workspaceMembers.userId })
+          .from(workspaceMembers)
+          .innerJoin(users, eq(users.id, workspaceMembers.userId))
+          .where(eq(workspaceMembers.workspaceId, id))
+      ).map((m) => m.userId);
       if (memberIds.length > 0) {
-        db.delete(sessions).where(inArray(sessions.userId, memberIds)).run();
+        await db.delete(sessions).where(inArray(sessions.userId, memberIds));
       }
     }
 
@@ -523,17 +519,17 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   // Members of a specific workspace — feeds the accordion-expansion on the
   // sysadmin → Команды tab. Sysadmin-only by virtue of the requireSysadmin
   // middleware mounted on this router.
-  app.get("/workspaces/:id/members", (c) => {
+  app.get("/workspaces/:id/members", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id <= 0)
       return c.json({ error: "invalid id" }, 400);
-    const ws = db
+    const [ws] = await db
       .select({ id: workspaces.id })
       .from(workspaces)
       .where(eq(workspaces.id, id))
-      .get();
+      ;
     if (!ws) return c.json({ error: "workspace not found" }, 404);
-    const rows = db
+    const rows = await db
       .select({
         userId: workspaceMembers.userId,
         email: users.email,
@@ -545,7 +541,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       .from(workspaceMembers)
       .innerJoin(users, eq(users.id, workspaceMembers.userId))
       .where(eq(workspaceMembers.workspaceId, id))
-      .all();
+      ;
     return c.json(
       rows
         .map((r) => ({
@@ -560,19 +556,19 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     );
   });
 
-  app.delete("/workspaces/:id", (c) => {
+  app.delete("/workspaces/:id", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id <= 0)
       return c.json({ error: "invalid id" }, 400);
-    const existing = db
+    const [existing] = await db
       .select({ id: workspaces.id })
       .from(workspaces)
       .where(eq(workspaces.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "workspace not found" }, 404);
     // Cascades: members, shops, products, finance_transactions, import_runs,
     // tariff sets, invites — all FK ON DELETE CASCADE to workspaces.id.
-    db.delete(workspaces).where(eq(workspaces.id, id)).run();
+    await db.delete(workspaces).where(eq(workspaces.id, id));
     return c.json({ ok: true });
   });
 
@@ -582,13 +578,13 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   // «сгенерировать»).
   // DELETE — clear DB row → fallback to env vars.
   // POST /generate — fresh keypair returned to UI (sysadmin chooses to save).
-  app.get("/vapid", (c) => {
-    const row = db
+  app.get("/vapid", async (c) => {
+    const [row] = await db
       .select()
       .from(vapidSettings)
       .where(eq(vapidSettings.id, 1))
-      .get();
-    const cfg = getVapidConfig();
+      ;
+    const cfg = await getVapidConfig();
     const envFallback =
       !row && cfg != null
         ? "env"
@@ -597,7 +593,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
           : ("none" as const);
     return c.json({
       source: envFallback,
-      configured: isPushConfigured(),
+      configured: await isPushConfigured(),
       publicKey: cfg?.publicKey ?? null,
       subject: cfg?.subject ?? null,
       // Never echo the private key — only confirm whether one is stored.
@@ -633,32 +629,32 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       );
     }
     const now = new Date();
-    const existing = db
+    const [existing] = await db
       .select({ id: vapidSettings.id })
       .from(vapidSettings)
       .where(eq(vapidSettings.id, 1))
-      .get();
+      ;
     if (existing) {
-      db.update(vapidSettings)
+      await db.update(vapidSettings)
         .set({ publicKey, privateKey, subject, updatedAt: now })
         .where(eq(vapidSettings.id, 1))
-        .run();
+        ;
     } else {
-      db.insert(vapidSettings)
+      await db.insert(vapidSettings)
         .values({ id: 1, publicKey, privateKey, subject, updatedAt: now })
-        .run();
+        ;
     }
     invalidateVapid();
     return c.json({ ok: true });
   });
 
-  app.delete("/vapid", (c) => {
-    db.delete(vapidSettings).where(eq(vapidSettings.id, 1)).run();
+  app.delete("/vapid", async (c) => {
+    await db.delete(vapidSettings).where(eq(vapidSettings.id, 1));
     invalidateVapid();
     return c.json({ ok: true });
   });
 
-  app.post("/vapid/generate", (c) => {
+  app.post("/vapid/generate", async (c) => {
     const { publicKey, privateKey } = generateVapidKeys();
     return c.json({ publicKey, privateKey });
   });
@@ -667,12 +663,12 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   // Sysadmin manages the STUN/TURN pool that clients use when building a
   // RTCPeerConnection. List endpoint mirrors /api/chat/ice (which strips
   // disabled rows + credentials) but here we expose everything.
-  app.get("/ice", (c) => {
-    const rows = db
+  app.get("/ice", async (c) => {
+    const rows = await db
       .select()
       .from(iceServers)
       .orderBy(iceServers.sortOrder, iceServers.id)
-      .all();
+      ;
     return c.json({
       items: rows.map((r) => ({
         id: r.id,
@@ -715,7 +711,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
     const sortOrder =
       typeof body.sortOrder === "number" ? Math.trunc(body.sortOrder) : 0;
     const now = new Date();
-    const result = db
+    const [result] = await db
       .insert(iceServers)
       .values({
         urls,
@@ -727,7 +723,7 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
         updatedAt: now,
       })
       .returning()
-      .get();
+      ;
     return c.json({
       id: result.id,
       urls: result.urls,
@@ -741,11 +737,11 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
   app.patch("/ice/:id", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
-    const existing = db
+    const [existing] = await db
       .select()
       .from(iceServers)
       .where(eq(iceServers.id, id))
-      .get();
+      ;
     if (!existing) return c.json({ error: "not found" }, 404);
     let body: Record<string, unknown>;
     try {
@@ -783,14 +779,14 @@ export function adminRoutes(db: DB): Hono<AdminEnv> {
       return c.json({ error: "нет изменений" }, 400);
     }
     patch.updatedAt = new Date();
-    db.update(iceServers).set(patch).where(eq(iceServers.id, id)).run();
+    await db.update(iceServers).set(patch).where(eq(iceServers.id, id));
     return c.json({ ok: true });
   });
 
-  app.delete("/ice/:id", (c) => {
+  app.delete("/ice/:id", async (c) => {
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
-    db.delete(iceServers).where(eq(iceServers.id, id)).run();
+    await db.delete(iceServers).where(eq(iceServers.id, id));
     return c.json({ ok: true });
   });
 

@@ -93,7 +93,7 @@ export async function runCatalogImport(
       mapCatalogEntry(info, priceMap.get(info.id), attrsMap.get(info.id), categories),
     );
 
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       for (const entry of mapped) {
         const catalogIncomplete =
           !entry.patch.category || !entry.patch.productType;
@@ -103,7 +103,7 @@ export async function runCatalogImport(
         let importerHadRow = false;
 
         for (const assigneeId of assignees) {
-          const [existing] = tx
+          const [existing] = await tx
             .select()
             .from(products)
             .where(
@@ -112,8 +112,7 @@ export async function runCatalogImport(
                 eq(products.shopId, shopId),
                 eq(products.userId, assigneeId),
               ),
-            )
-            .all();
+            );
 
           if (existing) {
             if (assigneeId === userId) importerHadRow = true;
@@ -145,7 +144,7 @@ export async function runCatalogImport(
               ozonStatusName: entry.status.statusName,
               ozonStatusDescription: entry.status.statusDescription,
             };
-            tx.update(products)
+            await tx.update(products)
               .set({
                 productName: patch.productName,
                 category: patch.category,
@@ -174,7 +173,7 @@ export async function runCatalogImport(
                   eq(products.userId, assigneeId),
                 ),
               )
-              .run();
+              ;
           } else {
             if (catalogIncomplete) continue;
             const now = new Date();
@@ -185,7 +184,7 @@ export async function runCatalogImport(
               assigneeId === userId && entry.costPrice != null
                 ? entry.costPrice
                 : NEW_PRODUCT_DEFAULTS.costPrice;
-            tx.insert(products)
+            await tx.insert(products)
               .values({
                 ...NEW_PRODUCT_DEFAULTS,
                 clustersCount: String(NEW_PRODUCT_DEFAULTS.clustersCount),
@@ -219,7 +218,7 @@ export async function runCatalogImport(
                 ozonStatusName: entry.status.statusName,
                 ozonStatusDescription: entry.status.statusDescription,
               })
-              .run();
+              ;
           }
         }
 
@@ -331,10 +330,10 @@ export async function runFinanceImport(
   };
 
   for await (const page of iterateTransactions(client, filter)) {
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       for (const op of page) {
         const articleId = resolveArticle(op);
-        const result = tx
+        const inserted = await tx
           .insert(financeTransactions)
           .values({
             shopId,
@@ -350,8 +349,8 @@ export async function runFinanceImport(
             raw: op,
           })
           .onConflictDoNothing()
-          .run();
-        if (result.changes > 0) counters.inserted++;
+          .returning({ operationId: financeTransactions.operationId });
+        if (inserted.length > 0) counters.inserted++;
         else counters.skipped++;
         counters.itemsProcessed++;
       }
@@ -419,11 +418,11 @@ export function importRoutes(
           importShopId,
           importWorkspaceId,
           importUserId,
-          (c2) => {
-            db.update(importRuns)
+          async (c2) => {
+            await db.update(importRuns)
               .set({ itemsProcessed: c2.itemsProcessed })
               .where(eq(importRuns.id, run.id))
-              .run();
+              ;
           },
         );
         await db
@@ -542,8 +541,8 @@ export function importRoutes(
             importWorkspaceId,
             importUserId,
             chunkFilter,
-            (c2) => {
-              db.update(importRuns)
+            async (c2) => {
+              await db.update(importRuns)
                 .set({
                   itemsProcessed: total.itemsProcessed + c2.itemsProcessed,
                   params: {
@@ -556,7 +555,7 @@ export function importRoutes(
                   },
                 })
                 .where(eq(importRuns.id, run.id))
-                .run();
+                ;
             },
           );
           total.itemsProcessed += counters.itemsProcessed;
@@ -743,7 +742,7 @@ export function importRoutes(
       };
       // Catalog fields fan out to every assignee's row for this shop+article;
       // cost_price syncs only to the importing user.
-      db.update(products)
+      await db.update(products)
         .set({
           productName: entry.patch.productName,
           category: entry.patch.category || productRow.category,
@@ -771,12 +770,12 @@ export function importRoutes(
             eq(products.workspaceId, user.workspaceId),
           ),
         )
-        .run();
+        ;
       if (entry.costPrice != null) {
-        db.update(products)
+        await db.update(products)
           .set({ costPrice: entry.costPrice })
           .where(eq(products.id, productRow.id))
-          .run();
+          ;
       }
 
       return c.json({
@@ -820,7 +819,7 @@ export function importRoutes(
       );
 
     let linked = 0;
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       for (const r of orphans) {
         const raw = (r.raw ?? {}) as {
           items?: Array<{ sku?: number; offer_id?: string }>;
@@ -845,7 +844,7 @@ export function importRoutes(
           }
         }
         if (articleId) {
-          tx.update(financeTransactions)
+          await tx.update(financeTransactions)
             .set({ articleId })
             .where(
               and(
@@ -853,7 +852,7 @@ export function importRoutes(
                 eq(financeTransactions.workspaceId, r.workspaceId),
               ),
             )
-            .run();
+            ;
           linked++;
         }
       }

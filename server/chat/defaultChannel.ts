@@ -7,13 +7,13 @@ const DEFAULT_CHANNEL_NAME = "общий";
 /** Idempotent: ensure the workspace has a default («общий») channel.
  * Migration 0028 backfills this for existing workspaces; this helper handles
  * workspaces created at runtime (registration, admin-created teams). */
-export function ensureDefaultChannel(
+export async function ensureDefaultChannel(
   db: DB,
   workspaceId: number,
   createdBy: number,
   now: Date = new Date(),
-): void {
-  const existing = db
+): Promise<void> {
+  const [existing] = await db
     .select({ id: chatChannels.id })
     .from(chatChannels)
     .where(
@@ -21,16 +21,13 @@ export function ensureDefaultChannel(
         eq(chatChannels.workspaceId, workspaceId),
         eq(chatChannels.isDefault, true),
       ),
-    )
-    .get();
+    );
   if (existing) return;
-  db.insert(chatChannels)
-    .values({
-      workspaceId,
-      name: DEFAULT_CHANNEL_NAME,
-      isDefault: true,
-      createdBy,
-      createdAt: now,
-    })
-    .run();
+  await db.insert(chatChannels).values({
+    workspaceId,
+    name: DEFAULT_CHANNEL_NAME,
+    isDefault: true,
+    createdBy,
+    createdAt: now,
+  });
 }

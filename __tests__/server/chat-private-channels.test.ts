@@ -50,16 +50,16 @@ interface ChannelOut {
   canManage: boolean;
 }
 
-function joinSameWorkspace(
+async function joinSameWorkspace(
   env: TestEnv,
   workspaceId: number,
   userId: number,
-): void {
-  env.db
+): Promise<void> {
+  await env.db
     .delete(workspaceMembers)
     .where(eq(workspaceMembers.userId, userId))
-    .run();
-  env.db
+    ;
+  await env.db
     .insert(workspaceMembers)
     .values({
       workspaceId,
@@ -68,7 +68,7 @@ function joinSameWorkspace(
       status: "active",
       createdAt: new Date(),
     })
-    .run();
+    ;
 }
 
 async function listChannels(env: TestEnv, cookie: string): Promise<ChannelOut[]> {
@@ -85,19 +85,19 @@ describe("private channels: creation + visibility", () => {
   let third: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "pc-owner@x.com", "password");
     mate = await loginAs(env, "pc-mate@x.com", "password");
     third = await loginAs(env, "pc-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("creates a private channel with creator + initial members", async () => {
@@ -205,14 +205,14 @@ describe("private channels: members CRUD gating", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "pcm-owner@x.com", "password");
     mate = await loginAs(env, "pcm-mate@x.com", "password");
     third = await loginAs(env, "pcm-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
     // owner creates private channel with only owner + mate
     const r = await env.app.request("/api/chat/channels", {
       method: "POST",
@@ -225,10 +225,10 @@ describe("private channels: members CRUD gating", () => {
     });
     channelId = ((await r.json()) as ChannelOut).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("creator can add a third member", async () => {
@@ -316,14 +316,14 @@ describe("private channels: pubsub leak protection", () => {
   let channelId: number;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     setFileStorage(makeMemStorage().impl);
     _resetPubSub();
     owner = await loginAs(env, "pcl-owner@x.com", "password");
     mate = await loginAs(env, "pcl-mate@x.com", "password");
     third = await loginAs(env, "pcl-third@x.com", "password");
-    joinSameWorkspace(env, owner.workspaceId, mate.userId);
-    joinSameWorkspace(env, owner.workspaceId, third.userId);
+    await joinSameWorkspace(env, owner.workspaceId, mate.userId);
+    await joinSameWorkspace(env, owner.workspaceId, third.userId);
     const r = await env.app.request("/api/chat/channels", {
       method: "POST",
       headers: j(owner.cookie),
@@ -335,10 +335,10 @@ describe("private channels: pubsub leak protection", () => {
     });
     channelId = ((await r.json()) as ChannelOut).id;
   });
-  afterEach(() => {
+  afterEach(async () => {
     setFileStorage(null);
     _resetPubSub();
-    teardownTestEnv(env);
+    await teardownTestEnv(env);
   });
 
   it("third workspace member doesn't receive WS events from private channel", async () => {

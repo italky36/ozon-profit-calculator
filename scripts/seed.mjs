@@ -1,12 +1,10 @@
 import fs from "node:fs";
-import path from "node:path";
 import bcrypt from "bcryptjs";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import pg from "pg";
 
-const DB_PATH = process.env.DB_PATH ?? "data/app.db";
-const MIGRATIONS_DIR = "server/db/migrations";
+const DATABASE_URL =
+  process.env.DATABASE_URL ??
+  "postgresql://postgres:dev_password_change_me@localhost:5433/ozon_calc";
 const FALLBACK_TAX_FILE = "src/data/defaultTaxSettings.json";
 
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? "admin@example.com")
@@ -14,59 +12,55 @@ const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? "admin@example.com")
   .toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "admin123";
 
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const client = new pg.Client({ connectionString: DATABASE_URL });
+await client.connect();
 
-const sqlite = new Database(DB_PATH);
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("foreign_keys = ON");
-
-if (fs.existsSync(MIGRATIONS_DIR)) {
-  migrate(drizzle(sqlite), { migrationsFolder: path.resolve(MIGRATIONS_DIR) });
-}
-
-// Resolve default tax settings: prefer ref_settings (filled by extract-data),
-// fall back to checked-in JSON.
 let defaultTaxSettings;
-const fromRefs = sqlite
-  .prepare("SELECT value FROM ref_settings WHERE key = ?")
-  .get("defaultTaxSettings");
+const fromRefs = (
+  await client.query("SELECT value FROM ref_settings WHERE key = $1", [
+    "defaultTaxSettings",
+  ])
+).rows[0];
 if (fromRefs) {
-  defaultTaxSettings = JSON.parse(fromRefs.value);
+  defaultTaxSettings = fromRefs.value; // jsonb already parsed
 } else if (fs.existsSync(FALLBACK_TAX_FILE)) {
   defaultTaxSettings = JSON.parse(fs.readFileSync(FALLBACK_TAX_FILE, "utf8"));
 } else {
-  console.error("no defaultTaxSettings available — run extract-data.mjs first");
+  console.error("no defaultTaxSettings available — run extract-data first");
   process.exit(1);
 }
 
-const now = Date.now();
+const now = new Date();
 
 // 1. Seed first sysadmin + their workspace if users table is empty.
-const userCount = sqlite.prepare("SELECT COUNT(*) AS n FROM users").get().n;
+const userCount = Number(
+  (await client.query("SELECT COUNT(*) AS n FROM users")).rows[0].n,
+);
 let adminUserId = null;
 let adminWorkspaceId = null;
+
 if (userCount === 0) {
   const passwordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
-  const result = sqlite
-    .prepare(
-      "INSERT INTO users (email, password_hash, is_sysadmin, is_verified, created_at, updated_at) VALUES (?, ?, 1, 1, ?, ?)",
-    )
-    .run(ADMIN_EMAIL, passwordHash, now, now);
-  adminUserId = Number(result.lastInsertRowid);
+  const result = await client.query(
+    `INSERT INTO users (email, password_hash, is_sysadmin, is_verified, created_at, updated_at)
+     VALUES ($1, $2, true, true, $3, $3) RETURNING id`,
+    [ADMIN_EMAIL, passwordHash, now],
+  );
+  adminUserId = result.rows[0].id;
 
   const prefix = ADMIN_EMAIL.split("@")[0];
   const slug = `${prefix.replace(/\./g, "-").toLowerCase()}-${adminUserId}`;
-  const wsResult = sqlite
-    .prepare(
-      "INSERT INTO workspaces (name, slug, created_at, updated_at) VALUES (?, ?, ?, ?)",
-    )
-    .run(`Workspace ${prefix}`, slug, now, now);
-  adminWorkspaceId = Number(wsResult.lastInsertRowid);
-  sqlite
-    .prepare(
-      "INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at) VALUES (?, ?, 'owner', 'active', ?)",
-    )
-    .run(adminWorkspaceId, adminUserId, now);
+  const wsResult = await client.query(
+    `INSERT INTO workspaces (name, slug, created_at, updated_at)
+     VALUES ($1, $2, $3, $3) RETURNING id`,
+    [`Workspace ${prefix}`, slug, now],
+  );
+  adminWorkspaceId = wsResult.rows[0].id;
+  await client.query(
+    `INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at)
+     VALUES ($1, $2, 'owner', 'active', $3)`,
+    [adminWorkspaceId, adminUserId, now],
+  );
 
   console.log("");
   console.log("✅ First sysadmin created:");
@@ -76,16 +70,19 @@ if (userCount === 0) {
   console.log("   ⚠️  Change the password after first login!");
   console.log("");
 } else {
-  const existingAdmin = sqlite
-    .prepare("SELECT id FROM users WHERE is_sysadmin = 1 ORDER BY id LIMIT 1")
-    .get();
+  const existingAdmin = (
+    await client.query(
+      "SELECT id FROM users WHERE is_sysadmin = true ORDER BY id LIMIT 1",
+    )
+  ).rows[0];
   adminUserId = existingAdmin?.id ?? null;
   if (adminUserId != null) {
-    const existingMember = sqlite
-      .prepare(
-        "SELECT workspace_id FROM workspace_members WHERE user_id = ?",
+    const existingMember = (
+      await client.query(
+        "SELECT workspace_id FROM workspace_members WHERE user_id = $1",
+        [adminUserId],
       )
-      .get(adminUserId);
+    ).rows[0];
     adminWorkspaceId = existingMember?.workspace_id ?? null;
   }
   console.log(
@@ -95,59 +92,59 @@ if (userCount === 0) {
 
 // 2. Seed default shop + user_settings for the admin if absent.
 if (adminUserId != null && adminWorkspaceId != null) {
-  const existingShop = sqlite
-    .prepare("SELECT id FROM shops WHERE workspace_id = ? LIMIT 1")
-    .get(adminWorkspaceId);
+  const existingShop = (
+    await client.query("SELECT id FROM shops WHERE workspace_id = $1 LIMIT 1", [
+      adminWorkspaceId,
+    ])
+  ).rows[0];
   let adminShopId = existingShop?.id ?? null;
 
   if (!adminShopId) {
-    const result = sqlite
-      .prepare(
-        `INSERT INTO shops (
-          workspace_id, name, short_name, color, tax_settings,
-          auto_refresh_enabled, auto_refresh_interval_min,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, NULL, ?, 0, 30, ?, ?)`,
-      )
-      .run(
+    const result = await client.query(
+      `INSERT INTO shops (
+        workspace_id, name, short_name, color, tax_settings,
+        auto_refresh_enabled, auto_refresh_interval_min,
+        created_at, updated_at
+      ) VALUES ($1, $2, $3, NULL, $4, false, 30, $5, $5) RETURNING id`,
+      [
         adminWorkspaceId,
         "Мой магазин",
         "M1",
         JSON.stringify(defaultTaxSettings),
         now,
-        now,
-      );
-    adminShopId = Number(result.lastInsertRowid);
+      ],
+    );
+    adminShopId = result.rows[0].id;
     console.log("seeded default shop M1 for admin");
   }
 
-  // Owner of the workspace gets shop_member assignment for every workspace
-  // shop so they can see their own seeded shop. Idempotent.
-  sqlite
-    .prepare(
-      `INSERT OR IGNORE INTO shop_member (shop_id, user_id, created_at, created_by)
-       VALUES (?, ?, ?, ?)`,
-    )
-    .run(adminShopId, adminUserId, now, adminUserId);
+  // Owner gets shop_member assignment so they can see their own shop.
+  await client.query(
+    `INSERT INTO shop_member (shop_id, user_id, created_at, created_by)
+     VALUES ($1, $2, $3, $2) ON CONFLICT DO NOTHING`,
+    [adminShopId, adminUserId, now],
+  );
 
-  const existingSettings = sqlite
-    .prepare("SELECT id FROM user_settings WHERE user_id = ?")
-    .get(adminUserId);
+  const existingSettings = (
+    await client.query(
+      "SELECT id FROM user_settings WHERE user_id = $1",
+      [adminUserId],
+    )
+  ).rows[0];
   if (!existingSettings) {
-    sqlite
-      .prepare(
-        "INSERT INTO user_settings (user_id, active_shop_id, updated_at) VALUES (?, ?, ?)",
-      )
-      .run(adminUserId, adminShopId, now);
+    await client.query(
+      "INSERT INTO user_settings (user_id, active_shop_id, updated_at) VALUES ($1, $2, $3)",
+      [adminUserId, adminShopId, now],
+    );
     console.log("seeded user_settings");
   } else {
-    sqlite
-      .prepare(
-        "UPDATE user_settings SET active_shop_id = COALESCE(active_shop_id, ?), updated_at = ? WHERE user_id = ?",
-      )
-      .run(adminShopId, now, adminUserId);
+    await client.query(
+      `UPDATE user_settings SET active_shop_id = COALESCE(active_shop_id, $1),
+       updated_at = $2 WHERE user_id = $3`,
+      [adminShopId, now, adminUserId],
+    );
   }
 }
 
-sqlite.close();
-console.log(`\nDone. DB at ${DB_PATH}.`);
+await client.end();
+console.log(`\nDone. PG at ${DATABASE_URL.replace(/:[^:@]+@/, ":***@")}.`);

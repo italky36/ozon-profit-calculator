@@ -1,57 +1,41 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as schema from "../../server/db/schema";
 import { financeTransactions, sessions } from "../../server/db/schema";
-import { buildApp } from "../../server/index";
-import { createShopFor, createUserDirect, workspaceIdOf } from "./_helpers";
+import {
+  createShopFor,
+  createUserDirect,
+  setupTestEnv,
+  teardownTestEnv,
+  workspaceIdOf,
+  type TestEnv as BaseTestEnv,
+} from "./_helpers";
 
-
-interface TestEnv {
-  db: ReturnType<typeof drizzle<typeof schema>>;
-  sqlite: Database.Database;
+type TestEnv = BaseTestEnv & {
   cookie: string;
   userId: number;
   workspaceId: number;
   shopId: number;
-}
+};
 
-const setupDb = (): TestEnv => {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("foreign_keys = ON");
-  const migrationsDir = path.resolve(import.meta.dirname, "../../server/db/migrations");
-  for (const f of fs.readdirSync(migrationsDir).filter((x) => x.endsWith(".sql")).sort()) {
-    const sql = fs.readFileSync(path.join(migrationsDir, f), "utf8");
-    for (const stmt of sql.split("--> statement-breakpoint")) {
-      const trimmed = stmt.trim();
-      if (trimmed) sqlite.exec(trimmed);
-    }
-  }
-  const db = drizzle(sqlite, { schema });
-
-  const userId = createUserDirect(db, "owner@test.local", "password", "user");
-  const shopId = createShopFor(db, userId);
-  const workspaceId = workspaceIdOf(db, userId);
+async function setupDb(): Promise<TestEnv> {
+  const env = await setupTestEnv();
+  const userId = await createUserDirect(env.db, "owner@test.local", "password", "user");
+  const shopId = await createShopFor(env.db, userId);
+  const workspaceId = await workspaceIdOf(env.db, userId);
   const sessionId = "test-analytics-session";
-  db.insert(sessions)
-    .values({
-      id: sessionId,
-      userId,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      createdAt: new Date(),
-    })
-    .run();
+  await env.db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt: new Date(Date.now() + 60 * 60_000),
+    createdAt: new Date(),
+  });
   return {
-    db,
-    sqlite,
+    ...env,
     cookie: `ozon_calc_session=${sessionId}`,
     userId,
     workspaceId,
     shopId,
   };
-};
+}
 
 interface Tx {
   operation_id: number;
@@ -63,36 +47,35 @@ interface Tx {
   type: string;
 }
 
-const seedTx = (env: TestEnv, list: Tx[]) => {
+const seedTx = async (env: TestEnv, list: Tx[]) => {
   for (const t of list) {
-    env.db
-      .insert(financeTransactions)
-      .values({
-        shopId: env.shopId,
-        workspaceId: env.workspaceId,
-        userId: env.userId,
-        operationId: t.operation_id,
-        operationType: t.operation_type,
-        operationDate: new Date(t.operation_date),
-        postingNumber: t.posting_number,
-        articleId: t.article_id,
-        amount: t.amount,
-        type: t.type,
-        raw: { _seeded: true },
-      })
-      .run();
+    await env.db.insert(financeTransactions).values({
+      shopId: env.shopId,
+      workspaceId: env.workspaceId,
+      userId: env.userId,
+      operationId: t.operation_id,
+      operationType: t.operation_type,
+      operationDate: new Date(t.operation_date),
+      postingNumber: t.posting_number,
+      articleId: t.article_id,
+      amount: t.amount,
+      type: t.type,
+      raw: { _seeded: true },
+    });
   }
 };
 
 describe("/api/analytics/realized-margin", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupDb();
+  beforeEach(async () => {
+    env = await setupDb();
   });
-  afterEach(() => env.sqlite.close());
+  afterEach(async () => {
+    await teardownTestEnv(env);
+  });
 
   it("aggregates by articleId with correct breakdown and net margin", async () => {
-    seedTx(env, [
+    await seedTx(env, [
       // OFFER-1: 2 sales (337k each), one last_mile fee, one logistics, one storage
       { operation_id: 1, operation_type: "OperationAgentDeliveredToCustomer", operation_date: "2026-04-10T00:00:00.000Z", posting_number: "p1", article_id: "OFFER-1", amount: 337000, type: "sale" },
       { operation_id: 2, operation_type: "OperationAgentDeliveredToCustomer", operation_date: "2026-04-12T00:00:00.000Z", posting_number: "p2", article_id: "OFFER-1", amount: 337000, type: "sale" },
@@ -108,7 +91,7 @@ describe("/api/analytics/realized-margin", () => {
       { operation_id: 9, operation_type: "MarketplaceRedistributionOfAcquiringOperation", operation_date: "2026-04-22T00:00:00.000Z", posting_number: null, article_id: null, amount: -100, type: "commission" },
     ]);
 
-    const app = buildApp({ db: env.db });
+    const app = env.app;
     const res = await app.request(
       "/api/analytics/realized-margin?from=2026-04-01&to=2026-04-30T23:59:59.999Z",
       { headers: { Cookie: env.cookie } },
@@ -150,7 +133,7 @@ describe("/api/analytics/realized-margin", () => {
   });
 
   it("returns empty rows when no data in range", async () => {
-    const app = buildApp({ db: env.db });
+    const app = env.app;
     const res = await app.request(
       "/api/analytics/realized-margin?from=2030-01-01&to=2030-01-31",
       { headers: { Cookie: env.cookie } },
@@ -161,7 +144,7 @@ describe("/api/analytics/realized-margin", () => {
   });
 
   it("rejects bad date with 400", async () => {
-    const app = buildApp({ db: env.db });
+    const app = env.app;
     const res = await app.request(
       "/api/analytics/realized-margin?from=garbage",
       { headers: { Cookie: env.cookie } },

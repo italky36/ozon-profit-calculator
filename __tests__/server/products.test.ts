@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { buildApp } from "../../server/index";
 import { sessions } from "../../server/db/schema";
-import * as schema from "../../server/db/schema";
 import type { ProductInput } from "../../src/types";
-import { createShopFor, createUserDirect, SAMPLE_TAX } from "./_helpers";
+import {
+  createShopFor,
+  createUserDirect,
+  SAMPLE_TAX,
+  setupTestEnv,
+  teardownTestEnv,
+  type TestEnv as BaseTestEnv,
+} from "./_helpers";
 
 const SAMPLE_INPUT: ProductInput = {
   articleId: "TEST-PRODUCT",
@@ -40,49 +41,21 @@ const SAMPLE_INPUT: ProductInput = {
   incomingVatRate: 0,
 };
 
-interface TestEnv {
-  app: ReturnType<typeof buildApp>;
-  sqlite: Database.Database;
-  cookie: string;
-}
+type TestEnv = BaseTestEnv & { cookie: string };
 
-const setup = (): TestEnv => {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("foreign_keys = ON");
-
-  // Apply migrations from the file system (same as server runtime would).
-  const migrationsDir = path.resolve(import.meta.dirname, "../../server/db/migrations");
-  const files = fs
-    .readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-  for (const f of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, f), "utf8");
-    for (const stmt of sql.split("--> statement-breakpoint")) {
-      const trimmed = stmt.trim();
-      if (trimmed) sqlite.exec(trimmed);
-    }
-  }
-
-  const db = drizzle(sqlite, { schema });
-
-  const userId = createUserDirect(db, "owner@test.local", "password", "user");
-  // Multi-shop model: ensure user has at least one shop.
-  createShopFor(db, userId);
+async function setup(): Promise<TestEnv> {
+  const env = await setupTestEnv();
+  const userId = await createUserDirect(env.db, "owner@test.local", "password", "user");
+  await createShopFor(env.db, userId);
   const sessionId = "test-products-session";
-  db.insert(sessions)
-    .values({
-      id: sessionId,
-      userId,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      createdAt: new Date(),
-    })
-    .run();
-  const cookie = `ozon_calc_session=${sessionId}`;
-
-  const app = buildApp({ db });
-  return { app, sqlite, cookie };
-};
+  await env.db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt: new Date(Date.now() + 60 * 60_000),
+    createdAt: new Date(),
+  });
+  return { ...env, cookie: `ozon_calc_session=${sessionId}` };
+}
 
 const headers = (cookie: string) => ({
   "Content-Type": "application/json",
@@ -91,11 +64,11 @@ const headers = (cookie: string) => ({
 
 describe("products CRUD", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setup();
+  beforeEach(async () => {
+    env = await setup();
   });
-  afterEach(() => {
-    env.sqlite.close();
+  afterEach(async () => {
+    await teardownTestEnv(env);
   });
 
   it("rejects missing auth token", async () => {
@@ -165,6 +138,7 @@ describe("products CRUD", () => {
       headers: headers(env.cookie),
       body: JSON.stringify(SAMPLE_INPUT),
     });
+    if (b.status !== 409) console.log("b response:", await b.text());
     expect(b.status).toBe(409);
   });
 
@@ -190,11 +164,11 @@ describe("products CRUD", () => {
 
 describe("settings", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setup();
+  beforeEach(async () => {
+    env = await setup();
   });
-  afterEach(() => {
-    env.sqlite.close();
+  afterEach(async () => {
+    await teardownTestEnv(env);
   });
 
   it("GET returns seeded tax settings", async () => {

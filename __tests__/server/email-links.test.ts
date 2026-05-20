@@ -15,16 +15,16 @@ describe("email link base URL", () => {
   let savedAppUrl: string | undefined;
   let savedNodeEnv: string | undefined;
 
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
     savedAppUrl = process.env.APP_URL;
     savedNodeEnv = process.env.NODE_ENV;
     delete process.env.APP_URL;
     // Default to dev for these tests; one case below flips to production.
     process.env.NODE_ENV = "test";
   });
-  afterEach(() => {
-    teardownTestEnv(env);
+  afterEach(async () => {
+    await teardownTestEnv(env);
     if (savedAppUrl === undefined) delete process.env.APP_URL;
     else process.env.APP_URL = savedAppUrl;
     if (savedNodeEnv === undefined) delete process.env.NODE_ENV;

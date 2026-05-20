@@ -1,17 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
 import { eq } from "drizzle-orm";
-import * as schema from "../../server/db/schema";
 import { products, sessions } from "../../server/db/schema";
 import { buildApp } from "../../server/index";
 import { runCatalogImport } from "../../server/routes/import";
 import { getCategoryLookup } from "../../server/ozon/catalog";
 import type { OzonClient } from "../../server/ozon/client";
-import { createShopFor, createUserDirect, workspaceIdOf } from "./_helpers";
+import {
+  createShopFor,
+  createUserDirect,
+  setupTestEnv,
+  teardownTestEnv,
+  workspaceIdOf,
+  type TestEnv as BaseTestEnv,
+} from "./_helpers";
 
 const TREE_RESPONSE = {
   result: [
@@ -117,48 +119,33 @@ const makeMockClient = (): OzonClient => ({
   },
 });
 
-interface TestEnv {
-  db: ReturnType<typeof drizzle<typeof schema>>;
-  sqlite: Database.Database;
+type TestEnv = BaseTestEnv & {
   cookie: string;
   userId: number;
   workspaceId: number;
   shopId: number;
-}
+};
 
-const setupDb = (): TestEnv => {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("foreign_keys = ON");
-  const migrationsDir = path.resolve(import.meta.dirname, "../../server/db/migrations");
-  for (const f of fs.readdirSync(migrationsDir).filter((x) => x.endsWith(".sql")).sort()) {
-    const sql = fs.readFileSync(path.join(migrationsDir, f), "utf8");
-    for (const stmt of sql.split("--> statement-breakpoint")) {
-      const trimmed = stmt.trim();
-      if (trimmed) sqlite.exec(trimmed);
-    }
-  }
-  const db = drizzle(sqlite, { schema });
-  const userId = createUserDirect(db, "owner@test.local", "password", "user");
-  const shopId = createShopFor(db, userId);
-  const workspaceId = workspaceIdOf(db, userId);
+async function setupDb(): Promise<TestEnv> {
+  const env = await setupTestEnv();
+  const userId = await createUserDirect(env.db, "owner@test.local", "password", "user");
+  const shopId = await createShopFor(env.db, userId);
+  const workspaceId = await workspaceIdOf(env.db, userId);
   const sessionId = "test-import-session";
-  db.insert(sessions)
-    .values({
-      id: sessionId,
-      userId,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      createdAt: new Date(),
-    })
-    .run();
+  await env.db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt: new Date(Date.now() + 60 * 60_000),
+    createdAt: new Date(),
+  });
   return {
-    db,
-    sqlite,
+    ...env,
     cookie: `ozon_calc_session=${sessionId}`,
     userId,
     workspaceId,
     shopId,
   };
-};
+}
 
 describe("getCategoryLookup", () => {
   it("flattens nested category tree to (descId, typeId) → names", async () => {
@@ -177,10 +164,10 @@ describe("getCategoryLookup", () => {
 
 describe("runCatalogImport", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupDb();
+  beforeEach(async () => {
+    env = await setupDb();
   });
-  afterEach(() => env.sqlite.close());
+  afterEach(async () => await teardownTestEnv(env));
 
   it("inserts new products with safe defaults", async () => {
     const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
@@ -188,7 +175,7 @@ describe("runCatalogImport", () => {
     expect(counters.updated).toBe(0);
     expect(counters.itemsProcessed).toBe(2);
 
-    const rows = env.db.select().from(products).all();
+    const rows = await env.db.select().from(products);
     expect(rows).toHaveLength(2);
 
     const offer1 = rows.find((r) => r.articleId === "OFFER-1")!;
@@ -226,7 +213,7 @@ describe("runCatalogImport", () => {
 
   it("preserves local fields on re-import", async () => {
     // Pre-seed a row matching one of the import entries.
-    env.db
+    await env.db
       .insert(products)
       .values({
         id: randomUUID(),
@@ -262,17 +249,16 @@ describe("runCatalogImport", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       })
-      .run();
+      ;
 
     const counters = await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
     expect(counters.updated).toBe(1);
     expect(counters.added).toBe(1);
 
-    const [offer1] = env.db
+    const [offer1] = await env.db
       .select()
       .from(products)
-      .where(eq(products.articleId, "OFFER-1"))
-      .all();
+      .where(eq(products.articleId, "OFFER-1"));
 
     // Catalog fields refreshed.
     expect(offer1.productName).toBe("Кофемашина-1");
@@ -287,9 +273,9 @@ describe("runCatalogImport", () => {
 
   it("is idempotent across repeat runs", async () => {
     await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
-    const before = env.db.select().from(products).all();
+    const before = await env.db.select().from(products);
     await runCatalogImport(env.db, makeMockClient(), env.shopId, env.workspaceId, env.userId);
-    const after = env.db.select().from(products).all();
+    const after = await env.db.select().from(products);
     expect(after).toHaveLength(before.length);
     // ids stable
     expect(new Set(after.map((r) => r.id))).toEqual(
@@ -300,10 +286,10 @@ describe("runCatalogImport", () => {
 
 describe("import route", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupDb();
+  beforeEach(async () => {
+    env = await setupDb();
   });
-  afterEach(() => env.sqlite.close());
+  afterEach(async () => await teardownTestEnv(env));
 
   it("POST /api/import/catalog creates a run and completes", async () => {
     const app = buildApp({
@@ -336,7 +322,7 @@ describe("import route", () => {
   });
 
   it("GET /api/credentials/status reports false when nothing configured", async () => {
-    const app = buildApp({ db: env.db });
+    const app = env.app;
     const res = await app.request("/api/credentials/status", {
       headers: { Cookie: env.cookie },
     });
@@ -350,7 +336,7 @@ describe("import route", () => {
   });
 
   it("PUT /api/credentials saves to db and surfaces in status", async () => {
-    const app = buildApp({ db: env.db });
+    const app = env.app;
     const headers = { "Content-Type": "application/json", Cookie: env.cookie };
 
     const put = await app.request("/api/credentials", {
@@ -375,7 +361,7 @@ describe("import route", () => {
     process.env.OZON_CLIENT_ID = "env-id";
     process.env.OZON_API_KEY = "env-key";
     try {
-      const app = buildApp({ db: env.db });
+      const app = env.app;
       const res = await app.request("/api/import/catalog", {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: env.cookie },

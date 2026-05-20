@@ -98,7 +98,7 @@ export async function createCall(
   input: CreateCallInput,
 ): Promise<{ callId: number }> {
   const now = new Date();
-  const inserted = input.db
+  const [inserted] = await input.db
     .insert(chatCalls)
     .values({
       channelId: input.channelId,
@@ -106,8 +106,7 @@ export async function createCall(
       callType: input.callType,
       startedAt: now,
     })
-    .returning({ id: chatCalls.id })
-    .get();
+    .returning({ id: chatCalls.id });
   const callId = inserted.id;
 
   const invited = new Set<number>([
@@ -115,11 +114,10 @@ export async function createCall(
     ...input.inviteeUserIds,
   ]);
   for (const uid of invited) {
-    input.db
+    await input.db
       .insert(chatCallParticipants)
       .values({ callId, userId: uid, joinedAt: null, leftAt: null })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
   }
 
   const ringTimer = setTimeout(() => {
@@ -185,15 +183,15 @@ export async function acceptCall(
     clearTimeout(call.ringTimer);
     call.ringTimer = null;
   }
-  db.update(chatCallParticipants)
+  await db
+    .update(chatCallParticipants)
     .set({ joinedAt: new Date() })
     .where(
       and(
         eq(chatCallParticipants.callId, callId),
         eq(chatCallParticipants.userId, userId),
       ),
-    )
-    .run();
+    );
   publish(
     call.workspaceId,
     {
@@ -243,13 +241,12 @@ export async function endCall(
     call.ringTimer = null;
   }
   const endedAt = new Date();
-  input.db
+  await input.db
     .update(chatCalls)
     .set({ endedAt, endReason: input.reason })
-    .where(eq(chatCalls.id, input.callId))
-    .run();
+    .where(eq(chatCalls.id, input.callId));
   if (input.byUserId != null) {
-    input.db
+    await input.db
       .update(chatCallParticipants)
       .set({ leftAt: endedAt })
       .where(
@@ -257,8 +254,7 @@ export async function endCall(
           eq(chatCallParticipants.callId, input.callId),
           eq(chatCallParticipants.userId, input.byUserId),
         ),
-      )
-      .run();
+      );
   }
   // Notify everyone before tearing down the in-memory roster.
   publish(
@@ -288,15 +284,15 @@ export async function leaveCall(
   const call = activeCalls.get(callId);
   if (!call) return false;
   call.connectedUserIds.delete(userId);
-  db.update(chatCallParticipants)
+  await db
+    .update(chatCallParticipants)
     .set({ leftAt: new Date() })
     .where(
       and(
         eq(chatCallParticipants.callId, callId),
         eq(chatCallParticipants.userId, userId),
       ),
-    )
-    .run();
+    );
   publish(
     call.workspaceId,
     {
@@ -336,15 +332,15 @@ export async function declineCall(
   const wasInvited = call.invitedUserIds.delete(userId);
   call.connectedUserIds.delete(userId);
   if (wasInvited) unindexUser(userId, callId);
-  db.update(chatCallParticipants)
+  await db
+    .update(chatCallParticipants)
     .set({ leftAt: new Date() })
     .where(
       and(
         eq(chatCallParticipants.callId, callId),
         eq(chatCallParticipants.userId, userId),
       ),
-    )
-    .run();
+    );
   // After removal: the only user left in `invitedUserIds` is the initiator
   // → nobody else to wait for / talk to → caller wraps up with endCall.
   const onlyInitiatorLeft =

@@ -1,11 +1,15 @@
 import {
-  sqliteTable,
+  pgTable,
   integer,
+  serial,
   text,
-  real,
+  boolean,
+  timestamp,
+  jsonb,
+  doublePrecision,
   primaryKey,
   uniqueIndex,
-} from "drizzle-orm/sqlite-core";
+} from "drizzle-orm/pg-core";
 import type {
   CommissionBuckets,
   OzonCommissions,
@@ -13,22 +17,22 @@ import type {
 } from "../../src/types";
 
 // === Reference tables (replace src/data/*.json) ===
-export const refCommissions = sqliteTable("ref_commissions", {
+export const refCommissions = pgTable("ref_commissions", {
   key: text("key").primaryKey(),
   category: text("category").notNull(),
   productType: text("product_type").notNull(),
-  fboBuckets: text("fbo_buckets", { mode: "json" })
+  fboBuckets: jsonb("fbo_buckets")
     .$type<Required<CommissionBuckets>>()
     .notNull(),
-  fbsBuckets: text("fbs_buckets", { mode: "json" })
+  fbsBuckets: jsonb("fbs_buckets")
     .$type<Required<CommissionBuckets>>()
     .notNull(),
-  realFbsBuckets: text("real_fbs_buckets", { mode: "json" })
+  realFbsBuckets: jsonb("real_fbs_buckets")
     .$type<CommissionBuckets>()
     .notNull(),
 });
 
-export const refStorage = sqliteTable("ref_storage", {
+export const refStorage = pgTable("ref_storage", {
   key: text("key").primaryKey(),
   category: text("category").notNull(),
   productType: text("product_type").notNull(),
@@ -37,69 +41,69 @@ export const refStorage = sqliteTable("ref_storage", {
   freeStorageDaysKz: integer("free_storage_days_kz").notNull(),
 });
 
-export const refLogisticsTariffs = sqliteTable("ref_logistics_tariffs", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  volumeFrom: real("volume_from").notNull(),
-  volumeTo: real("volume_to").notNull(),
-  localUpTo300: real("local_up_to_300").notNull(),
-  nonLocalUpTo300: real("non_local_up_to_300").notNull(),
-  localOver300: real("local_over_300").notNull(),
-  nonLocalOver300: real("non_local_over_300").notNull(),
+export const refLogisticsTariffs = pgTable("ref_logistics_tariffs", {
+  id: serial("id").primaryKey(),
+  volumeFrom: doublePrecision("volume_from").notNull(),
+  volumeTo: doublePrecision("volume_to").notNull(),
+  localUpTo300: doublePrecision("local_up_to_300").notNull(),
+  nonLocalUpTo300: doublePrecision("non_local_up_to_300").notNull(),
+  localOver300: doublePrecision("local_over_300").notNull(),
+  nonLocalOver300: doublePrecision("non_local_over_300").notNull(),
 });
 
 /** Наборы тарифов кластерной логистики Ozon. Несколько версий могут
  * сосуществовать (исторические, для расчёта факта за прошлые периоды).
  * `workspaceId IS NULL` → глобальный набор (виден всем, грузит sysadmin).
  * `workspaceId IS NOT NULL` → набор внутри одной команды. */
-export const logisticsClusterTariffSets = sqliteTable(
+export const logisticsClusterTariffSets = pgTable(
   "logistics_cluster_tariff_sets",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     workspaceId: integer("workspace_id").references(() => workspaces.id, {
       onDelete: "cascade",
     }),
     name: text("name").notNull(),
-    uploadedAt: integer("uploaded_at", { mode: "timestamp_ms" }).notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    uploadedAt: timestamp("uploaded_at", { withTimezone: true, mode: "date" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
 );
 
 /** Точная per-cluster-pair матрица логистики. Каждая строка принадлежит
  * одному набору (`setId`); удаление набора каскадно сносит его строки. */
-export const logisticsClusterTariffs = sqliteTable(
+export const logisticsClusterTariffs = pgTable(
   "logistics_cluster_tariffs",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     setId: integer("set_id")
       .notNull()
       .references(() => logisticsClusterTariffSets.id, {
         onDelete: "cascade",
       }),
-    volumeFrom: real("volume_from").notNull(),
+    volumeFrom: doublePrecision("volume_from").notNull(),
     fromCluster: text("from_cluster").notNull(),
     toCluster: text("to_cluster").notNull(),
-    tariffLte300: real("tariff_lte_300").notNull(),
-    tariffGt300: real("tariff_gt_300").notNull(),
+    tariffLte300: doublePrecision("tariff_lte_300").notNull(),
+    tariffGt300: doublePrecision("tariff_gt_300").notNull(),
   },
 );
 
 // key/value bag for lists.json + logisticsSettings.json
-export const refSettings = sqliteTable("ref_settings", {
+export const refSettings = pgTable("ref_settings", {
   key: text("key").primaryKey(),
-  value: text("value", { mode: "json" }).notNull(),
+  value: jsonb("value").notNull(),
 });
 
 // === SaaS multi-tenancy ===
 // workspace ≈ «команда» в UI. Один user ↔ один workspace через UNIQUE-индекс
 // на workspace_members.user_id. Все бизнес-данные (shops, products, finance,
 // imports, tariff sets) scoped по workspace_id.
-export const workspaces = sqliteTable("workspaces", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const workspaces = pgTable("workspaces", {
+  id: serial("id").primaryKey(),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
   /** Platform-level pause flag. NULL → active. Non-NULL → sysadmin suspended
    * the workspace at this timestamp; members can't log in or hold sessions. */
-  suspendedAt: integer("suspended_at", { mode: "timestamp_ms" }),
+  suspendedAt: timestamp("suspended_at", { withTimezone: true, mode: "date" }),
   /** Header-badge customization (set by owner via AppHeader popover). NULL →
    * fall back to UI accent / Users icon. */
   logoDataUrl: text("logo_data_url"),
@@ -107,14 +111,12 @@ export const workspaces = sqliteTable("workspaces", {
   /** When true AND logoDataUrl is set, render the workspace logo in the main
    * SPA header (replacing the default «Oz» tile). Off by default — most teams
    * prefer the product mark; some want full white-label. */
-  useLogoAsAppIcon: integer("use_logo_as_app_icon", { mode: "boolean" })
-    .notNull()
-    .default(false),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  useLogoAsAppIcon: boolean("use_logo_as_app_icon").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
-export const workspaceMembers = sqliteTable(
+export const workspaceMembers = pgTable(
   "workspace_members",
   {
     workspaceId: integer("workspace_id")
@@ -127,7 +129,7 @@ export const workspaceMembers = sqliteTable(
     status: text("status", { enum: ["active", "suspended"] })
       .notNull()
       .default("active"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.workspaceId, t.userId] }),
@@ -135,7 +137,7 @@ export const workspaceMembers = sqliteTable(
   }),
 );
 
-export const workspaceInvites = sqliteTable("workspace_invites", {
+export const workspaceInvites = pgTable("workspace_invites", {
   token: text("token").primaryKey(),
   workspaceId: integer("workspace_id")
     .notNull()
@@ -145,38 +147,34 @@ export const workspaceInvites = sqliteTable("workspace_invites", {
   invitedBy: integer("invited_by")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  usedAt: integer("used_at", { mode: "timestamp_ms" }),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true, mode: "date" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === Shops (workspace-scoped) ===
 // Магазин принадлежит workspace'у; видимость member'ов ограничивается через
 // shop_member (hard gate, выдаёт owner/manager). shortName уникален в рамках
 // workspace. color — HEX (опц.); NULL → нейтральный (фоллбэк на UI-accent).
-export const shops = sqliteTable(
+export const shops = pgTable(
   "shops",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     workspaceId: integer("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     shortName: text("short_name").notNull(),
     color: text("color"),
-    taxSettings: text("tax_settings", { mode: "json" })
-      .$type<TaxSettings>()
-      .notNull(),
-    autoRefreshEnabled: integer("auto_refresh_enabled", { mode: "boolean" })
-      .notNull()
-      .default(false),
+    taxSettings: jsonb("tax_settings").$type<TaxSettings>().notNull(),
+    autoRefreshEnabled: boolean("auto_refresh_enabled").notNull().default(false),
     autoRefreshIntervalMin: integer("auto_refresh_interval_min")
       .notNull()
       .default(30),
     /** Per-shop Ozon API credentials. NULL → импорт вернёт 400 «не настроены». */
     ozonClientId: text("ozon_client_id"),
     ozonApiKey: text("ozon_api_key"),
-    ozonUpdatedAt: integer("ozon_updated_at", { mode: "timestamp_ms" }),
+    ozonUpdatedAt: timestamp("ozon_updated_at", { withTimezone: true, mode: "date" }),
     /** Активный набор тарифов кластерной логистики. NULL → последний
      * глобальный набор по uploadedAt. FK enforced at SQL migration level —
      * not modeled here to avoid Drizzle circular ref. */
@@ -187,8 +185,8 @@ export const shops = sqliteTable(
     createdBy: integer("created_by").references(() => users.id, {
       onDelete: "set null",
     }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     workspaceShortUnique: uniqueIndex("shops_workspace_short_unique").on(
@@ -201,7 +199,7 @@ export const shops = sqliteTable(
 /** Assignment: who in the workspace has access to which shop.
  * Workspace owner sees every shop unconditionally; for everyone else,
  * a row here is the hard gate. Owner/manager creates/destroys rows. */
-export const shopMember = sqliteTable(
+export const shopMember = pgTable(
   "shop_member",
   {
     shopId: integer("shop_id")
@@ -210,7 +208,7 @@ export const shopMember = sqliteTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     createdBy: integer("created_by").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -222,7 +220,7 @@ export const shopMember = sqliteTable(
 
 /** Per-user override of shop defaults. NULL columns → inherit from shops.*.
  * resolveShopSettings(db, shopId, userId) is the canonical accessor. */
-export const shopUserSettings = sqliteTable(
+export const shopUserSettings = pgTable(
   "shop_user_settings",
   {
     shopId: integer("shop_id")
@@ -231,11 +229,11 @@ export const shopUserSettings = sqliteTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    taxSettings: text("tax_settings", { mode: "json" }).$type<TaxSettings>(),
+    taxSettings: jsonb("tax_settings").$type<TaxSettings>(),
     tariffSetId: integer("tariff_set_id"),
-    autoRefreshEnabled: integer("auto_refresh_enabled", { mode: "boolean" }),
+    autoRefreshEnabled: boolean("auto_refresh_enabled"),
     autoRefreshIntervalMin: integer("auto_refresh_interval_min"),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.shopId, t.userId] }),
@@ -246,87 +244,83 @@ export const shopUserSettings = sqliteTable(
 // Каталог-поля (productName, category, Ozon-метаданные) синкаются у всех
 // assignee shop'а при импорте. Manual/финансовые поля (costPrice, salesPlan,
 // marketingPercent, redemptionPercent, whitePurchase, …) — per-user.
-export const products = sqliteTable(
+export const products = pgTable(
   "products",
   {
-  id: text("id").primaryKey(),
-  shopId: integer("shop_id")
-    .notNull()
-    .references(() => shops.id, { onDelete: "cascade" }),
-  workspaceId: integer("workspace_id")
-    .notNull()
-    .references(() => workspaces.id, { onDelete: "cascade" }),
-  userId: integer("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  articleId: text("article_id").notNull(),
-  productName: text("product_name").notNull(),
-  category: text("category").notNull(),
-  productType: text("product_type").notNull(),
-  isKgt: integer("is_kgt", { mode: "boolean" }).notNull().default(false),
-  isKazakhstan: integer("is_kazakhstan", { mode: "boolean" })
-    .notNull()
-    .default(false),
-  isFireHazard: integer("is_fire_hazard", { mode: "boolean" })
-    .notNull()
-    .default(false),
-  plannedStorageDays: integer("planned_storage_days").notNull(),
-  volumeL: real("volume_l").notNull(),
-  /** Габариты упаковки в мм (как в Ozon LK). Опциональны: для не-Ozon
-   * товаров пользователь может заполнить вручную → volumeL пересчитается. */
-  depthMm: real("depth_mm"),
-  widthMm: real("width_mm"),
-  heightMm: real("height_mm"),
-  /** Вес упаковки в граммах. */
-  weightG: real("weight_g"),
-  vatRate: text("vat_rate").notNull(),
-  redemptionPercent: integer("redemption_percent").notNull(),
-  salesPlan: integer("sales_plan").notNull(),
-  logisticsMode: text("logistics_mode").notNull(),
-  localShare: real("local_share").notNull(),
-  clustersCount: text("clusters_count").notNull(),
-  dispatchCluster: text("dispatch_cluster")
-    .notNull()
-    .default("Москва, МО и Дальние регионы"),
-  destinationCluster: text("destination_cluster")
-    .notNull()
-    .default("Москва, МО и Дальние регионы"),
-  currentPrice: real("current_price").notNull(),
-  /** Ozon sticker price (`price.price`) when a marketing promo brings the
-   * actual selling price (`currentPrice`) below it. NULL otherwise. Purely
-   * informational — used by the UI to show "regular: 3000" below the
-   * effective price. Not used in calc. */
-  regularPrice: real("regular_price"),
-  discountPercent: real("discount_percent").notNull(),
-  marketingPercent: real("marketing_percent").notNull(),
-  realFbsDeliveryCost: real("real_fbs_delivery_cost").notNull(),
-  realFbsReturnCost: real("real_fbs_return_cost").notNull(),
-  acceptanceTariff: text("acceptance_tariff").notNull(),
-  costPrice: real("cost_price").notNull(),
-  extraExpensesPerUnit: real("extra_expenses_per_unit").notNull(),
-  whitePurchase: integer("white_purchase", { mode: "boolean" }),
-  incomingVatPurchase: integer("incoming_vat_purchase", { mode: "boolean" })
-    .notNull(),
-  incomingVatRate: real("incoming_vat_rate").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
-  ozonProductId: integer("ozon_product_id"),
-  /** Public SKU used in `https://www.ozon.ru/product/{sku}/` URLs.
-   * Different from `ozonProductId`: that's the seller's internal product_id;
-   * `ozonSku` is the marketplace-facing identifier. */
-  ozonSku: integer("ozon_sku"),
-  ozonCommissions: text("ozon_commissions", { mode: "json" }).$type<OzonCommissions>(),
-  ozonCommissionsUpdatedAt: integer("ozon_commissions_updated_at", {
-    mode: "timestamp_ms",
-  }),
-  /** Card archive flag from Ozon. NULL when the product wasn't imported from Ozon. */
-  ozonArchived: integer("ozon_archived", { mode: "boolean" }),
-  /** True when the card is on sale (Ozon's `visibility_details.active_product`). */
-  ozonVisible: integer("ozon_visible", { mode: "boolean" }),
-  /** Short status code/name from `status.state_name` ("processed", "moderating", ...). */
-  ozonStatusName: text("ozon_status_name"),
-  /** Free-text reason / description (failed moderation, missing price, etc.). */
-  ozonStatusDescription: text("ozon_status_description"),
+    id: text("id").primaryKey(),
+    shopId: integer("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    articleId: text("article_id").notNull(),
+    productName: text("product_name").notNull(),
+    category: text("category").notNull(),
+    productType: text("product_type").notNull(),
+    isKgt: boolean("is_kgt").notNull().default(false),
+    isKazakhstan: boolean("is_kazakhstan").notNull().default(false),
+    isFireHazard: boolean("is_fire_hazard").notNull().default(false),
+    plannedStorageDays: integer("planned_storage_days").notNull(),
+    volumeL: doublePrecision("volume_l").notNull(),
+    /** Габариты упаковки в мм (как в Ozon LK). Опциональны: для не-Ozon
+     * товаров пользователь может заполнить вручную → volumeL пересчитается. */
+    depthMm: doublePrecision("depth_mm"),
+    widthMm: doublePrecision("width_mm"),
+    heightMm: doublePrecision("height_mm"),
+    /** Вес упаковки в граммах. */
+    weightG: doublePrecision("weight_g"),
+    vatRate: text("vat_rate").notNull(),
+    redemptionPercent: integer("redemption_percent").notNull(),
+    salesPlan: integer("sales_plan").notNull(),
+    logisticsMode: text("logistics_mode").notNull(),
+    localShare: doublePrecision("local_share").notNull(),
+    clustersCount: text("clusters_count").notNull(),
+    dispatchCluster: text("dispatch_cluster")
+      .notNull()
+      .default("Москва, МО и Дальние регионы"),
+    destinationCluster: text("destination_cluster")
+      .notNull()
+      .default("Москва, МО и Дальние регионы"),
+    currentPrice: doublePrecision("current_price").notNull(),
+    /** Ozon sticker price (`price.price`) when a marketing promo brings the
+     * actual selling price (`currentPrice`) below it. NULL otherwise. Purely
+     * informational — used by the UI to show "regular: 3000" below the
+     * effective price. Not used in calc. */
+    regularPrice: doublePrecision("regular_price"),
+    discountPercent: doublePrecision("discount_percent").notNull(),
+    marketingPercent: doublePrecision("marketing_percent").notNull(),
+    realFbsDeliveryCost: doublePrecision("real_fbs_delivery_cost").notNull(),
+    realFbsReturnCost: doublePrecision("real_fbs_return_cost").notNull(),
+    acceptanceTariff: text("acceptance_tariff").notNull(),
+    costPrice: doublePrecision("cost_price").notNull(),
+    extraExpensesPerUnit: doublePrecision("extra_expenses_per_unit").notNull(),
+    whitePurchase: boolean("white_purchase"),
+    incomingVatPurchase: boolean("incoming_vat_purchase").notNull(),
+    incomingVatRate: doublePrecision("incoming_vat_rate").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+    ozonProductId: integer("ozon_product_id"),
+    /** Public SKU used in `https://www.ozon.ru/product/{sku}/` URLs.
+     * Different from `ozonProductId`: that's the seller's internal product_id;
+     * `ozonSku` is the marketplace-facing identifier. */
+    ozonSku: integer("ozon_sku"),
+    ozonCommissions: jsonb("ozon_commissions").$type<OzonCommissions>(),
+    ozonCommissionsUpdatedAt: timestamp("ozon_commissions_updated_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    /** Card archive flag from Ozon. NULL when the product wasn't imported from Ozon. */
+    ozonArchived: boolean("ozon_archived"),
+    /** True when the card is on sale (Ozon's `visibility_details.active_product`). */
+    ozonVisible: boolean("ozon_visible"),
+    /** Short status code/name from `status.state_name` ("processed", "moderating", ...). */
+    ozonStatusName: text("ozon_status_name"),
+    /** Free-text reason / description (failed moderation, missing price, etc.). */
+    ozonStatusDescription: text("ozon_status_description"),
   },
   (t) => ({
     shopUserArticleUnique: uniqueIndex("products_shop_user_article_unique").on(
@@ -340,75 +334,69 @@ export const products = sqliteTable(
 // Per-user UI state. Workspace tax / autoRefresh / Ozon creds живут в shops.
 // Здесь остался только трекер активного магазина (для дефолта на «куда
 // импортировать / создавать товар»).
-export const userSettings = sqliteTable("user_settings", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const userSettings = pgTable("user_settings", {
+  id: serial("id").primaryKey(),
   userId: integer("user_id")
     .unique()
     .references(() => users.id, { onDelete: "cascade" }),
   activeShopId: integer("active_shop_id").references(() => shops.id, {
     onDelete: "set null",
   }),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === Auth ===
-export const users = sqliteTable("users", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   /** Платформенный sysadmin-флаг (управление SaaS-ом: SMTP, все workspace'ы,
    * глобальные tariff sets). Не путать с workspace-уровнем (owner/manager/
    * member в workspace_members). */
-  isSysadmin: integer("is_sysadmin", { mode: "boolean" })
-    .notNull()
-    .default(false),
-  isVerified: integer("is_verified", { mode: "boolean" })
-    .notNull()
-    .default(false),
-  isBlocked: integer("is_blocked", { mode: "boolean" })
-    .notNull()
-    .default(false),
+  isSysadmin: boolean("is_sysadmin").notNull().default(false),
+  isVerified: boolean("is_verified").notNull().default(false),
+  isBlocked: boolean("is_blocked").notNull().default(false),
   fullName: text("full_name").notNull().default(""),
   jobTitle: text("job_title"),
   /** Base64 data URL (≤200KB) — see lib/dataUrl.ts for validation. */
   avatarDataUrl: text("avatar_data_url"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
-export const sessions = sqliteTable("sessions", {
+export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
-export const emailVerificationTokens = sqliteTable(
+export const emailVerificationTokens = pgTable(
   "email_verification_tokens",
   {
     token: text("token").primaryKey(),
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
 );
 
-export const passwordResetTokens = sqliteTable("password_reset_tokens", {
+export const passwordResetTokens = pgTable("password_reset_tokens", {
   token: text("token").primaryKey(),
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  usedAt: integer("used_at", { mode: "timestamp_ms" }),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true, mode: "date" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === SMTP settings (sysadmin-editable; overrides env if a row exists) ===
-export const smtpSettings = sqliteTable("smtp_settings", {
+export const smtpSettings = pgTable("smtp_settings", {
   id: integer("id").primaryKey().default(1),
   host: text("host").notNull(),
   port: integer("port").notNull(),
@@ -420,14 +408,14 @@ export const smtpSettings = sqliteTable("smtp_settings", {
   })
     .notNull()
     .default("auto"),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === Imported finance ===
 // PK composite (shop_id, user_id, operation_id) — каждый member импортирует
 // свой период (operation_id Ozon-аккаунта одинаков, но каждый юзер хранит
 // свою копию выписки).
-export const financeTransactions = sqliteTable(
+export const financeTransactions = pgTable(
   "finance_transactions",
   {
     shopId: integer("shop_id")
@@ -441,20 +429,20 @@ export const financeTransactions = sqliteTable(
       .references(() => users.id, { onDelete: "cascade" }),
     operationId: integer("operation_id").notNull(),
     operationType: text("operation_type").notNull(),
-    operationDate: integer("operation_date", { mode: "timestamp_ms" }).notNull(),
+    operationDate: timestamp("operation_date", { withTimezone: true, mode: "date" }).notNull(),
     postingNumber: text("posting_number"),
     articleId: text("article_id"),
-    amount: real("amount").notNull(),
+    amount: doublePrecision("amount").notNull(),
     type: text("type").notNull(),
-    raw: text("raw", { mode: "json" }).notNull(),
+    raw: jsonb("raw").notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.shopId, t.userId, t.operationId] }),
   }),
 );
 
-export const importRuns = sqliteTable("import_runs", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const importRuns = pgTable("import_runs", {
+  id: serial("id").primaryKey(),
   shopId: integer("shop_id")
     .notNull()
     .references(() => shops.id, { onDelete: "cascade" }),
@@ -465,20 +453,20 @@ export const importRuns = sqliteTable("import_runs", {
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
-  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
-  finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
+  startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true, mode: "date" }),
   status: text("status").notNull(),
   itemsProcessed: integer("items_processed").default(0).notNull(),
   errorMessage: text("error_message"),
-  params: text("params", { mode: "json" }),
+  params: jsonb("params"),
 });
 
 // === Chat (workspace-scoped) ===
 // Каналы принадлежат workspace'у; изоляция через FK на workspaces. Сообщения
 // и вложения — через chat_channels.workspace_id. Sysadmin к чату отношения
 // не имеет — это командный инструмент.
-export const chatChannels = sqliteTable("chat_channels", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const chatChannels = pgTable("chat_channels", {
+  id: serial("id").primaryKey(),
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id, { onDelete: "cascade" }),
@@ -492,25 +480,23 @@ export const chatChannels = sqliteTable("chat_channels", {
     .default("channel"),
   /** Дефолтный канал команды («общий»); создаётся миграцией для existing
    * workspace'ов и при создании нового workspace. */
-  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  isDefault: boolean("is_default").notNull().default(false),
   /** Приватный канал — видимость через chat_channel_members (Slack-style).
    * Применимо только к type='channel'; type='dm' всегда фактически
    * приватный через свою membership-таблицу. */
-  isPrivate: integer("is_private", { mode: "boolean" })
-    .notNull()
-    .default(false),
+  isPrivate: boolean("is_private").notNull().default(false),
   /** Создатель канала. NULL после удаления юзера (ON DELETE SET NULL) — UI
    * показывает «автор удалён». */
   createdBy: integer("created_by").references(() => users.id, {
     onDelete: "set null",
   }),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  archivedAt: integer("archived_at", { mode: "timestamp_ms" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  archivedAt: timestamp("archived_at", { withTimezone: true, mode: "date" }),
 });
 
 /** DM membership. Used only when chat_channels.type = 'dm'. Workspace
  * channels rely on workspace_members for visibility. */
-export const chatChannelMembers = sqliteTable(
+export const chatChannelMembers = pgTable(
   "chat_channel_members",
   {
     channelId: integer("channel_id")
@@ -519,15 +505,15 @@ export const chatChannelMembers = sqliteTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.channelId, t.userId] }),
   }),
 );
 
-export const chatMessages = sqliteTable("chat_messages", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const chatMessages = pgTable("chat_messages", {
+  id: serial("id").primaryKey(),
   channelId: integer("channel_id")
     .notNull()
     .references(() => chatChannels.id, { onDelete: "cascade" }),
@@ -548,17 +534,22 @@ export const chatMessages = sqliteTable("chat_messages", {
    * delete is preserved via FK and rendered as «сообщение удалено». */
   quotedMessageId: integer("quoted_message_id"),
   body: text("body").notNull().default(""),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  editedAt: integer("edited_at", { mode: "timestamp_ms" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  editedAt: timestamp("edited_at", { withTimezone: true, mode: "date" }),
   /** Soft-delete. UI рендерит сообщение как «удалено», вложения зачищаются
    * физически роутом. */
-  deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "date" }),
+  // NOTE: чат-таблица также имеет колонку `search_vector tsvector` (GENERATED
+  // ALWAYS AS to_tsvector('russian', body) STORED) с GIN-индексом — миграция
+  // 0001_chat_fts. Drizzle ORM её не модель-ирует: запросы FTS идут через raw
+  // sql`…` в server/routes/chat.ts. Если будешь делать db:generate под chat_
+  // messages — проверь, что новая миграция не сносит search_vector / индекс.
 });
 
 /** Per-user read pointer. Bump-only (PUT /channels/:id/read валидирует
  * messageId > current). UI считает unread как `id > last_read_message_id
  * AND author != currentUser` — за рядом нужно делать ещё join на messages. */
-export const chatChannelReads = sqliteTable(
+export const chatChannelReads = pgTable(
   "chat_channel_reads",
   {
     channelId: integer("channel_id")
@@ -568,7 +559,7 @@ export const chatChannelReads = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     lastReadMessageId: integer("last_read_message_id"),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.channelId, t.userId] }),
@@ -578,7 +569,7 @@ export const chatChannelReads = sqliteTable(
 /** Реакции на сообщения. PK составной (message, user, emoji) — у одного юзера
  * не может быть двух одинаковых реакций на одно сообщение, но он может
  * поставить разные эмодзи. */
-export const chatMessageReactions = sqliteTable(
+export const chatMessageReactions = pgTable(
   "chat_message_reactions",
   {
     messageId: integer("message_id")
@@ -588,7 +579,7 @@ export const chatMessageReactions = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     emoji: text("emoji").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.messageId, t.userId, t.emoji] }),
@@ -597,7 +588,7 @@ export const chatMessageReactions = sqliteTable(
 
 /** @mentions → users. Парсятся на сервере при POST'е сообщения; используются
  * для подсветки и (в Stage 2) для триггера уведомлений офлайн-юзерам. */
-export const chatMessageMentions = sqliteTable(
+export const chatMessageMentions = pgTable(
   "chat_message_mentions",
   {
     messageId: integer("message_id")
@@ -612,8 +603,8 @@ export const chatMessageMentions = sqliteTable(
   }),
 );
 
-export const chatAttachments = sqliteTable("chat_attachments", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const chatAttachments = pgTable("chat_attachments", {
+  id: serial("id").primaryKey(),
   messageId: integer("message_id")
     .notNull()
     .references(() => chatMessages.id, { onDelete: "cascade" }),
@@ -623,7 +614,7 @@ export const chatAttachments = sqliteTable("chat_attachments", {
   filename: text("filename").notNull(),
   mimeType: text("mime_type").notNull(),
   sizeBytes: integer("size_bytes").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === Web Push (Stage 4) ===
@@ -631,8 +622,8 @@ export const chatAttachments = sqliteTable("chat_attachments", {
 // URL (FCM / Mozilla / Apple) — used both as the destination and the
 // dedup key. `p256dh_key`/`auth_key` are base64-url subscription material
 // from PushSubscription.getKey(). Rows are removed on HTTP 410 Gone.
-export const pushSubscriptions = sqliteTable("push_subscriptions", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: serial("id").primaryKey(),
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -640,19 +631,19 @@ export const pushSubscriptions = sqliteTable("push_subscriptions", {
   p256dhKey: text("p256dh_key").notNull(),
   authKey: text("auth_key").notNull(),
   userAgent: text("user_agent"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true, mode: "date" }),
 });
 
 // Single-row VAPID identity (id=1). Sysadmin-editable through admin UI;
 // falls back to env (VAPID_PUBLIC_KEY/PRIVATE_KEY/SUBJECT) when missing.
 // `subject` is mailto: URL — required by RFC 8292 for accountability.
-export const vapidSettings = sqliteTable("vapid_settings", {
+export const vapidSettings = pgTable("vapid_settings", {
   id: integer("id").primaryKey().default(1),
   publicKey: text("public_key").notNull(),
   privateKey: text("private_key").notNull(),
   subject: text("subject").notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 // === Calls (Stage 5) ===
@@ -660,8 +651,8 @@ export const vapidSettings = sqliteTable("vapid_settings", {
 // (DM = 2 participants, regular channel = mesh up to 5). `end_reason`
 // distinguishes 'completed' / 'declined' / 'missed' / 'failed' — drives the
 // system-message text inserted on call end.
-export const chatCalls = sqliteTable("chat_calls", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const chatCalls = pgTable("chat_calls", {
+  id: serial("id").primaryKey(),
   channelId: integer("channel_id")
     .notNull()
     .references(() => chatChannels.id, { onDelete: "cascade" }),
@@ -669,8 +660,8 @@ export const chatCalls = sqliteTable("chat_calls", {
     onDelete: "set null",
   }),
   callType: text("call_type", { enum: ["audio", "video"] }).notNull(),
-  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
-  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+  startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true, mode: "date" }),
   endReason: text("end_reason", {
     enum: ["completed", "declined", "missed", "failed"],
   }),
@@ -679,7 +670,7 @@ export const chatCalls = sqliteTable("chat_calls", {
 // Per-user participation log for a call. Active participant = row with
 // `left_at IS NULL`. PK keeps reconnects idempotent (re-join overwrites
 // joined_at via INSERT … ON CONFLICT).
-export const chatCallParticipants = sqliteTable(
+export const chatCallParticipants = pgTable(
   "chat_call_participants",
   {
     callId: integer("call_id")
@@ -688,8 +679,8 @@ export const chatCallParticipants = sqliteTable(
     userId: integer("user_id").references(() => users.id, {
       onDelete: "set null",
     }),
-    joinedAt: integer("joined_at", { mode: "timestamp_ms" }),
-    leftAt: integer("left_at", { mode: "timestamp_ms" }),
+    joinedAt: timestamp("joined_at", { withTimezone: true, mode: "date" }),
+    leftAt: timestamp("left_at", { withTimezone: true, mode: "date" }),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.callId, t.userId] }),
@@ -699,15 +690,15 @@ export const chatCallParticipants = sqliteTable(
 // STUN/TURN config for clients. Sysadmin-managed. `enabled` lets ops turn
 // an entry off without losing the credentials. Loaded once into the
 // RTCPeerConnection at call start; not hot-reloaded mid-call.
-export const iceServers = sqliteTable("ice_servers", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const iceServers = pgTable("ice_servers", {
+  id: serial("id").primaryKey(),
   urls: text("urls").notNull(),
   username: text("username"),
   credential: text("credential"),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  enabled: boolean("enabled").notNull().default(true),
   sortOrder: integer("sort_order").notNull().default(0),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 });
 
 export type ProductRow = typeof products.$inferSelect;

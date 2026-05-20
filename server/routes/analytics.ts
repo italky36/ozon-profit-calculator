@@ -92,9 +92,23 @@ export function analyticsRoutes(db: DB): Hono<AnalyticsEnv> {
       .where(and(...filters))
       .groupBy(financeTransactions.shopId, financeTransactions.articleId);
 
+    // pg возвращает COUNT/SUM как BIGINT/NUMERIC-строки. Приводим к number,
+    // чтобы клиенты могли сравнивать значения арифметически.
     return c.json({
       period: { from: fromIso, to: toIso },
-      rows,
+      rows: rows.map((r) => ({
+        ...r,
+        actualRevenue: Number(r.actualRevenue),
+        actualRefund: Number(r.actualRefund),
+        actualCommission: Number(r.actualCommission),
+        actualLogistics: Number(r.actualLogistics),
+        actualLastMile: Number(r.actualLastMile),
+        actualStorage: Number(r.actualStorage),
+        actualOther: Number(r.actualOther),
+        actualMargin: Number(r.actualMargin),
+        salesCount: Number(r.salesCount),
+        txCount: Number(r.txCount),
+      })),
     });
   });
 

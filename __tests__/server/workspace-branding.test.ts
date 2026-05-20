@@ -17,10 +17,10 @@ describe("workspace branding (color + logo)", () => {
   let env: TestEnv;
   let owner: Awaited<ReturnType<typeof loginAs>>;
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     owner = await loginAs(env, "owner@x.com", "password123");
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   const h = (cookie: string) => ({
     "Content-Type": "application/json",
@@ -49,11 +49,11 @@ describe("workspace branding (color + logo)", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.color).toBe("#7c3aed");
-      const row = env.db
+      const [row] = await env.db
         .select()
         .from(workspaces)
         .where(eq(workspaces.id, owner.workspaceId))
-        .get();
+        ;
       expect(row!.color).toBe("#7c3aed");
     });
 
@@ -164,19 +164,19 @@ describe("workspace branding (color + logo)", () => {
     it("rejects non-owner with 403 (manager + member)", async () => {
       // Promote a second user into the same workspace as manager.
       const member = await loginAs(env, "m@x.com", "password123");
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({
           workspaceId: owner.workspaceId,
         })
         .where(eq(workspaceMembers.userId, member.userId))
-        .run();
+        ;
       // First as member.
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({ role: "member" })
         .where(eq(workspaceMembers.userId, member.userId))
-        .run();
+        ;
       // Re-login so SessionUser picks up the new workspace.
       const fresh = await loginAs(env, "m@x.com", "password123");
 
@@ -188,11 +188,11 @@ describe("workspace branding (color + logo)", () => {
       expect(res1.status).toBe(403);
 
       // Now as manager.
-      env.db
+      await env.db
         .update(workspaceMembers)
         .set({ role: "manager" })
         .where(eq(workspaceMembers.userId, member.userId))
-        .run();
+        ;
       const fresh2 = await loginAs(env, "m@x.com", "password123");
       const res2 = await env.app.request("/api/workspace/me", {
         method: "PATCH",

@@ -107,22 +107,22 @@ function buildPersonalSlug(email: string, userId: number): string {
  * shop with active_shop_id pointing at it. Idempotent: if any of these already
  * exist (legacy migration, repeat verify), reuses them. Returns the active
  * shop id for downstream use. */
-function ensurePersonalWorkspace(
+async function ensurePersonalWorkspace(
   db: DB,
   userId: number,
   email: string,
-): number {
+): Promise<number> {
   const now = new Date();
 
-  let member = db
+  let [member] = await db
     .select({ workspaceId: workspaceMembers.workspaceId })
     .from(workspaceMembers)
     .where(eq(workspaceMembers.userId, userId))
-    .get();
+    ;
 
   if (!member) {
     const slug = buildPersonalSlug(email, userId);
-    const ws = db
+    const [ws] = await db
       .insert(workspaces)
       .values({
         name: `Workspace ${email.split("@")[0]}`,
@@ -131,8 +131,8 @@ function ensurePersonalWorkspace(
         updatedAt: now,
       })
       .returning({ id: workspaces.id })
-      .get();
-    db.insert(workspaceMembers)
+      ;
+    await db.insert(workspaceMembers)
       .values({
         workspaceId: ws.id,
         userId,
@@ -140,51 +140,51 @@ function ensurePersonalWorkspace(
         status: "active",
         createdAt: now,
       })
-      .run();
+      ;
     member = { workspaceId: ws.id };
   }
 
-  const existingShop = db
+  const [existingShop] = await db
     .select({ id: shops.id })
     .from(shops)
     .where(eq(shops.workspaceId, member.workspaceId))
-    .get();
+    ;
   let activeShopId: number;
   if (existingShop) {
     activeShopId = existingShop.id;
   } else {
-    const inserted = db
+    const inserted = await db
       .insert(shops)
       .values({
         workspaceId: member.workspaceId,
         name: "Мой магазин",
         shortName: "M1",
         color: null,
-        taxSettings: readDefaultTaxSettings(db),
+        taxSettings: await readDefaultTaxSettings(db),
         autoRefreshEnabled: false,
         autoRefreshIntervalMin: 30,
         createdAt: now,
         updatedAt: now,
       })
       .returning({ id: shops.id })
-      .all();
+      ;
     activeShopId = inserted[0].id;
   }
 
-  const existingSettings = db
+  const [existingSettings] = await db
     .select({ id: userSettings.id })
     .from(userSettings)
     .where(eq(userSettings.userId, userId))
-    .get();
+    ;
   if (existingSettings) {
-    db.update(userSettings)
+    await db.update(userSettings)
       .set({ activeShopId, updatedAt: now })
       .where(eq(userSettings.userId, userId))
-      .run();
+      ;
   } else {
-    db.insert(userSettings)
+    await db.insert(userSettings)
       .values({ userId, activeShopId, updatedAt: now })
-      .run();
+      ;
   }
   return activeShopId;
 }
@@ -246,11 +246,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       | typeof workspaceInvites.$inferSelect
       | null = null;
     if (inviteToken) {
-      const inv = db
+      const [inv] = await db
         .select()
         .from(workspaceInvites)
         .where(eq(workspaceInvites.token, inviteToken))
-        .get();
+        ;
       if (!inv)
         return c.json({ error: "Приглашение не найдено" }, 404);
       if (inv.usedAt)
@@ -270,21 +270,21 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         return c.json({ error: "Название команды не длиннее 80 символов" }, 400);
     }
 
-    const existing = db
+    const [existing] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.email, parsed.email))
-      .get();
+      ;
     if (existing) return c.json({ error: "Этот email уже зарегистрирован" }, 409);
 
     const passwordHash = await hashPassword(parsed.password);
     const now = new Date();
-    const defaultTax = readDefaultTaxSettings(db);
+    const defaultTax = await readDefaultTaxSettings(db);
 
     // user → (workspace + owner-membership + default shop) OR (join via invite),
     // atomically.
-    const userId = db.transaction((tx) => {
-      const u = tx
+    const userId = await db.transaction(async (tx) => {
+      const [u] = await tx
         .insert(users)
         .values({
           email: parsed.email,
@@ -296,12 +296,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
           createdAt: now,
           updatedAt: now,
         })
-        .returning({ id: users.id })
-        .get();
+        .returning({ id: users.id });
 
       if (invite) {
         // Join existing workspace via invite.
-        tx.insert(workspaceMembers)
+        await tx.insert(workspaceMembers)
           .values({
             workspaceId: invite.workspaceId,
             userId: u.id,
@@ -309,26 +308,26 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
             status: "active",
             createdAt: now,
           })
-          .run();
-        tx.update(workspaceInvites)
+          ;
+        await tx.update(workspaceInvites)
           .set({ usedAt: now })
           .where(eq(workspaceInvites.token, invite.token))
-          .run();
-        const firstShop = tx
+          ;
+        const [firstShop] = await tx
           .select({ id: shops.id })
           .from(shops)
           .where(eq(shops.workspaceId, invite.workspaceId))
-          .get();
-        tx.insert(userSettings)
+          ;
+        await tx.insert(userSettings)
           .values({
             userId: u.id,
             activeShopId: firstShop?.id ?? null,
             updatedAt: now,
           })
-          .run();
+          ;
       } else {
         const slug = buildPersonalSlug(parsed.email, u.id);
-        const ws = tx
+        const [ws] = await tx
           .insert(workspaces)
           .values({
             name: workspaceName,
@@ -337,9 +336,9 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
             updatedAt: now,
           })
           .returning({ id: workspaces.id })
-          .get();
+          ;
 
-        tx.insert(workspaceMembers)
+        await tx.insert(workspaceMembers)
           .values({
             workspaceId: ws.id,
             userId: u.id,
@@ -347,9 +346,9 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
             status: "active",
             createdAt: now,
           })
-          .run();
+          ;
 
-        const shop = tx
+        const [shop] = await tx
           .insert(shops)
           .values({
             workspaceId: ws.id,
@@ -363,16 +362,16 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
             updatedAt: now,
           })
           .returning({ id: shops.id })
-          .get();
+          ;
 
-        tx.insert(userSettings)
+        await tx.insert(userSettings)
           .values({ userId: u.id, activeShopId: shop.id, updatedAt: now })
-          .run();
+          ;
 
         // Seed default chat channel for this new workspace. Idempotent — the
         // migration also seeds for existing workspaces, but runtime-created
         // workspaces need this here.
-        ensureDefaultChannel(tx as unknown as DB, ws.id, u.id, now);
+        await ensureDefaultChannel(tx as unknown as DB, ws.id, u.id, now);
       }
 
       return u.id;
@@ -386,10 +385,10 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       );
     }
 
-    const { token } = createVerificationToken(db, userId);
+    const { token } = await createVerificationToken(db, userId);
     const verifyLink = `${resolveAppUrl(c)}/verify-email?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(
+      (await getEmailClient()).send(
         generateVerificationEmail(parsed.email, verifyLink),
       );
     } catch (e) {
@@ -412,36 +411,36 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     if (typeof r.token !== "string" || !r.token)
       return c.json({ error: "Не указан токен" }, 400);
 
-    const consumed = consumeVerificationToken(db, r.token);
+    const consumed = await consumeVerificationToken(db, r.token);
     if (!consumed) return c.json({ error: "Неверный или просроченный токен" }, 400);
 
     const now = new Date();
-    db.update(users)
+    await db.update(users)
       .set({ isVerified: true, updatedAt: now })
       .where(eq(users.id, consumed.userId))
-      .run();
+      ;
 
-    const row = db
+    const [row] = await db
       .select()
       .from(users)
       .where(eq(users.id, consumed.userId))
-      .get();
+      ;
     if (!row) return c.json({ error: "Пользователь не найден" }, 404);
 
-    ensurePersonalWorkspace(db, row.id, row.email);
+    await ensurePersonalWorkspace(db, row.id, row.email);
 
-    const { sessionId, expiresAt } = createSession(db, row.id);
+    const { sessionId, expiresAt } = await createSession(db, row.id);
     setSessionCookie(c, sessionId, expiresAt);
 
     // Re-read membership info into a SessionUser shape for the response.
-    const member = db
+    const [member] = await db
       .select({
         workspaceId: workspaceMembers.workspaceId,
         role: workspaceMembers.role,
       })
       .from(workspaceMembers)
       .where(eq(workspaceMembers.userId, row.id))
-      .get();
+      ;
     return c.json({
       user: publicUser({
         id: row.id,
@@ -472,11 +471,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     // allowed. Default is the workspace SPA scope.
     const scope: AppScope = readAppScope(c) ?? "workspace";
 
-    const row = db
+    const [row] = await db
       .select()
       .from(users)
       .where(eq(users.email, parsed.email))
-      .get();
+      ;
     if (!row) return c.json({ error: "Неверный email или пароль" }, 401);
 
     const ok = await verifyPassword(parsed.password, row.passwordHash);
@@ -510,23 +509,23 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         403,
       );
 
-    const member = db
+    const [member] = await db
       .select({
         workspaceId: workspaceMembers.workspaceId,
         role: workspaceMembers.role,
       })
       .from(workspaceMembers)
       .where(eq(workspaceMembers.userId, row.id))
-      .get();
+      ;
 
     // Block non-sysadmin members of a suspended workspace at the door.
     // Sysadmins aren't in workspaces and stay reachable for re-enabling.
     if (!row.isSysadmin && member) {
-      const ws = db
+      const [ws] = await db
         .select({ suspendedAt: workspaces.suspendedAt })
         .from(workspaces)
         .where(eq(workspaces.id, member.workspaceId))
-        .get();
+        ;
       if (ws?.suspendedAt)
         return c.json(
           {
@@ -537,7 +536,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         );
     }
 
-    const { sessionId, expiresAt } = createSession(db, row.id);
+    const { sessionId, expiresAt } = await createSession(db, row.id);
     setSessionCookie(c, sessionId, expiresAt, scope);
     return c.json({
       user: publicUser({
@@ -558,7 +557,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     const scope: AppScope = readAppScope(c) ?? "workspace";
     const cookieName = cookieNameForScope(scope);
     const sid = getCookie(c, cookieName);
-    if (sid) deleteSession(db, sid);
+    if (sid) await deleteSession(db, sid);
     deleteCookie(c, cookieName, { path: "/" });
     return c.json({ message: "logged out" });
   });
@@ -590,10 +589,10 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
     }
 
     const now = new Date();
-    db.update(users)
+    await db.update(users)
       .set({ ...parsed, updatedAt: now })
       .where(eq(users.id, user.id))
-      .run();
+      ;
 
     return c.json({
       user: publicUser({
@@ -629,16 +628,16 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       return c.json({ error: "Некорректный email" }, 400);
     const email = r.email.trim().toLowerCase();
 
-    const row = db.select().from(users).where(eq(users.email, email)).get();
+    const [row] = await db.select().from(users).where(eq(users.email, email));
     // No row, blocked, or unverified → return generic OK without sending.
     // Unverified accounts must finish the verification flow first; sending a
     // reset link would let an attacker bypass verification entirely.
     if (!row || row.isBlocked || !row.isVerified) return c.json(FORGOT_OK);
 
-    const { token } = createPasswordResetToken(db, row.id);
+    const { token } = await createPasswordResetToken(db, row.id);
     const resetLink = `${resolveAppUrl(c)}/reset-password?token=${encodeURIComponent(token)}`;
     try {
-      await getEmailClient().send(generatePasswordResetEmail(row.email, resetLink));
+      (await getEmailClient()).send(generatePasswordResetEmail(row.email, resetLink));
     } catch (e) {
       console.error("[auth] failed to send password reset email:", e);
     }
@@ -648,7 +647,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
   app.get("/reset-password/:token", async (c) => {
     const token = c.req.param("token");
     if (!token) return c.json({ error: "Не указан токен" }, 400);
-    const status = checkPasswordResetToken(db, token);
+    const status = await checkPasswordResetToken(db, token);
     if (!status.ok) {
       const msg =
         status.reason === "expired"
@@ -677,7 +676,7 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
         400,
       );
 
-    const status = checkPasswordResetToken(db, r.token);
+    const status = await checkPasswordResetToken(db, r.token);
     if (!status.ok) {
       const msg =
         status.reason === "expired"
@@ -688,11 +687,11 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
       return c.json({ error: msg }, 400);
     }
 
-    const target = db
+    const [target] = await db
       .select()
       .from(users)
       .where(eq(users.id, status.userId))
-      .get();
+      ;
     if (!target)
       return c.json({ error: "Пользователь не найден" }, 404);
     if (target.isBlocked)
@@ -703,13 +702,13 @@ export function authRoutes(db: DB): Hono<AuthEnv> {
 
     const passwordHash = await hashPassword(r.password);
     const now = new Date();
-    db.update(users)
+    await db.update(users)
       .set({ passwordHash, updatedAt: now })
       .where(eq(users.id, target.id))
-      .run();
-    consumePasswordResetToken(db, r.token);
+      ;
+    await consumePasswordResetToken(db, r.token);
     // Revoke all existing sessions: the user is logging in fresh.
-    db.delete(sessions).where(eq(sessions.userId, target.id)).run();
+    await db.delete(sessions).where(eq(sessions.userId, target.id));
 
     return c.json({
       message:

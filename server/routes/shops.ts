@@ -13,6 +13,7 @@ import {
   workspaceMembers,
 } from "../db/schema";
 import type { DB } from "../db/client";
+import { isUniqueViolation } from "../lib/pgErrors";
 import type { SessionUser } from "../auth/utils";
 import type { TaxSettings } from "../../src/types";
 import { readDefaultTaxSettings } from "../settings/defaults";
@@ -272,11 +273,10 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       }
       return c.json(await buildOut(db, inserted[0], user), 201);
     } catch (e) {
-      const msg = (e as Error).message;
-      if (msg.includes("UNIQUE")) {
+      if (isUniqueViolation(e)) {
         return c.json({ error: "shortName already used" }, 409);
       }
-      return c.json({ error: msg }, 500);
+      return c.json({ error: (e as Error).message }, 500);
     }
   });
 
@@ -423,11 +423,10 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
     try {
       await db.update(shops).set(patch).where(eq(shops.id, id));
     } catch (e) {
-      const msg = (e as Error).message;
-      if (msg.includes("UNIQUE")) {
+      if (isUniqueViolation(e)) {
         return c.json({ error: "shortName already used" }, 409);
       }
-      return c.json({ error: msg }, 500);
+      return c.json({ error: (e as Error).message }, 500);
     }
 
     const [row] = await db.select().from(shops).where(eq(shops.id, id));
@@ -700,7 +699,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       .select({ n: sql<number>`count(*)` })
       .from(shops)
       .where(eq(shops.workspaceId, user.workspaceId));
-    if (total <= 1) {
+    if (Number(total) <= 1) {
       return c.json({ error: "cannot delete the only shop" }, 400);
     }
 
@@ -709,7 +708,7 @@ export function shopsRoutes(db: DB): Hono<ShopsEnv> {
       .where(
         and(eq(shops.id, id), eq(shops.workspaceId, user.workspaceId)),
       );
-    if (result.changes === 0) return c.json({ error: "not found" }, 404);
+    if ((result.rowCount ?? 0) === 0) return c.json({ error: "not found" }, 404);
 
     const [settings] = await db
       .select()

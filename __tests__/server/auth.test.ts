@@ -18,10 +18,10 @@ import {
 
 describe("auth routes", () => {
   let env: TestEnv;
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   describe("POST /api/auth/register", () => {
     it("creates an unverified user + workspace + owner membership + default shop", async () => {
@@ -38,51 +38,51 @@ describe("auth routes", () => {
       const body = await res.json();
       expect(body.message).toMatch(/подтверд/i);
 
-      const user = env.db
+      const [user] = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "foo@bar.com"))
-        .get();
+        ;
       expect(user).toBeTruthy();
       expect(user!.isVerified).toBe(false);
       expect(user!.isSysadmin).toBe(false);
       expect(user!.passwordHash).not.toBe("password123");
 
       // Workspace created with the supplied name.
-      const ws = env.db
+      const [ws] = await env.db
         .select()
         .from(workspaces)
         .where(eq(workspaces.name, "Acme Trading"))
-        .get();
+        ;
       expect(ws).toBeTruthy();
       expect(ws!.slug).toBe(`foo-${user!.id}`);
 
       // Owner membership.
-      const member = env.db
+      const [member] = await env.db
         .select()
         .from(workspaceMembers)
         .where(eq(workspaceMembers.userId, user!.id))
-        .get();
+        ;
       expect(member?.role).toBe("owner");
       expect(member?.workspaceId).toBe(ws!.id);
 
       // Default shop in the workspace.
-      const wsShops = env.db
+      const wsShops = await env.db
         .select()
         .from(shops)
         .where(eq(shops.workspaceId, ws!.id))
-        .all();
+        ;
       expect(wsShops).toHaveLength(1);
       expect(wsShops[0].name).toBe("Мой магазин");
 
       // Verification email + token.
       expect(env.emails).toHaveLength(1);
       expect(env.emails[0].to).toBe("foo@bar.com");
-      const tokens = env.db
+      const tokens = await env.db
         .select()
         .from(emailVerificationTokens)
         .where(eq(emailVerificationTokens.userId, user!.id))
-        .all();
+        ;
       expect(tokens).toHaveLength(1);
     });
 
@@ -169,9 +169,9 @@ describe("auth routes", () => {
       expect(b.status).toBe(409);
 
       // 409 must not leak a second workspace/membership.
-      const wsRows = env.db.select().from(workspaces).all();
+      const wsRows = await env.db.select().from(workspaces);
       expect(wsRows).toHaveLength(1);
-      const members = env.db.select().from(workspaceMembers).all();
+      const members = await env.db.select().from(workspaceMembers);
       expect(members).toHaveLength(1);
     });
   });
@@ -187,7 +187,7 @@ describe("auth routes", () => {
           workspaceName: "VeeTeam",
         }),
       });
-      const tokenRow = env.db.select().from(emailVerificationTokens).get();
+      const [tokenRow] = await env.db.select().from(emailVerificationTokens);
       expect(tokenRow).toBeTruthy();
 
       const res = await env.app.request("/api/auth/verify-email", {
@@ -203,21 +203,18 @@ describe("auth routes", () => {
       expect(body.user.workspaceRole).toBe("owner");
       expect(res.headers.get("set-cookie")).toMatch(/ozon_calc_session=/);
 
-      const user = env.db
+      const [user] = await env.db
         .select()
         .from(users)
         .where(eq(users.email, "v@x.com"))
-        .get();
+        ;
       expect(user!.isVerified).toBe(true);
 
-      const remaining = env.db.select().from(emailVerificationTokens).all();
+      const remaining = await env.db.select().from(emailVerificationTokens);
       expect(remaining).toHaveLength(0);
 
       // No duplicate workspace from ensurePersonalWorkspace safety-net.
-      const wsCount = env.db
-        .select()
-        .from(workspaces)
-        .all().length;
+      const wsCount = (await env.db.select().from(workspaces)).length;
       expect(wsCount).toBe(1);
     });
 
@@ -231,13 +228,13 @@ describe("auth routes", () => {
     });
 
     it("rejects expired token", async () => {
-      const userId = createUserDirect(env.db, "exp@x.com", "password123");
-      env.db
+      const userId = await createUserDirect(env.db, "exp@x.com", "password123");
+      await env.db
         .update(users)
         .set({ isVerified: false })
         .where(eq(users.id, userId))
-        .run();
-      env.db
+        ;
+      await env.db
         .insert(emailVerificationTokens)
         .values({
           token: "expired-tok",
@@ -245,7 +242,7 @@ describe("auth routes", () => {
           expiresAt: new Date(Date.now() - 1000),
           createdAt: new Date(Date.now() - 10000),
         })
-        .run();
+        ;
       const res = await env.app.request("/api/auth/verify-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -257,16 +254,16 @@ describe("auth routes", () => {
 
   describe("POST /api/auth/login", () => {
     it("issues a session cookie for verified user", async () => {
-      createUserDirect(env.db, "u@x.com", "password123");
+      await createUserDirect(env.db, "u@x.com", "password123");
       const cookie = await loginAndGetCookie(env.app, "u@x.com", "password123");
       expect(cookie).toMatch(/^ozon_calc_session=/);
 
-      const sess = env.db.select().from(sessions).all();
+      const sess = await env.db.select().from(sessions);
       expect(sess).toHaveLength(1);
     });
 
     it("returns 401 on wrong password (no enumeration of email existence)", async () => {
-      createUserDirect(env.db, "u@x.com", "password123");
+      await createUserDirect(env.db, "u@x.com", "password123");
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -284,8 +281,8 @@ describe("auth routes", () => {
     });
 
     it("returns 403 when email is not verified", async () => {
-      const id = createUserDirect(env.db, "u@x.com", "password123");
-      env.db.update(users).set({ isVerified: false }).where(eq(users.id, id)).run();
+      const id = await createUserDirect(env.db, "u@x.com", "password123");
+      await env.db.update(users).set({ isVerified: false }).where(eq(users.id, id));
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -295,8 +292,8 @@ describe("auth routes", () => {
     });
 
     it("returns 403 when account is blocked", async () => {
-      const id = createUserDirect(env.db, "blocked@x.com", "password123");
-      env.db.update(users).set({ isBlocked: true }).where(eq(users.id, id)).run();
+      const id = await createUserDirect(env.db, "blocked@x.com", "password123");
+      await env.db.update(users).set({ isBlocked: true }).where(eq(users.id, id));
       const res = await env.app.request("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -310,7 +307,7 @@ describe("auth routes", () => {
 
   describe("GET /api/auth/me", () => {
     it("returns current user when cookie is valid", async () => {
-      createUserDirect(env.db, "u@x.com", "password123", "admin");
+      await createUserDirect(env.db, "u@x.com", "password123", "admin");
       const cookie = await loginAndGetCookie(
         env.app,
         "u@x.com",
@@ -337,16 +334,16 @@ describe("auth routes", () => {
 
   describe("POST /api/auth/logout", () => {
     it("deletes session and clears cookie", async () => {
-      createUserDirect(env.db, "u@x.com", "password123");
+      await createUserDirect(env.db, "u@x.com", "password123");
       const cookie = await loginAndGetCookie(env.app, "u@x.com", "password123");
-      expect(env.db.select().from(sessions).all()).toHaveLength(1);
+      expect(await env.db.select().from(sessions)).toHaveLength(1);
 
       const res = await env.app.request("/api/auth/logout", {
         method: "POST",
         headers: { Cookie: cookie },
       });
       expect(res.status).toBe(200);
-      expect(env.db.select().from(sessions).all()).toHaveLength(0);
+      expect(await env.db.select().from(sessions)).toHaveLength(0);
 
       // Subsequent /me should now 401.
       const me = await env.app.request("/api/auth/me", {

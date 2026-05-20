@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { financeTransactions } from "../../server/db/schema";
+import { eq } from "drizzle-orm";
+import {
+  financeTransactions,
+  users,
+  workspaceMembers,
+  workspaces,
+} from "../../server/db/schema";
 import {
   createShopFor,
   loginAs,
@@ -52,11 +58,11 @@ describe("multi-tenant workspace isolation", () => {
   let bob: Awaited<ReturnType<typeof loginAs>>;
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     alice = await loginAs(env, "alice@test.local", "password");
     bob = await loginAs(env, "bob@test.local", "password");
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   const headersFor = (cookie: string) => ({
     "Content-Type": "application/json",
@@ -105,7 +111,7 @@ describe("multi-tenant workspace isolation", () => {
   });
 
   it("two shops in the SAME workspace can hold the same articleId", async () => {
-    const shop2 = createShopFor(env.db, alice.userId, {
+    const shop2 = await createShopFor(env.db, alice.userId, {
       name: "Shop 2",
       shortName: "S2",
     });
@@ -131,7 +137,7 @@ describe("multi-tenant workspace isolation", () => {
   });
 
   it("finance routes scope by workspace", async () => {
-    env.db
+    await env.db
       .insert(financeTransactions)
       .values({
         shopId: alice.shopId,
@@ -146,8 +152,8 @@ describe("multi-tenant workspace isolation", () => {
         type: "sale",
         raw: {},
       })
-      .run();
-    env.db
+      ;
+    await env.db
       .insert(financeTransactions)
       .values({
         shopId: bob.shopId,
@@ -162,7 +168,7 @@ describe("multi-tenant workspace isolation", () => {
         type: "sale",
         raw: {},
       })
-      .run();
+      ;
 
     const aliceRows = (await (
       await env.app.request("/api/finance/transactions", {
@@ -197,20 +203,22 @@ describe("multi-tenant workspace isolation", () => {
     expect(res.status).toBe(404);
   });
 
-  it("cascade delete user removes workspace_members but keeps the workspace", () => {
+  it("cascade delete user removes workspace_members but keeps the workspace", async () => {
     // 1 user = 1 workspace today, but workspaces are first-class — they don't
     // disappear when the last member leaves (Stage 4 multi-member workspaces
     // would orphan everyone's data otherwise). The user's membership row is
     // cascaded; sysadmin can clean up empty workspaces separately.
-    env.sqlite.prepare("DELETE FROM users WHERE id = ?").run(alice.userId);
+    await env.db.delete(users).where(eq(users.id, alice.userId));
 
-    const memberAfter = env.sqlite
-      .prepare("SELECT * FROM workspace_members WHERE user_id = ?")
-      .all(alice.userId);
+    const memberAfter = await env.db
+      .select()
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.userId, alice.userId));
     expect(memberAfter).toHaveLength(0);
-    const wsRow = env.sqlite
-      .prepare("SELECT id FROM workspaces WHERE id = ?")
-      .get(alice.workspaceId);
+    const [wsRow] = await env.db
+      .select({ id: workspaces.id })
+      .from(workspaces)
+      .where(eq(workspaces.id, alice.workspaceId));
     expect(wsRow).toBeDefined();
   });
 

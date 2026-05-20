@@ -1,8 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import pg from "pg";
 import bcrypt from "bcryptjs";
 import * as schema from "../../server/db/schema";
 import {
@@ -31,29 +29,79 @@ export const SAMPLE_TAX: TaxSettings = {
   partyExtraExpenses: 100,
 };
 
-export type DB = ReturnType<typeof drizzle<typeof schema>>;
+const TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL ??
+  "postgresql://postgres:dev_password_change_me@localhost:5433/ozon_calc_test";
+
+export type DB = NodePgDatabase<typeof schema>;
 
 export interface TestEnv {
   app: ReturnType<typeof buildApp>;
   db: DB;
-  sqlite: Database.Database;
+  pool: pg.Pool;
   emails: EmailMessage[];
 }
 
-/** Apply all migrations + seed tax settings. Mirrors `openDb` runtime path
- * but in :memory: for fast isolation between tests. */
-export function setupTestEnv(): TestEnv {
-  const sqlite = new Database(":memory:");
-  sqlite.pragma("foreign_keys = ON");
-  const migrationsDir = path.resolve(import.meta.dirname, "../../server/db/migrations");
-  for (const f of fs.readdirSync(migrationsDir).filter((x) => x.endsWith(".sql")).sort()) {
-    const sql = fs.readFileSync(path.join(migrationsDir, f), "utf8");
-    for (const stmt of sql.split("--> statement-breakpoint")) {
-      const trimmed = stmt.trim();
-      if (trimmed) sqlite.exec(trimmed);
-    }
+let cachedPool: pg.Pool | null = null;
+
+function getPool(): pg.Pool {
+  if (!cachedPool) {
+    cachedPool = new pg.Pool({ connectionString: TEST_DATABASE_URL, max: 4 });
   }
-  const db = drizzle(sqlite, { schema });
+  return cachedPool;
+}
+
+/** Список таблиц для TRUNCATE между тестами. Порядок не важен, потому что
+ *  RESTART IDENTITY CASCADE сама разруливает FK. ref_* НЕ чистим — тесты
+ *  не зависят от их содержимого (тесты, использующие ref_*, заполняют их
+ *  сами при необходимости). */
+const TRUNCATE_TABLES = [
+  "users",
+  "workspaces",
+  "workspace_members",
+  "workspace_invites",
+  "shops",
+  "shop_member",
+  "shop_user_settings",
+  "products",
+  "finance_transactions",
+  "import_runs",
+  "logistics_cluster_tariff_sets",
+  "logistics_cluster_tariffs",
+  "sessions",
+  "email_verification_tokens",
+  "password_reset_tokens",
+  "user_settings",
+  "smtp_settings",
+  "chat_channels",
+  "chat_channel_members",
+  "chat_messages",
+  "chat_channel_reads",
+  "chat_message_reactions",
+  "chat_message_mentions",
+  "chat_attachments",
+  "chat_calls",
+  "chat_call_participants",
+  "push_subscriptions",
+  "vapid_settings",
+  "ice_servers",
+  "ref_settings",
+  "ref_commissions",
+  "ref_storage",
+  "ref_logistics_tariffs",
+];
+
+/** Подготовить чистую базу + Hono-app + захват email'ов. */
+export async function setupTestEnv(): Promise<TestEnv> {
+  const pool = getPool();
+  const db = drizzle(pool, { schema });
+
+  // TRUNCATE всех таблиц — быстро и не требует пересоздания схемы.
+  await db.execute(
+    sql.raw(
+      `TRUNCATE TABLE ${TRUNCATE_TABLES.map((t) => `"${t}"`).join(", ")} RESTART IDENTITY CASCADE`,
+    ),
+  );
 
   const emails: EmailMessage[] = [];
   const mock: EmailClient = {
@@ -64,26 +112,26 @@ export function setupTestEnv(): TestEnv {
   setEmailClient(mock);
 
   const app = buildApp({ db });
-  return { app, db, sqlite, emails };
+  return { app, db, pool, emails };
 }
 
-export function teardownTestEnv(env: TestEnv): void {
+export async function teardownTestEnv(_env: TestEnv): Promise<void> {
   setEmailClient(null);
-  env.sqlite.close();
+  // Pool остаётся жив между тестами — закрытие в afterAll глобально (см. vitest globalTeardown).
 }
 
 /** Insert a verified user directly + auto-create their personal workspace as
  * owner. Returns the user id. The legacy `role` arg ("admin"|"user") still
  * exists for ergonomic test setup; "admin" maps to is_sysadmin=true. */
-export function createUserDirect(
+export async function createUserDirect(
   db: DB,
   email: string,
   password: string,
   role: "admin" | "user" = "user",
-): number {
+): Promise<number> {
   const now = new Date();
   const hash = bcrypt.hashSync(password, 4);
-  const result = db
+  const [u] = await db
     .insert(users)
     .values({
       email,
@@ -93,12 +141,11 @@ export function createUserDirect(
       createdAt: now,
       updatedAt: now,
     })
-    .returning({ id: users.id })
-    .get();
-  const userId = result.id;
+    .returning({ id: users.id });
+  const userId = u.id;
   const prefix = email.split("@")[0];
   const slug = `${prefix.replace(/\./g, "-").toLowerCase()}-${userId}`;
-  const ws = db
+  const [ws] = await db
     .insert(workspaces)
     .values({
       name: `Workspace ${prefix}`,
@@ -106,35 +153,31 @@ export function createUserDirect(
       createdAt: now,
       updatedAt: now,
     })
-    .returning({ id: workspaces.id })
-    .get();
-  db.insert(workspaceMembers)
-    .values({
-      workspaceId: ws.id,
-      userId,
-      role: "owner",
-      status: "active",
-      createdAt: now,
-    })
-    .run();
-  ensureDefaultChannel(db, ws.id, userId, now);
+    .returning({ id: workspaces.id });
+  await db.insert(workspaceMembers).values({
+    workspaceId: ws.id,
+    userId,
+    role: "owner",
+    status: "active",
+    createdAt: now,
+  });
+  await ensureDefaultChannel(db, ws.id, userId, now);
   return userId;
 }
 
 /** Look up the user's single workspace id. */
-export function workspaceIdOf(db: DB, userId: number): number {
-  const row = db
+export async function workspaceIdOf(db: DB, userId: number): Promise<number> {
+  const [row] = await db
     .select({ id: workspaceMembers.workspaceId })
     .from(workspaceMembers)
-    .where(eq(workspaceMembers.userId, userId))
-    .get();
+    .where(eq(workspaceMembers.userId, userId));
   if (!row) throw new Error(`no workspace for user ${userId}`);
   return row.id;
 }
 
 /** Create a shop in `userId`'s workspace with SAMPLE_TAX and set it as
  * active. Returns the shop's id. */
-export function createShopFor(
+export async function createShopFor(
   db: DB,
   userId: number,
   opts: {
@@ -146,10 +189,10 @@ export function createShopFor(
      * a shop created by another team member. */
     createdBy?: number;
   } = {},
-): number {
+): Promise<number> {
   const now = new Date();
-  const workspaceId = workspaceIdOf(db, userId);
-  const inserted = db
+  const workspaceId = await workspaceIdOf(db, userId);
+  const [inserted] = await db
     .insert(shops)
     .values({
       workspaceId,
@@ -163,29 +206,25 @@ export function createShopFor(
       createdAt: now,
       updatedAt: now,
     })
-    .returning({ id: shops.id })
-    .get();
-  const settings = db
+    .returning({ id: shops.id });
+  const [settings] = await db
     .select({ id: userSettings.id })
     .from(userSettings)
-    .where(eq(userSettings.userId, userId))
-    .get();
+    .where(eq(userSettings.userId, userId));
   if (settings) {
-    db.update(userSettings)
+    await db
+      .update(userSettings)
       .set({ activeShopId: inserted.id, updatedAt: now })
-      .where(eq(userSettings.userId, userId))
-      .run();
+      .where(eq(userSettings.userId, userId));
   } else {
-    db.insert(userSettings)
-      .values({ userId, activeShopId: inserted.id, updatedAt: now })
-      .run();
+    await db
+      .insert(userSettings)
+      .values({ userId, activeShopId: inserted.id, updatedAt: now });
   }
   return inserted.id;
 }
 
-/** Issue POST /api/auth/login and return Set-Cookie session token.
- * `scope` chooses which cookie/auth-scope the server returns; "sysadmin" sets
- * the sysadmin cookie and is required when `email` is a sysadmin account. */
+/** Issue POST /api/auth/login and return Set-Cookie session token. */
 export async function loginAndGetCookie(
   app: TestEnv["app"],
   email: string,
@@ -209,8 +248,7 @@ export async function loginAndGetCookie(
   return cookieValue;
 }
 
-/** Convenience: create user + workspace + default shop + login → return
- * cookie & ids + workspaceId. */
+/** Convenience: create user + workspace + default shop + login. */
 export async function loginAs(
   env: TestEnv,
   email: string,
@@ -222,28 +260,24 @@ export async function loginAs(
   shopId: number;
   workspaceId: number;
 }> {
-  const existing = env.db
+  const [existing] = await env.db
     .select({ id: users.id })
     .from(users)
-    .where(eq(users.email, email))
-    .get();
+    .where(eq(users.email, email));
   let userId: number;
   let shopId: number;
   if (existing) {
     userId = existing.id;
-    const wsId = workspaceIdOf(env.db, userId);
-    const existingShop = env.db
+    const wsId = await workspaceIdOf(env.db, userId);
+    const [existingShop] = await env.db
       .select({ id: shops.id })
       .from(shops)
-      .where(eq(shops.workspaceId, wsId))
-      .get();
-    shopId = existingShop?.id ?? createShopFor(env.db, userId);
+      .where(eq(shops.workspaceId, wsId));
+    shopId = existingShop?.id ?? (await createShopFor(env.db, userId));
   } else {
-    userId = createUserDirect(env.db, email, password, role);
-    shopId = createShopFor(env.db, userId);
+    userId = await createUserDirect(env.db, email, password, role);
+    shopId = await createShopFor(env.db, userId);
   }
-  // Admins log in via the sysadmin scope (sets the sysadmin cookie); regular
-  // users via the workspace scope.
   const cookie = await loginAndGetCookie(
     env.app,
     email,
@@ -254,29 +288,25 @@ export async function loginAs(
     cookie,
     userId,
     shopId,
-    workspaceId: workspaceIdOf(env.db, userId),
+    workspaceId: await workspaceIdOf(env.db, userId),
   };
 }
 
-/** Sync admin-cookie path for legacy tests. Returns the sysadmin cookie since
- * the workspace cookie now refuses to resolve a sysadmin user. */
-export function adminSessionCookie(env: TestEnv): string {
-  const userId = createUserDirect(
+/** Sync admin-cookie path for legacy tests. */
+export async function adminSessionCookie(env: TestEnv): Promise<string> {
+  const userId = await createUserDirect(
     env.db,
     "test-admin@example.com",
     "password",
     "admin",
   );
-  createShopFor(env.db, userId);
+  await createShopFor(env.db, userId);
   const sessionId = "test-admin-session";
-  env.db
-    .insert(sessions)
-    .values({
-      id: sessionId,
-      userId,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      createdAt: new Date(),
-    })
-    .run();
+  await env.db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt: new Date(Date.now() + 60 * 60_000),
+    createdAt: new Date(),
+  });
   return `ozon_calc_sysadmin_session=${sessionId}`;
 }

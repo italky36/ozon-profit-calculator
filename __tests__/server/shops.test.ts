@@ -21,10 +21,10 @@ describe("shops CRUD", () => {
   let alice: { cookie: string; userId: number; shopId: number };
 
   beforeEach(async () => {
-    env = setupTestEnv();
+    env = await setupTestEnv();
     alice = await loginAs(env, "alice@test.local", "password");
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   const headers = () => ({
     "Content-Type": "application/json",
@@ -127,11 +127,11 @@ describe("shops CRUD", () => {
     });
     expect(ok.status).toBe(204);
 
-    const after = env.db
+    const after = await env.db
       .select()
       .from(shops)
       .where(eq(shops.workspaceId, alice.workspaceId))
-      .all();
+      ;
     expect(after).toHaveLength(1);
   });
 
@@ -150,11 +150,10 @@ describe("shops CRUD", () => {
     });
     expect(res.status).toBe(200);
 
-    const [row] = env.db
+    const [row] = await env.db
       .select({ activeShopId: userSettings.activeShopId })
       .from(userSettings)
-      .where(eq(userSettings.userId, alice.userId))
-      .all();
+      .where(eq(userSettings.userId, alice.userId));
     expect(row.activeShopId).toBe(other.id);
   });
 
@@ -172,10 +171,10 @@ describe("shops CRUD", () => {
 describe("auth.verifyEmail autocreates a default shop", () => {
   let env: TestEnv;
 
-  beforeEach(() => {
-    env = setupTestEnv();
+  beforeEach(async () => {
+    env = await setupTestEnv();
   });
-  afterEach(() => teardownTestEnv(env));
+  afterEach(async () => await teardownTestEnv(env));
 
   it("registration → verify creates a 'Мой магазин' (M1) and sets active", async () => {
     const reg = await env.app.request("/api/auth/register", {
@@ -205,16 +204,14 @@ describe("auth.verifyEmail autocreates a default shop", () => {
     });
     expect(verify.status).toBe(200);
 
-    const created = env.db
-      .select()
-      .from(shops)
-      .all()
-      .find((s) => s.name === "Мой магазин");
+    const created = (await env.db.select().from(shops)).find(
+      (s) => s.name === "Мой магазин",
+    );
     expect(created?.shortName).toBe("M1");
-    const settings = env.db
+    const settings = await env.db
       .select({ activeShopId: userSettings.activeShopId })
       .from(userSettings)
-      .all();
+      ;
     expect(settings[0].activeShopId).toBe(created!.id);
   });
 });

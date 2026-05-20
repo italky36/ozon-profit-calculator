@@ -21,10 +21,10 @@ export function pushRoutes(db: DB): Hono<Env> {
   // Public-ish: returns the VAPID public key so the browser can call
   // pushManager.subscribe({ applicationServerKey }). Returns null when
   // push isn't configured — UI uses that to hide the toggle.
-  app.get("/public-key", (c) => {
+  app.get("/public-key", async (c) => {
     return c.json({
-      publicKey: getVapidPublicKey(),
-      configured: isPushConfigured(),
+      publicKey: await getVapidPublicKey(),
+      configured: await isPushConfigured(),
     });
   });
 
@@ -59,14 +59,13 @@ export function pushRoutes(db: DB): Hono<Env> {
         : null;
 
     const now = new Date();
-    const existing = await db
+    const [existing] = await db
       .select({
         id: pushSubscriptions.id,
         userId: pushSubscriptions.userId,
       })
       .from(pushSubscriptions)
-      .where(eq(pushSubscriptions.endpoint, endpoint))
-      .get();
+      .where(eq(pushSubscriptions.endpoint, endpoint));
     if (existing) {
       await db
         .update(pushSubscriptions)
@@ -121,7 +120,7 @@ export function pushRoutes(db: DB): Hono<Env> {
   // Useful for the UI «попробовать» button after opt-in.
   app.post("/test", async (c) => {
     const user = c.get("user");
-    if (!isPushConfigured()) {
+    if (!(await isPushConfigured())) {
       return c.json({ error: "push не настроен (нет VAPID-ключей)" }, 400);
     }
     const subs = await db

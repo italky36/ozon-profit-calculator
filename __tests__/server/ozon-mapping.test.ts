@@ -32,13 +32,13 @@ describe("parseOzonVat", () => {
     expect(parseOzonVat(input)).toBe(expected);
   });
 
-  it("falls back to 'Не облагается' for unknown", () => {
+  it("falls back to 'Не облагается' for unknown", async () => {
     expect(parseOzonVat("nonsense")).toBe("Не облагается");
   });
 });
 
 describe("computeVolumeL", () => {
-  it("converts mm dimensions to litres", () => {
+  it("converts mm dimensions to litres", async () => {
     const info = {
       dimensions: { depth: 100, height: 100, width: 100, dimension_unit: "mm" },
     } as OzonProductInfo;
@@ -46,14 +46,14 @@ describe("computeVolumeL", () => {
     expect(computeVolumeL(info)).toBeCloseTo(1, 5);
   });
 
-  it("converts cm dimensions to litres", () => {
+  it("converts cm dimensions to litres", async () => {
     const info = {
       dimensions: { depth: 10, height: 10, width: 10, dimension_unit: "cm" },
     } as OzonProductInfo;
     expect(computeVolumeL(info)).toBeCloseTo(1, 5);
   });
 
-  it("returns 0 on degenerate dimensions", () => {
+  it("returns 0 on degenerate dimensions", async () => {
     const info = {
       dimensions: { depth: 0, height: 100, width: 100, dimension_unit: "mm" },
     } as OzonProductInfo;
@@ -62,7 +62,7 @@ describe("computeVolumeL", () => {
 });
 
 describe("computeCurrentPriceAndDiscount", () => {
-  it("uses old_price → price strike-through when no marketing promo", () => {
+  it("uses old_price → price strike-through when no marketing promo", async () => {
     const r = computeCurrentPriceAndDiscount({
       price: "700",
       old_price: "1000",
@@ -73,7 +73,7 @@ describe("computeCurrentPriceAndDiscount", () => {
     expect(r.regularPrice).toBeNull();
   });
 
-  it("returns no discount when old_price equals price", () => {
+  it("returns no discount when old_price equals price", async () => {
     const r = computeCurrentPriceAndDiscount({
       price: "1000",
       old_price: "1000",
@@ -84,7 +84,7 @@ describe("computeCurrentPriceAndDiscount", () => {
     expect(r.regularPrice).toBeNull();
   });
 
-  it("returns no discount when old_price missing and no promo", () => {
+  it("returns no discount when old_price missing and no promo", async () => {
     const r = computeCurrentPriceAndDiscount({
       price: "1000",
       old_price: "0",
@@ -95,7 +95,7 @@ describe("computeCurrentPriceAndDiscount", () => {
     expect(r.regularPrice).toBeNull();
   });
 
-  it("takes marketing_seller_price directly + exposes sticker as regularPrice", () => {
+  it("takes marketing_seller_price directly + exposes sticker as regularPrice", async () => {
     // Real-world example: sticker 2990, sold for 1668 via "Эластичный бустинг".
     const r = computeCurrentPriceAndDiscount({
       price: 2990,
@@ -108,7 +108,7 @@ describe("computeCurrentPriceAndDiscount", () => {
     expect(r.regularPrice).toBe(2990);
   });
 
-  it("does not expose regularPrice when sticker equals marketing price", () => {
+  it("does not expose regularPrice when sticker equals marketing price", async () => {
     const r = computeCurrentPriceAndDiscount({
       price: 1500,
       old_price: 0,
@@ -119,7 +119,7 @@ describe("computeCurrentPriceAndDiscount", () => {
     expect(r.regularPrice).toBeNull();
   });
 
-  it("prefers marketing_seller_price over old_price strike-through", () => {
+  it("prefers marketing_seller_price over old_price strike-through", async () => {
     const r = computeCurrentPriceAndDiscount({
       price: 1000,
       old_price: 1200,
@@ -151,7 +151,7 @@ describe("mapCatalogEntry", () => {
     price: { price: "337000", old_price: "514000", currency_code: "RUB" },
   };
 
-  it("maps full record", () => {
+  it("maps full record", async () => {
     const m = mapCatalogEntry(info, price, undefined, lookup);
     expect(m.articleId).toBe("COFFEE-1");
     expect(m.ozonProductId).toBe(12345);
@@ -165,7 +165,7 @@ describe("mapCatalogEntry", () => {
     expect(m.costPrice).toBeNull();
   });
 
-  it("picks up net_price as costPrice when seller has filled it in LK", () => {
+  it("picks up net_price as costPrice when seller has filled it in LK", async () => {
     const m = mapCatalogEntry(
       info,
       {
@@ -178,7 +178,7 @@ describe("mapCatalogEntry", () => {
     expect(m.costPrice).toBe(200000);
   });
 
-  it("leaves costPrice null when net_price is 0", () => {
+  it("leaves costPrice null when net_price is 0", async () => {
     const m = mapCatalogEntry(
       info,
       {
@@ -191,14 +191,14 @@ describe("mapCatalogEntry", () => {
     expect(m.costPrice).toBeNull();
   });
 
-  it("handles missing price gracefully", () => {
+  it("handles missing price gracefully", async () => {
     const m = mapCatalogEntry(info, undefined, undefined, lookup);
     expect(m.patch.currentPrice).toBe(0);
     expect(m.patch.discountPercent).toBe(0);
     expect(m.costPrice).toBeNull();
   });
 
-  it("emits empty category names when lookup fails", () => {
+  it("emits empty category names when lookup fails", async () => {
     const m = mapCatalogEntry(
       { ...info, type_id: 99999 },
       price,
@@ -211,12 +211,12 @@ describe("mapCatalogEntry", () => {
 });
 
 describe("pickPublicSku", () => {
-  it("returns null when sources is missing or empty", () => {
+  it("returns null when sources is missing or empty", async () => {
     expect(pickPublicSku({ id: 1 } as OzonProductInfo)).toBeNull();
     expect(pickPublicSku({ id: 1, sources: [] } as OzonProductInfo)).toBeNull();
   });
 
-  it("prefers fbo over fbs", () => {
+  it("prefers fbo over fbs", async () => {
     const info = {
       id: 1,
       sources: [
@@ -227,7 +227,7 @@ describe("pickPublicSku", () => {
     expect(pickPublicSku(info)).toBe(111);
   });
 
-  it("falls back to fbs when fbo absent", () => {
+  it("falls back to fbs when fbo absent", async () => {
     const info = {
       id: 1,
       sources: [{ sku: 333, source: "fbs" }],
@@ -235,7 +235,7 @@ describe("pickPublicSku", () => {
     expect(pickPublicSku(info)).toBe(333);
   });
 
-  it("falls back to first valid sku for unknown source", () => {
+  it("falls back to first valid sku for unknown source", async () => {
     const info = {
       id: 1,
       sources: [
@@ -248,7 +248,7 @@ describe("pickPublicSku", () => {
 });
 
 describe("NEW_PRODUCT_DEFAULTS", () => {
-  it("provides all non-catalog fields with safe values", () => {
+  it("provides all non-catalog fields with safe values", async () => {
     expect(NEW_PRODUCT_DEFAULTS.salesPlan).toBe(0);
     expect(NEW_PRODUCT_DEFAULTS.costPrice).toBe(0);
     expect(NEW_PRODUCT_DEFAULTS.logisticsMode).toBe("Авто");
