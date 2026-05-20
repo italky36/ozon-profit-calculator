@@ -112,7 +112,9 @@ describe("finance import route + finance API", () => {
     const res = await app.request("/api/import/finance", {
       method: "POST",
       headers: headers(env.cookie),
-      body: JSON.stringify({ from: "2026-04-01", to: "2026-04-30" }),
+      // ≤27 дней — гарантирует один chunk в splitFinanceRange,
+      // чтобы mock не вызывался дважды.
+      body: JSON.stringify({ from: "2026-04-01", to: "2026-04-25" }),
     });
     expect(res.status).toBe(200);
     const { runId } = (await res.json()) as { runId: number };

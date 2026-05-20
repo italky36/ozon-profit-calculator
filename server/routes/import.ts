@@ -251,7 +251,11 @@ const toIsoStartOfDay = (s: string): string =>
 const toIsoEndOfDay = (s: string): string =>
   s.includes("T") ? s : `${s}T23:59:59.999Z`;
 
-/** Разбить ISO-период на чанки ≤ 30 дней inclusive (предел Ozon API). */
+/** Разбить ISO-период на чанки ≤ 27 дней inclusive. Ozon /v3/finance/transaction/list
+ *  возвращает 400 «too long period, only one month allowed» когда период
+ *  длиннее календарного месяца — а 30-дневное окно через границу короткого
+ *  месяца (февраль 28, 1 фев + 29 = 2 мар) считается «больше месяца». 27 дней
+ *  гарантированно короче любого месяца. */
 function splitFinanceRange(
   fromIso: string,
   toIso: string,
@@ -261,7 +265,7 @@ function splitFinanceRange(
   let chunkStart = new Date(fromIso);
   while (chunkStart <= final) {
     const chunkEnd = new Date(chunkStart);
-    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 29);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 26);
     chunkEnd.setUTCHours(23, 59, 59, 999);
     const actualEnd = chunkEnd > final ? final : chunkEnd;
     out.push({ from: chunkStart.toISOString(), to: actualEnd.toISOString() });
