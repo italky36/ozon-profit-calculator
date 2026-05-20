@@ -1,5 +1,6 @@
 import type {
   ProductInput,
+  References,
   VatRate,
   IncomingVatRate,
   AcceptanceTariff,
@@ -9,6 +10,7 @@ import type {
 import categories from "../data/categories.json";
 import lists from "../data/lists.json";
 import { OZON_CLUSTERS } from "../lib/clusters";
+import { findStorage, freeStorageDaysOf } from "../lib/calc/storage";
 import PercentInput from "./PercentInput";
 
 export type LockedField = "articleId" | "productName" | "category";
@@ -23,13 +25,25 @@ interface Props {
   value: ProductInput;
   onChange: (next: ProductInput) => void;
   lockedFields?: LockedField[];
+  /** Refs из API — нужны чтобы показать «Бесплатное хранение по таблице
+   *  Ozon». Если не передано, поле не рендерится. */
+  refs?: References | null;
 }
 
 const cats = categories as Record<string, string[]>;
 const num = (v: string) => (v === "" ? 0 : Number(v));
 const LOCK_TOOLTIP = "Данные из Ozon — только чтение";
 
-export default function ProductForm({ value, onChange, lockedFields = [] }: Props) {
+function pluralizeDay(n: number): string {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return "дней";
+  if (b > 1 && b < 5) return "дня";
+  if (b === 1) return "день";
+  return "дней";
+}
+
+export default function ProductForm({ value, onChange, lockedFields = [], refs = null }: Props) {
   const locked = (k: LockedField): boolean => lockedFields.includes(k);
   const set = <K extends keyof ProductInput>(key: K, v: ProductInput[K]) =>
     onChange({ ...value, [key]: v });
@@ -220,6 +234,63 @@ export default function ProductForm({ value, onChange, lockedFields = [] }: Prop
             </select>
           </label>
         </div>
+        {refs && (() => {
+          const row = findStorage(refs.storage, value.category, value.productType);
+          const effective = freeStorageDaysOf(
+            row,
+            value.isFireHazard,
+            value.isKgt,
+            value.isKazakhstan,
+          );
+          const overdue = Math.max(value.plannedStorageDays - effective, 0);
+          const flag = value.isFireHazard
+            ? "пожароопасный"
+            : value.isKgt
+              ? "КГТ"
+              : value.isKazakhstan
+                ? "Казахстан"
+                : null;
+          return (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "8px 12px",
+                fontSize: 12,
+                background: "var(--surface-muted, #f8fafc)",
+                border: "1px solid var(--border-soft, #e2e8f0)",
+                borderRadius: 6,
+                color: "var(--muted)",
+                lineHeight: 1.5,
+              }}
+              title="Берётся из ref_storage по category × productType. Если plannedStorageDays > этого числа — за каждый «лишний» день начисляется storageRub (объём × ставка ₽/л/день)."
+            >
+              <div>
+                <b>Бесплатное хранение по таблице Ozon:</b> {effective} {pluralizeDay(effective)}
+                {flag && (
+                  <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                    (вариант «{flag}»)
+                  </span>
+                )}
+                {!row && !value.isFireHazard && (
+                  <span style={{ marginLeft: 6, color: "var(--err)" }}>
+                    — не нашли в таблице для этой категории
+                  </span>
+                )}
+              </div>
+              {overdue > 0 ? (
+                <div>
+                  План {value.plannedStorageDays} − бесплатно {effective} ={" "}
+                  <b>{overdue} {pluralizeDay(overdue)}</b> платно → влияет на «Хранение FBO»
+                </div>
+              ) : (
+                <div>
+                  План {value.plannedStorageDays} ≤ бесплатно {effective} →{" "}
+                  <b>«Хранение FBO» = 0</b>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </fieldset>
 
       <fieldset>

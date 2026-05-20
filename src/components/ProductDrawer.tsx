@@ -159,7 +159,7 @@ export default function ProductDrawer({ input, result, onChange, onClose, fromOz
               )}
             </section>
           )}
-          <ProductForm value={input} onChange={onChange} lockedFields={lockedFields} />
+          <ProductForm value={input} onChange={onChange} lockedFields={lockedFields} refs={refs ?? null} />
           {"error" in result ? (
             <section className="card" style={{ borderColor: "#FFB3B3", background: "#FEEFEF" }}>
               <h3 style={{ margin: "0 0 8px", color: "var(--err)" }}>Ошибка расчёта</h3>
