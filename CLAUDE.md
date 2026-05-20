@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Калькулятор прибыли продавца Ozon — full-stack приложение: фронт React + TypeScript + Vite, бэкенд Node + Hono + Drizzle поверх SQLite. Сравнивает три схемы поставки (FBO / FBS / realFBS) по марже, рентабельности и налогам, импортирует каталог и финансы из Ozon Seller API, считает «прогноз vs факт» по реальным операциям. Подробные формулы — в `README.md`. Описание UI — в `UI.md`.
+Калькулятор прибыли продавца Ozon — full-stack приложение: фронт React + TypeScript + Vite, бэкенд Node + Hono + Drizzle поверх **Postgres 16**. Сравнивает три схемы поставки (FBO / FBS / realFBS) по марже, рентабельности и налогам, импортирует каталог и финансы из Ozon Seller API, считает «прогноз vs факт» по реальным операциям. Подробные формулы — в `README.md`. Описание UI — в `UI.md`. Прод-инфра / деплой / бэкапы — раздел «Деплой» ниже.
 
 ## Commands
 
@@ -20,14 +20,21 @@ npm run build             # tsc -b → vite build (web) → vite build (sysadmin
 npm run build:web         # только основной SPA
 npm run build:sysadmin    # только sysadmin SPA
 npm run lint              # eslint .
-npm test                  # vitest run (180 тестов)
+npm test                  # vitest run (~400 тестов; требует локальный Postgres — см. ниже)
 npm run test:watch        # vitest в watch-режиме
+npm start                 # tsx server/index.ts (прод-entrypoint, используется в Docker)
 
-# DB (Drizzle + better-sqlite3, файл data/app.db)
+# DB (Drizzle + node-postgres, локально через docker)
+docker run -d --name ozon-pg -p 5433:5432 \
+  -e POSTGRES_PASSWORD=dev_password_change_me \
+  -e POSTGRES_DB=ozon_calc postgres:16-alpine
+# и отдельная база для тестов (TRUNCATE между файлами):
+docker exec ozon-pg createdb -U postgres ozon_calc_test
 npm run db:generate       # drizzle-kit generate (после правки server/db/schema.ts)
-npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует)
+npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует
+                          #   в `initDb()` / в entrypoint Docker через scripts/migrate.mts)
 npm run db:seed           # первый sysadmin + его workspace + дефолтный shop (M1)
-npm run db:extract        # Excel → SQLite ref_* таблицы
+npm run db:extract        # Excel → ref_* таблицы Postgres
                           # путь к Excel: EXTRACT_SOURCE=… npm run db:extract
 
 # Таргетные тесты
@@ -36,12 +43,21 @@ npx vitest run -t "matches Excel reference within tolerance"
 npx vitest run __tests__/server/         # все backend-тесты
 ```
 
+Переменные окружения: `DATABASE_URL` (прод/dev), `TEST_DATABASE_URL` (тесты — указывает на `ozon_calc_test`). Дефолты в `.env.example`.
+
 ## Запуск с нуля
 
-1. `cp .env.example .env`. Настроить SMTP-параметры (или оставить пустыми — письма пойдут в stdout) и `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого sysadmin.
-2. `npm run db:seed` — создаст `data/app.db`, засеет первого **sysadmin** (если таблица `users` пуста) + его workspace («Admin workspace») + дефолтный shop «Мой магазин (M1)». Sysadmin живёт без рабочей команды; обычные юзеры регистрируются через `/register` и сами создают workspace.
-3. `npm run db:extract` — наполнит `ref_*` справочники из Excel (требуется `C:/Users/admin/Downloads/Техника — копия2.xlsx` или `EXTRACT_SOURCE=…`).
-4. `npm run dev`. Workspace-SPA на `localhost:5173`, API на `3001`, **sysadmin-консоль на `localhost:5174` отдельно** (sysadmin-юзера в основной SPA не пускает — там redirect-экран). Войти sysadmin'у на `localhost:5174/`, остальным — на `localhost:5173/login`.
+1. `cp .env.example .env`. Настроить `ADMIN_EMAIL`/`ADMIN_PASSWORD` для первого sysadmin. SMTP в `.env` **не нужен** — он настраивается через sysadmin UI после первого входа (таблица `smtp_settings`). Без SMTP письма уйдут в stdout (dev-fallback).
+2. Поднять локальный Postgres + создать БД:
+   ```bash
+   docker run -d --name ozon-pg -p 5433:5432 \
+     -e POSTGRES_PASSWORD=dev_password_change_me \
+     -e POSTGRES_DB=ozon_calc postgres:16-alpine
+   docker exec ozon-pg createdb -U postgres ozon_calc_test
+   ```
+3. `npm run db:seed` — применит миграции (в `initDb()` внутри seed), засеет первого **sysadmin** (если таблица `users` пуста) + его workspace + дефолтный shop «Мой магазин (M1)». Sysadmin живёт без рабочей команды; обычные юзеры регистрируются через `/register` и сами создают workspace.
+4. `npm run db:extract` — наполнит `ref_*` справочники из Excel (требуется `C:/Users/admin/Downloads/Техника — копия2.xlsx` или `EXTRACT_SOURCE=…`).
+5. `npm run dev`. Workspace-SPA на `localhost:5173`, API на `3001`, **sysadmin-консоль на `localhost:5174` отдельно** (sysadmin-юзера в основной SPA не пускает — там redirect-экран). Войти sysadmin'у на `localhost:5174/`, остальным — на `localhost:5173/login`.
 
 ## Architecture
 
@@ -50,23 +66,24 @@ npx vitest run __tests__/server/         # все backend-тесты
 | Слой | Технология |
 |---|---|
 | Фронт | React 19 + Vite 8 + TypeScript |
-| Бэкенд | Hono 4 + @hono/node-server |
+| Бэкенд | Hono 4 + @hono/node-server (+ @hono/node-ws для чата/звонков) |
 | ORM | Drizzle 0.45 + drizzle-kit 0.31 |
-| БД | SQLite через better-sqlite3 12 (файл `data/app.db`) |
+| БД | **Postgres 16** через `drizzle-orm/node-postgres` + `pg.Pool` |
 | Auth | Session cookies (HTTP-only) + `sessions` таблица; bcrypt-пароли, email-верификация, `users.is_sysadmin` для платформенных операторов + `workspace_members.role` (owner/manager/member) для команд |
-| Тесты | Vitest 4 (calc unit + Hono integration через `app.request()`) |
+| Тесты | Vitest 4 (calc unit + Hono integration через `app.request()`; общий pg.Pool, TRUNCATE между файлами, `singleFork`) |
+| Прод | Docker Compose на VPS: Caddy (TLS) + app (Node) + postgres:16-alpine. CI/CD через GitHub Actions на push в `main`. См. раздел «Деплой». |
 
 ### Поток данных (frontend)
 
 На монтаже `App.tsx` параллельно запрашивает `GET /api/refs` и `GET /api/shops`, затем `GET /api/products`. Хранит state: `shops: Shop[]`, `activeShopId`, `shopFilter` (null = «Все магазины»). `taxSettings` для каждой строки резолвится через `taxByShop = Map<shopId, TaxSettings>` (вычисляется из `shops`); в calc-loop'е — `calculateRow(row.input, taxByShop.get(row.shopId)!, refs, { ozonCommissions })`. Мутации (`addRow`/`updateRow`/`removeRow`/`bulk*`) делают optimistic update с откатом на ошибке через `api.products.*`. При смене активного магазина — debounced `PUT /api/settings?shopId=…` сохраняет TaxSettings конкретного магазина, и `GET /api/refs?shopId=…` обновляет cluster-tariffs (зависит от выбранного у магазина набора).
 
 **Хранилище**:
-- **Бизнес-данные** (магазины, товары, налоги/auto-refresh внутри магазина, Ozon-креды, наборы тарифов, финтранзакции, импорты) — единственный source of truth это SQLite (`data/app.db`).
-- **UI-preferences** — в `localStorage`, ключи `ozon-calc.tweaks` (TweaksPanel: цвет акцента, density, unitMode и т.п.), `ozon-calc.actuals` (галка «Сравнить с фактом» + период), `ozon-calc.activeShopId` (последний выбранный магазин для UX). Их сброс не трогает данные. **Не клади бизнес-данные в localStorage** — для них всегда SQLite + миграция.
+- **Бизнес-данные** (магазины, товары, налоги/auto-refresh внутри магазина, Ozon-креды, наборы тарифов, финтранзакции, импорты, чат-сообщения с FTS) — единственный source of truth это **Postgres**. Локально dev — Docker `ozon-pg:5433`; в проде — отдельный контейнер `db` в Compose с named volume `pg_data`.
+- **UI-preferences** — в `localStorage`, ключи `ozon-calc.tweaks` (TweaksPanel: цвет акцента, density, unitMode и т.п.), `ozon-calc.actuals` (галка «Сравнить с фактом» + период), `ozon-calc.activeShopId` (последний выбранный магазин для UX). Их сброс не трогает данные. **Не клади бизнес-данные в localStorage** — для них всегда Postgres + миграция.
 
 ### Поток данных (backend)
 
-Скрипт `extract-data.mjs` читает Excel и пишет в `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`, плюс наполняет таблицу `logistics_cluster_tariffs` через **глобальный набор тарифов** (см. ниже). `seed.mjs` создаёт первого админа и его дефолтный магазин «Мой магазин (M1)». На рантайме Hono читает Drizzle-модели и отдаёт JSON; при импорте Ozon Seller API наполняет `products.*`, `products.ozon_commissions`, `finance_transactions`, `import_runs` — всё в контексте конкретного магазина (`shop_id`). `server/index.ts` — единая точка сборки приложения через `buildApp({ db?, importContext? })`, что позволяет тестам подменять БД на `:memory:` и Ozon-клиент на mock.
+Скрипт `extract-data.mjs` читает Excel и пишет в `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`, плюс наполняет таблицу `logistics_cluster_tariffs` через **глобальный набор тарифов** (см. ниже). `seed.mjs` создаёт первого админа и его дефолтный магазин «Мой магазин (M1)». На рантайме Hono читает Drizzle-модели через `pg.Pool` и отдаёт JSON; при импорте Ozon Seller API наполняет `products.*`, `products.ozon_commissions`, `finance_transactions`, `import_runs` — всё в контексте конкретного магазина (`shop_id`). `server/index.ts` — единая точка сборки приложения через `buildApp({ db?, importContext? })`, что позволяет тестам подменять БД на отдельную тестовую (`ozon_calc_test` с TRUNCATE между файлами) и Ozon-клиент на mock.
 
 ### Engine (`src/lib/calc/`)
 
@@ -212,7 +229,7 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
 - Все ставки и доли — в долях (`0.05`, не `5%`). На UI выводятся через `Intl.NumberFormat({ style: 'percent' })`.
 - `redemptionPercent` хранится как целое (0–100), `returnPercentInt = 100 − redemptionPercent`. Несколько формул (`maxLoss`, `ozonReturnServices`, realFBS-доставка) используют именно `returnPercentInt / 100`, не `returnPercent` как долю — следи за этим при правках.
 - Отрицательный налог в УСН Д−Р обрезается до 0 через `Math.max(0, ...)` в `tax.ts`.
-- `vatRate` и `clustersCount` хранятся в SQLite как `text` (так как union типы `"Не облагается" | 0.05 | … ` и `number | "Считать без наценки"` не ложатся в один SQL-тип). Маппинг — в `server/routes/products.ts:dbToRow`.
+- `vatRate` и `clustersCount` хранятся в Postgres как `text` (так как union типы `"Не облагается" | 0.05 | … ` и `number | "Считать без наценки"` не ложатся в один SQL-тип). Маппинг — в `server/routes/products.ts:dbToRow`.
 
 ### Справочники и каскадные селекты
 
@@ -233,13 +250,14 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
 
 ### Acceptance-тест как контракт
 
-`__tests__/calc.test.ts` импортирует JSON-справочники из `src/data/*.json` напрямую (минуя SQLite) и прогоняет эталон «кофемашина» с допуском ±500 ₽. Любые изменения формул проверяй именно этим тестом — он соответствует Excel-расчёту, который пользователь считает источником истины. Если поменялась структура `commissions.json` / `storage.json` / `logisticsTariffs.json` (например, после повторного запуска `extract-data.mjs` поверх обновлённого Excel), тест упадёт первым. JSON-файлы в `src/data/` живут в репо именно ради этого теста — фронт их больше не импортирует.
+`__tests__/calc.test.ts` импортирует JSON-справочники из `src/data/*.json` напрямую (минуя Postgres) и прогоняет эталон «кофемашина» с допуском ±500 ₽. Любые изменения формул проверяй именно этим тестом — он соответствует Excel-расчёту, который пользователь считает источником истины. Если поменялась структура `commissions.json` / `storage.json` / `logisticsTariffs.json` (например, после повторного запуска `extract-data.mjs` поверх обновлённого Excel), тест упадёт первым. JSON-файлы в `src/data/` живут в репо именно ради этого теста — фронт их больше не импортирует.
 
 ### Backend-структура
 
-- `server/db/schema.ts` — Drizzle-схема. Ключевые таблицы: `workspaces` (с `logo_data_url`, `use_logo_as_app_icon`), `workspace_members`, `workspace_invites`, `users` (с `is_sysadmin`, `is_blocked`, `full_name` NOT NULL DEFAULT '', `job_title`, `avatar_data_url`; без `role`), `sessions`, `email_verification_tokens`, `smtp_settings`, `shops` (со `workspace_id`, без `user_id`), `shop_member`, `shop_user_settings`, `products` (PK/UNIQUE `(shop_id, user_id, article_id)`), `finance_transactions` (PK `(shop_id, user_id, operation_id)`), `import_runs` (с audit `user_id` + scope), `user_settings`, `logistics_cluster_tariff_sets` (со `workspace_id`), `logistics_cluster_tariffs`, `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`. Удалены в ходе SaaS-миграций: `shop_access` (0020), `api_credentials` (0018), `users.role` (0019).
-- `server/db/client.ts` — `openDb({ dbPath })` с auto-migrate, lazy singleton `getDb()` для прода.
-- `server/db/migrations/` — генерится через `drizzle-kit generate`. Применяются при старте сервера и в скриптах через `migrate()` из `drizzle-orm/better-sqlite3/migrator` (единый трекер `__drizzle_migrations`). SaaS-миграции: `0019_workspaces`, `0020_workspace_cutover`, `0021_shop_assignment_and_overrides`. Профиль-миграции: `0026_user_profile` (full_name/job_title/avatar_data_url + backfill full_name из email-префикса), `0027_workspace_logo_as_app_icon`.
+- `server/db/schema.ts` — Drizzle-схема (под Postgres). Ключевые таблицы: `workspaces` (с `logo_data_url`, `use_logo_as_app_icon`), `workspace_members`, `workspace_invites`, `users` (с `is_sysadmin`, `is_blocked`, `full_name` NOT NULL DEFAULT '', `job_title`, `avatar_data_url`; без `role`), `sessions`, `email_verification_tokens`, `smtp_settings`, `shops` (со `workspace_id`, без `user_id`), `shop_member`, `shop_user_settings`, `products` (PK/UNIQUE `(shop_id, user_id, article_id)`), `finance_transactions` (PK `(shop_id, user_id, operation_id)`), `import_runs` (с audit `user_id` + scope), `user_settings`, `logistics_cluster_tariff_sets` (со `workspace_id`), `logistics_cluster_tariffs`, чат-таблицы (`chat_channels`, `chat_messages` с `tsvector`+GIN, `chat_attachments`, `chat_calls`, …), `push_subscriptions`, `vapid_settings`, `ice_servers`, `ref_commissions`, `ref_storage`, `ref_logistics_tariffs`, `ref_settings`.
+- `server/db/client.ts` — `openDb({ databaseUrl })` с auto-migrate через `migrate()` из `drizzle-orm/node-postgres/migrator`, lazy singleton `getDb()` для прода. Async-API: `await initDb()` перед монтированием роутов.
+- `server/db/migrations/` — pg-миграции, генерится через `drizzle-kit generate` (драйвер настроен в `drizzle.config.ts`). Применяются при старте сервера в `initDb()` и в Docker-entrypoint отдельным шагом через `scripts/migrate.mts` (нужен, чтобы `seed.mjs` не падал на пустой схеме). Старые SQLite-миграции лежат в `server/db/migrations.sqlite-legacy/` — не активны, оставлены как исторический след.
+- `server/lib/pgErrors.ts` — helpers `isUniqueViolation` / `isForeignKeyViolation` (SQLSTATE 23505 / 23503). Рекурсивно ныряют в `.cause`, потому что drizzle оборачивает низкоуровневую `pg`-ошибку в `DrizzleQueryError`. Используй их в роутах вместо текстового матчинга по message.
 - `server/middleware/session.ts` — `sessionMiddleware(db)` читает cookie + грузит user в context, `requireAuth` / `requireSysadmin` — гейты для роутов; `canManageWorkspace(role)` для owner/manager-only мутаций; `userCanAccessShop` / `visibleShopIds` для scoped reads.
 - `server/auth/utils.ts` — bcrypt hash/compare, генерация токенов, CRUD сессий и email-токенов; `SessionUser` несёт `fullName / jobTitle / avatarDataUrl`. `server/email/{client,templates}.ts` — nodemailer + dev-fallback в stdout (шаблоны `verifyEmail`, `inviteEmail`, `passwordReset`); шаблоны теперь принимают **готовую ссылку**, а не токен — построение ссылки на стороне роута (см. `server/lib/appUrl.ts`).
 - `server/lib/` — переиспользуемые валидаторы / билдеры между роутами:
@@ -306,6 +324,28 @@ UI: `src/components/TariffSetsControl.tsx` рендерится в секции 
 - Три проекта в composite-сборке: `tsconfig.app.json` (фронт, jsx, dom), `tsconfig.node.json` (vite.config.ts), `server/tsconfig.json` (бэк, без dom).
 - `verbatimModuleSyntax: true`, `noUnusedLocals/Parameters: true`, `resolveJsonModule: true`, `erasableSyntaxOnly: true`. Импорты типов нужно явно помечать `import type { ... }`. Параметровые свойства (`constructor(public x)`) запрещены — assign-ить вручную.
 - `npm run build` запускает `tsc -b` перед `vite build` — сначала проверяй типы, потом продакшн-сборку.
+
+### Деплой и прод-инфра
+
+**Локальная инфра.** Только Postgres-контейнер (`ozon-pg:5433` через docker), всё остальное — `npm run dev`. Тесты ходят в отдельную базу `ozon_calc_test` через `TEST_DATABASE_URL`; `__tests__/server/_helpers.ts` держит shared `pg.Pool`, между файлами делает TRUNCATE (порядок не важен — RESTART IDENTITY CASCADE). Vitest сериализован: `singleFork` + `fileParallelism: false` в `vitest.config.ts`.
+
+**Прод.** VPS (`72.56.9.220`, см. memory `reference_prod_infra.md`), стек в `/opt/profitcontrol/` через Docker Compose. Три контейнера:
+- `caddy:2-alpine` — TLS автоматом через Let's Encrypt, два сайта (`app.profitcontrol.io`, `su.profitcontrol.io`), каждый: `/api/*` → `app:3001` (с WebSocket Upgrade для чата/звонков), `/*` → статика из shared volume.
+- `app` — сборка из репо (`Dockerfile` multi-stage: builder делает `npm ci && npm run build`, runner оставляет `dist/` + prod-deps + `tsx`). Запускается через `npm start` = `tsx server/index.ts`.
+- `db` — `postgres:16-alpine` с named volume `pg_data`. Наружу не торчит.
+
+**Entrypoint app** (`docker-entrypoint.sh`):
+1. `pg_isready` — ждёт Postgres.
+2. Синкает `dist/` → shared volumes `static_main` и `static_sysadmin` (Caddy читает их read-only).
+3. `npx tsx scripts/migrate.mts` — применяет новые миграции **до** seed.
+4. `node scripts/seed.mjs` — идемпотентен, создаёт первого sysadmin если `users` пуст.
+5. `exec "$@"` → `tsx server/index.ts`.
+
+**CI/CD** (`.github/workflows/deploy.yml`). На push в `main`: job `test` (postgres-service + `npm ci` + `tsx scripts/migrate.mts` + `npm run lint` + `npm test` + `npm run build`) → job `deploy` (SSH через `appleboy/ssh-action`, secrets `DEPLOY_HOST`/`USER`/`SSH_KEY`) → `git fetch origin main && git reset --hard origin/main && docker compose up -d --build`. `concurrency: deploy-prod` чтобы push'ы не сцеплялись. Миграции накатываются автоматом в entrypoint при перезапуске app.
+
+**Бэкапы** (`scripts/backup-db.sh`). Cron на хосте `0 3 * * *` запускает `docker compose exec -T db pg_dump | gzip` в `/var/backups/profitcontrol/db-YYYYMMDD-HHMMSS.sql.gz`, retention 14 дней через `find -mtime`. Лог — `/var/log/profitcontrol-backup.log`. Restore: `gunzip -c <dump> | docker compose exec -T db psql -U app -d ozon_calc` (после `docker compose stop app`).
+
+**Что НЕ настроено в проде:** GHCR (сборка пока на сервере, ест 3-5 мин CPU при каждом деплое), внешний бэкап на S3/ноут, мониторинг/uptime, ROW-LEVEL SECURITY на shops/products/finance_transactions, шифрование Ozon-credentials at-rest (`shops.ozon_*` всё ещё plain text — см. memory `project_postgres_and_encryption.md`).
 
 ### Соглашения для PR / автоматизации
 

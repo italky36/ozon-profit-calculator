@@ -2,7 +2,7 @@
 
 Full-stack приложение для расчёта маржинальности и налогов продавца на
 Ozon: фронт на React + TypeScript + Vite, бэкенд на Node + Hono + Drizzle
-поверх SQLite. Сравнивает три схемы поставки одновременно — **FBO**,
+поверх **Postgres 16**. Сравнивает три схемы поставки одновременно — **FBO**,
 **FBS**, **realFBS** — по марже, рентабельности к себестоимости и плановой
 прибыли, импортирует каталог и финансы из Ozon Seller API и считает
 «прогноз vs факт» по реальным транзакциям. **SaaS-режим**: регистрация
@@ -17,11 +17,12 @@ sysadmin-консоль вынесена в отдельный SPA.
 
 - React 19 + TypeScript (фронт)
 - Vite 8 (dev server, prod-сборка)
-- Hono 4 + @hono/node-server (бэкенд API)
-- Drizzle 0.45 + better-sqlite3 12 (ORM + БД `data/app.db`)
-- bcrypt + сессионные cookie (auth), nodemailer (email)
-- Vitest 4 (юнит-тесты движка + integration-тесты бэка через `app.request()`)
+- Hono 4 + @hono/node-server + @hono/node-ws (бэкенд API + WebSocket для чата/звонков)
+- Drizzle 0.45 + `drizzle-orm/node-postgres` поверх Postgres 16 (`pg.Pool`)
+- bcrypt + сессионные cookie (auth), nodemailer (email), web-push (VAPID)
+- Vitest 4 (юнит-тесты движка + integration-тесты бэка через `app.request()`, общий pg.Pool с TRUNCATE между файлами)
 - xlsx (только в скрипте извлечения справочников)
+- **Прод**: Docker Compose на VPS (Caddy + app + postgres:16), CI/CD через GitHub Actions, ежедневный `pg_dump` в cron
 
 ## Структура
 
@@ -73,9 +74,11 @@ src/                          фронт (React)
   App.tsx                     корень (state магазинов, products, refs, calc-loop через useMemo)
 server/                       бэкенд (Hono + Drizzle)
   db/
-    schema.ts                 Drizzle-схема (workspaces, shop_member, shop_user_settings, …)
-    client.ts                 openDb({ dbPath }) + auto-migrate, getDb() singleton
-    migrations/               .sql миграции из drizzle-kit (0001…0027)
+    schema.ts                 Drizzle-схема под Postgres (workspaces, shop_member, shop_user_settings, chat_*, push_subscriptions, …)
+    client.ts                 openDb({ databaseUrl }) + auto-migrate, getDb()/initDb() singleton
+    migrations/               .sql миграции из drizzle-kit (PG)
+    migrations.sqlite-legacy/ старые SQLite-миграции, не активны — оставлены как исторический след
+  lib/pgErrors.ts             isUniqueViolation / isForeignKeyViolation (SQLSTATE 23505/23503)
   routes/                     по роуту на тему: auth, admin, workspace, refs, shops,
                               products, settings, credentials, import, finance, analytics
   middleware/session.ts       sessionMiddleware + requireAuth/requireSysadmin +
@@ -98,9 +101,15 @@ __tests__/
   server/*.test.ts            integration-тесты бэка (products, finance, import, shops, profile,
                               email-links, credentials-isolation, multitenant, shop-assignment, …)
 scripts/
-  extract-data.mjs            Excel → SQLite ref_* + cluster-тарифы (через глобальный набор)
+  extract-data.mjs            Excel → Postgres ref_* + cluster-тарифы (через глобальный набор)
   seed.mjs                    первый sysadmin + его workspace + дефолтный shop «Мой магазин (M1)»
-data/app.db                   SQLite (создаётся миграцией, в репо не лежит)
+  migrate.mts                 CLI для применения миграций (используется в Docker entrypoint)
+  backup-db.sh                pg_dump в /var/backups/profitcontrol/ — ставится в cron на прод-сервере
+Dockerfile                    multi-stage сборка прод-образа app
+docker-compose.yml            прод-стек (caddy + app + postgres:16-alpine)
+Caddyfile                     роутинг app.profitcontrol.io / su.profitcontrol.io
+docker-entrypoint.sh          wait-postgres → sync статика → migrate → seed → tsx server/index.ts
+.github/workflows/deploy.yml  CI/CD на push в main
 ```
 
 ## Что сделано
@@ -108,7 +117,7 @@ data/app.db                   SQLite (создаётся миграцией, в 
 ### 1. Извлечение справочников из Excel
 
 Скрипт `scripts/extract-data.mjs` читает `Техника — копия2.xlsx` и
-наполняет SQLite:
+наполняет Postgres:
 
 - `EXPORT_commissions` → `ref_commissions` со структурой
   `{ key, category, productType, fbo, fbs, realFbs }`, где каждая схема —
@@ -480,25 +489,79 @@ npm run build             # tsc -b + vite build (web) + vite build (sysadmin)
 npm run build:web         # только основной SPA
 npm run build:sysadmin    # только sysadmin SPA
 npm run lint              # eslint .
-npm test                  # vitest run (180 тестов)
+npm test                  # vitest run (~400 тестов; нужен запущенный Postgres — см. ниже)
 npm run test:watch        # vitest в watch-режиме
+npm start                 # tsx server/index.ts (прод-entrypoint, используется в Docker)
 
 # БД
 npm run db:generate       # drizzle-kit generate после правок server/db/schema.ts
-npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует)
+npm run db:migrate        # drizzle-kit migrate (обычно не нужно — runtime сам мигрирует
+                          #   через initDb() / в Docker entrypoint через scripts/migrate.mts)
 npm run db:seed           # первый sysadmin + workspace + дефолтный shop «Мой магазин (M1)»
-npm run db:extract        # Excel → SQLite ref_* + глобальный набор cluster-тарифов
+npm run db:extract        # Excel → Postgres ref_* + глобальный набор cluster-тарифов
                           # (EXTRACT_SOURCE=… npm run db:extract — кастомный путь к xlsx)
 ```
 
 Первый запуск:
 
 1. `cp .env.example .env` — настроить `ADMIN_EMAIL/ADMIN_PASSWORD` для
-   первого sysadmin'а и SMTP (или оставить пустым — письма пойдут в stdout).
-2. `npm run db:seed`.
-3. `npm run db:extract`.
-4. `npm run dev` → sysadmin идёт на `http://localhost:5174/`,
+   первого sysadmin'а. SMTP в `.env` не нужен — настраивается через
+   sysadmin UI после первого входа (без SMTP письма уйдут в stdout).
+2. Поднять локальный Postgres и тестовую базу:
+   ```bash
+   docker run -d --name ozon-pg -p 5433:5432 \
+     -e POSTGRES_PASSWORD=dev_password_change_me \
+     -e POSTGRES_DB=ozon_calc postgres:16-alpine
+   docker exec ozon-pg createdb -U postgres ozon_calc_test
+   ```
+3. `npm run db:seed` (применит миграции внутри `initDb()` + создаст
+   первого sysadmin'а если таблица `users` пуста).
+4. `npm run db:extract`.
+5. `npm run dev` → sysadmin идёт на `http://localhost:5174/`,
    обычные юзеры регистрируются на `http://localhost:5173/register`.
+
+## Деплой и прод
+
+Прод живёт на VPS как Docker Compose стек: `caddy:2-alpine` (TLS автоматом
+через Let's Encrypt) + `app` (multi-stage Node-образ из `Dockerfile`) +
+`postgres:16-alpine`. Два домена через Caddy: основной SPA + API на
+`app.<host>`, sysadmin SPA + API на `su.<host>`. Caddy сам проксирует
+`/api/*` на `app:3001` (с поддержкой WebSocket для чата/звонков) и
+раздаёт статику обоих SPA из shared volumes.
+
+**Развёртывание с нуля на сервере** (Docker уже стоит):
+
+```bash
+git clone <repo-url> /opt/profitcontrol && cd /opt/profitcontrol
+cp .env.production.example .env   # и заполнить пароли
+docker compose up -d --build
+```
+
+`docker-entrypoint.sh` в контейнере app сам делает: ждёт Postgres →
+синкает `dist/` в shared volumes → `tsx scripts/migrate.mts` → `node
+scripts/seed.mjs` → стартует сервер. Caddy на первом старте получает
+сертификаты Let's Encrypt (домены должны указывать на сервер).
+
+**CI/CD** (`.github/workflows/deploy.yml`). На push в `main`:
+
+1. **test**: postgres-service, `npm ci`, `tsx scripts/migrate.mts`,
+   `npm run lint`, `npm test`, `npm run build`.
+2. **deploy** (если test зелёный): SSH через `appleboy/ssh-action` на
+   сервер, `git reset --hard origin/main && docker compose up -d --build`.
+
+Требуются 3 GH secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`.
+Миграции автоматически накатываются в entrypoint при перезапуске app.
+
+**Бэкапы** (`scripts/backup-db.sh`). На прод-сервере ставится в cron:
+
+```
+0 3 * * * /opt/profitcontrol/scripts/backup-db.sh >> /var/log/profitcontrol-backup.log 2>&1
+```
+
+Делает `docker compose exec db pg_dump | gzip -9` в
+`/var/backups/profitcontrol/db-YYYYMMDD-HHMMSS.sql.gz`, retention 14
+дней. Restore: `gunzip -c <dump> | docker compose exec -T db psql -U
+app -d ozon_calc` (после `docker compose stop app`).
 
 ## Замечания по форматированию
 
