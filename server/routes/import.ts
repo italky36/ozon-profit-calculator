@@ -13,6 +13,7 @@ import {
   resolveShopId,
   visibleShopIds,
 } from "../middleware/session";
+import { extractPgErrorMessage } from "../lib/pgErrors";
 import { createOzonClient, resolveCredentials, type OzonClient } from "../ozon/client";
 import {
   getCategoryLookup,
@@ -440,7 +441,7 @@ export function importRoutes(
           .set({
             status: "error",
             finishedAt: new Date(),
-            errorMessage: (e as Error).message,
+            errorMessage: extractPgErrorMessage(e),
           })
           .where(eq(importRuns.id, run.id));
       }
@@ -582,7 +583,7 @@ export function importRoutes(
           .set({
             status: "error",
             finishedAt: new Date(),
-            errorMessage: (e as Error).message,
+            errorMessage: extractPgErrorMessage(e),
           })
           .where(eq(importRuns.id, run.id));
       }

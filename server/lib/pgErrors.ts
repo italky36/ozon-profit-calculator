@@ -7,6 +7,39 @@ interface PgErrorLike {
   code?: string;
   cause?: unknown;
   message?: string;
+  detail?: string;
+  column?: string;
+  constraint?: string;
+  table?: string;
+}
+
+/** Спуститься по цепочке `.cause` до первого узла с реальным pg-кодом
+ *  (5-символьный SQLSTATE). Если нет — вернуть исходный объект, чтобы
+ *  у вызывающей стороны был хоть какой-то message. */
+function unwrapPgError(e: unknown): PgErrorLike | null {
+  if (e == null || typeof e !== "object") return null;
+  const err = e as PgErrorLike;
+  if (typeof err.code === "string" && err.code.length === 5) return err;
+  if (err.cause) {
+    const inner = unwrapPgError(err.cause);
+    if (inner) return inner;
+  }
+  return err;
+}
+
+/** Достать человекочитаемое сообщение из ошибки drizzle/pg.
+ *  Drizzle оборачивает pg-ошибку в DrizzleQueryError, чей `.message` —
+ *  «Failed query: <SQL>». Реальная причина — в `.cause`. Возвращаем
+ *  message+detail+SQLSTATE без SQL-портянки. */
+export function extractPgErrorMessage(e: unknown): string {
+  const pg = unwrapPgError(e);
+  if (!pg) return String(e);
+  const parts: string[] = [];
+  if (pg.message) parts.push(pg.message);
+  if (pg.detail) parts.push(pg.detail);
+  if (pg.code) parts.push(`SQLSTATE ${pg.code}`);
+  // Fallback на исходный message если ничего полезного не извлекли.
+  return parts.join(" — ") || (e as Error).message || String(e);
 }
 
 /** True для нарушения unique-constraint (SQLSTATE 23505). Срабатывает и на
