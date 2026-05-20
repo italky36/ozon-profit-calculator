@@ -1,0 +1,1 @@
+ALTER TABLE "finance_transactions" ALTER COLUMN "operation_id" SET DATA TYPE bigint;

@@ -431,7 +431,10 @@ export const financeTransactions = pgTable(
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    operationId: integer("operation_id").notNull(),
+    // bigint mode:"number" — operation_id Ozon > 2^31 (видели 49_475_106_820).
+    // PK по (shopId, userId, operationId) — изменение типа колонки не ломает
+    // primaryKey constraint, drizzle-kit делает ALTER COLUMN ... SET DATA TYPE.
+    operationId: bigint("operation_id", { mode: "number" }).notNull(),
     operationType: text("operation_type").notNull(),
     operationDate: timestamp("operation_date", { withTimezone: true, mode: "date" }).notNull(),
     postingNumber: text("posting_number"),
